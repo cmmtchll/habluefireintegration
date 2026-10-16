@@ -6,14 +6,14 @@ rules:
     status: exempt
     comment: The integration does not poll the adapter; its timer only expires stale MQTT availability.
   brands:
-    status: todo
-    comment: No BlueFire brand image asset is currently included in this repository.
+    status: done
+    comment: The integration provides a local HACS brand icon at custom_components/bluefire/brand/icon.png.
   common-modules:
     status: done
     comment: Frame parsing and the MQTT bridge are centralized in custom_components/bluefire/telemetry.py.
   config-flow-test-coverage:
-    status: todo
-    comment: Config-flow tests exist, but there is no coverage measurement or full coverage threshold.
+    status: done
+    comment: tests/test_config_flow.py covers every config flow line, and CI enforces 100 percent coverage for custom_components/bluefire/config_flow.py.
   config-flow:
     status: done
     comment: UI setup and reconfiguration forms are implemented in custom_components/bluefire/config_flow.py and translated in custom_components/bluefire/strings.json.
@@ -87,8 +87,8 @@ rules:
     status: exempt
     comment: The integration currently uses no credentials or authenticated external service.
   test-coverage:
-    status: todo
-    comment: The test suite has no measured integration coverage or enforced 95 percent threshold.
+    status: done
+    comment: CI measures all integration modules and enforces at least 96 percent coverage using requirements-dev.txt and .github/workflows/validate.yml.
   devices:
     status: done
     comment: The diagnostic sensor is associated with a config-entry device in custom_components/bluefire/sensor.py.

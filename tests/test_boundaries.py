@@ -8,6 +8,8 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from custom_components.bluefire import (
+    CONFIG_SCHEMA,
+    async_setup,
     async_remove_entry,
     async_setup_entry,
     async_unload_entry,
@@ -22,6 +24,105 @@ def module(name, **attributes):
 
 class BoundaryError(Exception):
     pass
+
+
+class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.services = {}
+
+        def register_service(domain, name, handler, **kwargs):
+            self.services[name] = handler
+
+        self.service_registration = Mock(side_effect=register_service)
+        self.runtime = SimpleNamespace(inspecting=False, services=[])
+        self.entry = SimpleNamespace(
+            domain="bluefire",
+            state="loaded",
+            runtime_data=self.runtime,
+            data={"address": "AA:BB:CC:DD:EE:01"},
+        )
+        self.hass = SimpleNamespace(
+            config_entries=SimpleNamespace(
+                async_get_entry=Mock(return_value=self.entry)
+            ),
+            services=SimpleNamespace(async_register=self.service_registration),
+        )
+        self.config_schema = Mock(side_effect=lambda config: config)
+        cv = module(
+            "homeassistant.helpers.config_validation",
+            string=str,
+            config_entry_only_config_schema=Mock(
+                return_value=self.config_schema
+            ),
+        )
+        self.modules = patch.dict(sys.modules, {
+            "homeassistant": module("homeassistant"),
+            "homeassistant.config_entries": module(
+                "homeassistant.config_entries",
+                ConfigEntryState=SimpleNamespace(LOADED="loaded"),
+            ),
+            "homeassistant.core": module(
+                "homeassistant.core",
+                SupportsResponse=SimpleNamespace(ONLY="only"),
+            ),
+            "homeassistant.exceptions": module(
+                "homeassistant.exceptions",
+                ServiceValidationError=BoundaryError,
+            ),
+            "homeassistant.helpers": module(
+                "homeassistant.helpers", config_validation=cv
+            ),
+            "homeassistant.helpers.config_validation": cv,
+        })
+        self.modules.start()
+        self.addCleanup(self.modules.stop)
+
+    def test_yaml_schema_is_limited_to_config_entries(self):
+        config = {"bluefire": {}}
+        self.assertEqual(CONFIG_SCHEMA(config), config)
+        self.config_schema.assert_called_once_with(config)
+
+    async def asyncSetUp(self):
+        self.inspected = AsyncMock(return_value=[{"uuid": "service"}])
+        inspect_patch = patch.dict(sys.modules, {
+            "custom_components.bluefire.bluetooth": module(
+                "custom_components.bluefire.bluetooth",
+                async_inspect=self.inspected,
+            )
+        })
+        inspect_patch.start()
+        self.addCleanup(inspect_patch.stop)
+        await async_setup(self.hass, {})
+        self.inspect = self.services["inspect_adapter"]
+
+    async def test_inspection_returns_metadata_and_clears_busy_flag(self):
+        result = await self.inspect(
+            SimpleNamespace(data={"entry_id": "entry"})
+        )
+        self.assertEqual(
+            result,
+            {"status": "protocol_required", "services": [{"uuid": "service"}]},
+        )
+        self.inspected.assert_awaited_once_with(
+            self.hass, "AA:BB:CC:DD:EE:01"
+        )
+        self.assertFalse(self.runtime.inspecting)
+
+    async def test_inspection_rejects_non_loaded_entry(self):
+        self.entry.state = "not_loaded"
+        with self.assertRaisesRegex(BoundaryError, "loaded BlueFire"):
+            await self.inspect(SimpleNamespace(data={"entry_id": "entry"}))
+
+    async def test_inspection_rejects_concurrent_request(self):
+        self.runtime.inspecting = True
+        with self.assertRaisesRegex(BoundaryError, "already running"):
+            await self.inspect(SimpleNamespace(data={"entry_id": "entry"}))
+
+    async def test_inspection_clears_busy_flag_after_failure(self):
+        self.inspected.side_effect = BoundaryError("inspection failed")
+        with self.assertRaisesRegex(BoundaryError, "inspection failed"):
+            await self.inspect(SimpleNamespace(data={"entry_id": "entry"}))
+        self.assertFalse(self.runtime.inspecting)
 
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
