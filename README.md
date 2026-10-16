@@ -23,7 +23,7 @@ No Android gateway is required or planned.
   retained availability, freshness watchdog, durable discovery ownership,
   broker reconnect/birth handling, and non-retained live state.
 - Hardware-free unittest tests, real configuration-schema validation, and
-  repeatable PEP 8 checks.
+  repeatable PEP 8 checks plus a Home Assistant quality-scale checklist audit.
 
 The MQTT publisher is deliberately **not connected to BLE notifications yet**.
 BlueFire notification payloads are not assumed to be raw CAN frames.
@@ -335,7 +335,8 @@ From the repository root, run:
 ```sh
 python -m pip install -r "$PWD/requirements-dev.txt"
 python -m unittest discover -s "$PWD/tests" -v
-python -m pycodestyle "$PWD/custom_components" "$PWD/tests"
+python -m pycodestyle "$PWD/custom_components" "$PWD/tests" "$PWD/scripts"
+python "$PWD/scripts/quality_scale_audit.py"
 ```
 
 Use Python 3.12+ for these isolated checks; running the integration requires
@@ -352,3 +353,7 @@ BlueFire compatibility or replace testing in a running HA instance. Config-flow
 tests use HA's real schema library, Voluptuous, while mocking flow-manager
 helpers; it is supplied by HA in production. Development dependencies are pinned
 separately and do not add packages to the integration's runtime requirements.
+Pull requests also run the test suite and quality-scale audit, PEP 8 checks,
+HACS validation, and Home Assistant's hassfest validation. See
+[`QUALITY_SCALE.md`](QUALITY_SCALE.md) for the checklist's meaning and current
+limitations; an audit is not a quality-tier certification.
