@@ -92,6 +92,8 @@ broker is down is recorded in HA storage and retried on reconnect while HA is
 running. If HA restarts with no BlueFire entries left, pending cleanup resumes
 the next time BlueFire is set up. Do not delete that storage before cleanup.
 Discovery-prefix changes similarly withdraw the previous prefix's definitions.
+Cleanup requires broker-echo confirmation of the deletion messages, not just a
+successful return from HA's publish call; unconfirmed work remains queued.
 Only source/SPN ownership is persisted—never live readings or broker credentials.
 
 ### Find and specify the Bluetooth MAC address

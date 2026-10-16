@@ -2,10 +2,13 @@
 
 import asyncio
 from dataclasses import dataclass
+import logging
 from uuid import uuid4
 
 from .const import DOMAIN
 from .telemetry import MqttBridge, valid_vehicle_id, validated_signal_ids
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,6 @@ class DiscoveryLedger:
                 or old["discovery_prefix"] != prefix
             ):
                 self._records[uuid4().hex] = {**old, "pending": True}
-                old = None
             self._records[entry_id] = {
                 "vehicle_id": vehicle_id,
                 "discovery_prefix": prefix,
@@ -162,9 +164,37 @@ async def async_publish(hass, topic, payload, retain):
     )
 
 
+async def async_confirm_removal(hass, topic):
+    """Confirm broker receipt, not just queuing on HA's shared MQTT client."""
+    from homeassistant.components import mqtt
+    from homeassistant.core import callback
+
+    confirmed = asyncio.get_running_loop().create_future()
+
+    @callback
+    def received(message):
+        if message.payload == "" and not confirmed.done():
+            confirmed.set_result(None)
+
+    unsubscribe = None
+    try:
+        async with asyncio.timeout(15):
+            # Empty retained payloads have no cached broker value. Seeing our
+            # deletion echoed to this subscription confirms broker processing.
+            unsubscribe = await mqtt.async_subscribe(
+                hass, topic, received, qos=1
+            )
+            await async_publish(hass, topic, "", True)
+            await confirmed
+    finally:
+        if unsubscribe is not None:
+            unsubscribe()
+
+
 async def async_flush_removals(hass, ledger):
     """Flush only while connected; offline tombstones remain on disk."""
     from homeassistant.components import mqtt
+    from homeassistant.exceptions import HomeAssistantError
 
     try:
         connected = mqtt.is_connected(hass)
@@ -173,6 +203,15 @@ async def async_flush_removals(hass, ledger):
         connected = False
     if connected:
         async def publish(topic, payload, retain):
-            await async_publish(hass, topic, payload, retain)
+            if payload == "" and retain:
+                await async_confirm_removal(hass, topic)
+            else:
+                await async_publish(hass, topic, payload, retain)
 
-        await ledger.async_flush_removals(publish)
+        try:
+            await ledger.async_flush_removals(publish)
+        except (TimeoutError, HomeAssistantError):
+            _LOGGER.warning(
+                "MQTT discovery removal was not confirmed; "
+                "cleanup remains queued for reconnect"
+            )

@@ -37,7 +37,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.mqtt = SimpleNamespace(
             async_wait_for_mqtt_client=AsyncMock(return_value=True),
-            async_publish=AsyncMock(),
+            async_publish=AsyncMock(side_effect=self.publish),
             async_subscribe=AsyncMock(
                 side_effect=lambda hass, topic, cb, qos: (
                     self.birth.append((topic, cb)) or Mock()
@@ -120,6 +120,12 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             async_on_unload=Mock(),
             async_create_task=self.create_task,
         )
+
+    async def publish(self, hass, topic, payload, **kwargs):
+        """Simulate broker delivery to active test subscriptions."""
+        for subscribed_topic, callback in tuple(self.birth):
+            if subscribed_topic == topic:
+                callback(SimpleNamespace(payload=payload))
 
     def create_task(self, hass, coroutine, name):
         task = asyncio.create_task(coroutine, name=name)

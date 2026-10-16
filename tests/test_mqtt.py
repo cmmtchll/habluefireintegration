@@ -1,11 +1,18 @@
 """Test durable discovery ownership and deferred broker cleanup."""
 
 from copy import deepcopy
+import asyncio
+import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
-from custom_components.bluefire.mqtt import DiscoveryLedger, mqtt_settings
+from custom_components.bluefire.mqtt import (
+    DiscoveryLedger,
+    async_confirm_removal,
+    mqtt_settings,
+)
+from test_boundaries import module
 
 
 def record(prefix="homeassistant", signals=None, pending=False):
@@ -150,3 +157,69 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deleted, [
             "homeassistant/sensor/bluefire_coach_0_190/config"
         ])
+
+
+class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup_requires_broker_echo_and_unsubscribes(self):
+        received = None
+        unsubscribe = Mock()
+
+        async def subscribe(hass, topic, callback, qos):
+            nonlocal received
+            received = callback
+            return unsubscribe
+
+        async def publish(hass, topic, payload, **kwargs):
+            received(SimpleNamespace(payload="other"))
+            received(SimpleNamespace(payload=""))
+
+        mqtt = SimpleNamespace(
+            async_subscribe=subscribe, async_publish=AsyncMock(
+                side_effect=publish
+            ),
+        )
+        with patch.dict(sys.modules, {
+            "homeassistant": module("homeassistant"),
+            "homeassistant.components": module(
+                "homeassistant.components", mqtt=mqtt
+            ),
+            "homeassistant.core": module(
+                "homeassistant.core", callback=lambda func: func
+            ),
+        }):
+            await async_confirm_removal(object(), "ha/sensor/test/config")
+        unsubscribe.assert_called_once()
+
+    async def test_normal_publish_return_without_echo_does_not_confirm(self):
+        subscribed = asyncio.Event()
+        unsubscribe = Mock()
+
+        async def subscribe(hass, topic, callback, qos):
+            subscribed.set()
+            return unsubscribe
+
+        mqtt = SimpleNamespace(
+            async_subscribe=subscribe,
+            # Models HA's normal return even after an ACK timeout.
+            async_publish=AsyncMock(),
+        )
+        with patch.dict(sys.modules, {
+            "homeassistant": module("homeassistant"),
+            "homeassistant.components": module(
+                "homeassistant.components", mqtt=mqtt
+            ),
+            "homeassistant.core": module(
+                "homeassistant.core", callback=lambda func: func
+            ),
+        }):
+            task = asyncio.create_task(async_confirm_removal(
+                object(), "ha/sensor/test/config"
+            ))
+            await subscribed.wait()
+            await asyncio.sleep(0)
+            mqtt.async_publish.assert_awaited_once()
+            self.assertFalse(task.done())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        unsubscribe.assert_called_once()
