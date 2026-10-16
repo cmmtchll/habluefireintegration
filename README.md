@@ -1,7 +1,8 @@
 # BlueFire for Home Assistant
 
 Preparation for a **direct BLE → Home Assistant → MQTT** integration, initially
-focused on a 2003 Detroit Diesel / Prevost H3-45 Liberty Coach Elegant Lady.
+focused on a 2003-era **500 HP Detroit Diesel**, **Allison B500** transmission
+and Prevost H3-45 Liberty Coach Elegant Lady.
 No Android gateway is required or planned.
 
 > **Status: groundwork, not a working BlueFire receiver.** You can configure the
@@ -19,6 +20,13 @@ No Android gateway is required or planned.
   Bluetooth scanners, including compatible proxies.
 - Transport-independent decoding of 37 byte-aligned J1939 SPNs, including
   reserved/error/not-available handling, engineering units, and source addresses.
+- Shared, exportable namespaced dictionary for measurement labels, units,
+  controller roles and fault descriptions, including scoped Detroit DDEC III/IV
+  and Allison B500/WTEC III reference subsets.
+- Read-only single-frame J1939 DM1/DM2 fault interpretation and MQTT diagnostic
+  discovery. Offline analysis also accepts already-reassembled diagnostic reports.
+- J1708/J1587 decoding of 15 numeric PIDs and PID 194 diagnostic entries,
+  with a checksummed-datagram parser and separate MQTT/MID/PID discovery.
 - Hardware-unverified offline receive framing and PGN/J1587/OBD report analysis
   based on local inspection of Android 9.7.5/11.2.3 and Windows 12.5.6 packages;
   no adapter writes.
@@ -30,6 +38,8 @@ No Android gateway is required or planned.
 
 The MQTT publisher is deliberately **not connected to BLE notifications yet**.
 BlueFire notification payloads are not assumed to be raw CAN frames.
+The [known codes and mappings reference](docs/code-reference.md) lists the
+supported IDs, strings, descriptions, units, controller profiles and sources.
 
 ## Install and prepare
 
@@ -97,7 +107,9 @@ the next time BlueFire is set up. Do not delete that storage before cleanup.
 Discovery-prefix changes similarly withdraw the previous prefix's definitions.
 Cleanup requires broker-echo confirmation of the deletion messages, not just a
 successful return from HA's publish call; unconfirmed work remains queued.
-Only source/SPN ownership is persisted—never live readings or broker credentials.
+Only source/entity ownership is persisted—never live readings or broker
+credentials. Diagnostic ownership uses negative PGNs in the existing ledger;
+measurement ownership remains the original positive SPN.
 
 ### Find and specify the Bluetooth MAC address
 
@@ -147,8 +159,8 @@ the wire protocol. Do not publish captures containing vehicle identity or locati
 
 There is no universal OBD/CAN/J1939 MQTT topic standard. This project uses an
 explicit, versioned J1939 contract rather than pretending SPNs are OBD-II PIDs.
-Future J1708/J1587 support needs a separate decoder/protocol label; it must not
-silently masquerade as J1939.
+J1708/J1587 uses its own decoder and `j1587` protocol namespace; it never
+masquerades as J1939 or constructs a CAN arbitration ID.
 
 For a vehicle identifier `liberty_h3_45` and engine source address `0`:
 
@@ -157,6 +169,8 @@ For a vehicle identifier `liberty_h3_45` and engine source address `0`:
 | `vehicle/liberty_h3_45/j1939/availability` | `offline` or `online` |
 | `vehicle/liberty_h3_45/j1939/0/frame` | CAN arbitration ID, extended-frame flag, DLC, PGN, priority, source address and hex payload |
 | `vehicle/liberty_h3_45/j1939/0/spn/190` | Engine-speed measurement in rpm |
+| `vehicle/liberty_h3_45/j1939/0/faults/65226` | Active faults, readable summary, lamp states and raw DTCs |
+| `vehicle/liberty_h3_45/j1939/3/faults/65227` | Transmission's previously active faults, separate from active faults |
 | `homeassistant/sensor/bluefire_liberty_h3_45_0_190/config` | Retained HA MQTT sensor discovery |
 
 Example **synthetic** measurement illustrating the schema, not received data:
@@ -168,8 +182,14 @@ Example **synthetic** measurement illustrating the schema, not received data:
   "vehicle_id": "liberty_h3_45",
   "pgn": 61444,
   "source_address": 0,
+  "source_name": "Engine",
+  "source_name_basis": "conventional_address_not_verified_identity",
+  "pgn_name": "Electronic engine controller 1",
+  "catalog_version": 1,
   "timestamp": "2026-01-01T00:00:00+00:00",
   "spn": 190,
+  "name": "Engine speed",
+  "description": "Engine speed, reported in revolutions per minute (rpm). Reserved, error and unavailable values are reported as null.",
   "value": 1000.0,
   "unit": "rpm"
 }
@@ -180,8 +200,10 @@ become JSON `null`, never zero or `"NA"`; MQTT discovery converts null to HA's
 explicit `None`/unknown state rather than preserving an old value. Valid negative
 temperatures/torque are preserved. Unknown PGNs pass through as raw frames without
 guessed signals.
-PDU1 destination addresses are excluded from PGNs. Transport-protocol multi-packet
-messages, DM1 faults, manufacturer-specific signals, and CAN FD are not decoded.
+PDU1 destination addresses are excluded from PGNs. CAN transport-protocol
+reassembly, manufacturer-specific measurement encodings and CAN FD are not
+implemented. DM1/DM2 decoding requires a complete diagnostic payload; transport
+fragments are never interpreted as individual faults.
 
 ### Interoperability and delivery semantics
 
@@ -220,8 +242,213 @@ Null/global source addresses 254/255 do not create transmitter entities.
   monitor HA's configured MQTT birth/will topic. MQTT sensors' `expire_after`
   provides the HA-side safeguard. Never interpret availability as a safety signal.
 
-The topic/payload contract remains version 1 and existing entity IDs are
-preserved. The additional raw-frame fields are additive, not renamed fields.
+The topic/payload contract remains version 1 and existing measurement entity IDs
+and topics are preserved. Readable fields are additive, not renamed fields.
+Discovery names now include the conventional controller role and its address,
+for example **Engine speed - Engine (0)** and
+**Transmission oil temperature - Transmission (3)**. HA users can rename them.
+Measurement descriptions and raw identifiers are also available as attributes.
+
+### Human-readable code and fault dictionary
+
+The full [known code/ID/mapping reference](docs/code-reference.md) is kept
+separately from this README and generated from the same definitions as the code.
+A regression check rejects documentation drift when definitions change.
+
+`custom_components/bluefire/signals.py` is the shared source for all 37 prepared
+measurements, scales, offsets, units and HA measurement classes.
+`catalog.py` holds the curated code/reference database; the MQTT bridge and
+offline analyzer use the same metadata. Symbols such as `rpm`, `L/h`, `kPa` and
+`°C` stay machine-readable, while descriptions spell out their measurement units.
+Labels do not change the wire units or convert pressure to gauge/absolute by
+guessing. Counters retain `total_increasing` and their original scales.
+
+The dictionary separates **J1939 PGN/SPN/source**, **J1587 MID/PID/SID**,
+**OBD mode+PID**, **Detroit flash codes**, **Allison main/subcodes**, adapter
+commands and failure modes. SID descriptions require both MID and controller
+profile. OBD `01:0C` is not J1587 PID 12 or J1939 SPN 12. Address-derived names
+are conventional role hints, not validated identities from an ECU address claim.
+An unidentified controller or unmapped code remains explicitly unidentified,
+with its raw ID intact; there is no invented description or value.
+Ambiguous application aliases are not promoted to standard mappings.
+J1587 lookup units are explicitly marked `preferred_display_unit_only`, not
+claims about raw byte encodings. For example, a preferred coolant display unit
+of Celsius does not make a J1587 Fahrenheit-based payload Celsius. J1587/OBD
+lookup labels alone do not decode values. J1587 replay records now contain
+converted engineering values for the supported subset below; unsupported PIDs
+and all OBD replay records retain `value_decoded: false`.
+
+Current reference coverage is deliberately **curated, not a complete service
+manual**:
+
+| Area | Included |
+| --- | --- |
+| Measurements | All 37 prepared SPNs, matching PGN labels, units and descriptions |
+| Other controllers | Conventional engine, transmission, brakes, retarder, instrument, climate, body, cab, tire-pressure and aftertreatment roles |
+| Standard diagnostics | FMI 0–31, including reserved entries; known measurement SPNs and selected brake-pressure/lamp labels |
+| Detroit DDEC III/IV | 13 flash-code references, verified PID/FMI equivalents, six-cylinder injector reference SIDs 1–6 and memory SID 253 scoped to engine MID 128 |
+| Allison B500/WTEC III | 21 exact main/subcode references covering supply voltage, level/temperature/throttle sensors, speed sensors, selectors and missing data sources |
+| J1587 / OBD | Selected parameter labels and units; no reuse of J1939 decoding rules |
+| J1587 decoding | 15 independently defined numeric PIDs plus PID 194 active/inactive diagnostic entries; separate four-bit FMI definitions |
+
+The recorded vehicle details are **2003-era, 500 HP Detroit Diesel and Allison
+B500**. They do **not** establish the engine model, ECM generation, transmission
+controller generation or calibration. `detroit_ddec_iii_iv` and
+`allison_wtec_iii` are explicit reference profiles, not automatic settings.
+Do not select them solely from the year or horsepower, and do not apply WTEC
+selector codes to 4th/5th-generation Allison P-codes. Injector numbering and
+cylinder/bank applicability must be checked against the actual engine manual;
+the catalog does not infer an engine model. For example, WTEC III
+`13-13` means moderately **low** controller supply voltage; `13-23` is high.
+
+Export the dictionary as JSON, or look up codes without an adapter:
+
+```powershell
+python .\scripts\catalog_bluefire.py --export
+python .\scripts\catalog_bluefire.py --markdown --output .\docs\code-reference.md
+python .\scripts\catalog_bluefire.py --namespace spn --code 190
+python .\scripts\catalog_bluefire.py --namespace pid --code 91 --fmi 3 --source 128 --profile detroit_ddec_iii_iv
+python .\scripts\catalog_bluefire.py --namespace sid --code 1 --fmi 0 --source 128 --profile detroit_ddec_iii_iv
+python .\scripts\catalog_bluefire.py --namespace allison_wtec --code 13-12 --profile allison_wtec_iii
+```
+
+The export includes coverage, profile applicability and per-record provenance.
+Descriptions are independent factual summaries; proprietary application resource
+tables, binaries and decompiled implementation are not distributed.
+Sources include the locally inspected application namespaces,
+[CANboat's measurement definitions](https://github.com/canboat/canboat/tree/3de4c8463383e33e74f71232f4b4315ee4600f7c/database/j1939/pgns),
+[CSS Electronics' J1939 diagnostics explanation](https://www.csselectronics.com/pages/j1939-73-dm1-diagnostic-message-dtc),
+[FMI definitions](https://j1939hub.com/fmi-decoder/),
+[DDEC III/IV troubleshooting references](https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/)
+(individual sections are linked in each manufacturer entry), and the
+[Allison WTEC III selector reference, diagnostic table](https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf).
+Public reference contents were checked in October 2026; they do not replace the
+service manual for the actual controller and calibration.
+
+### Fault reporting boundaries
+
+The prepared MQTT bridge accepts complete, eight-byte J1939 DM1 (65226) and DM2
+(65227) frames from any valid transmitting address. Fault summaries and HA
+diagnostic entities are source-separated, for example **Active faults -
+Brakes (11)**. Faults have descriptions and failure modes, **not measurement
+units**. Detailed attributes retain raw DTC bytes, SPN, FMI, occurrence count,
+conversion method and separately decoded report-level lamp/flash fields.
+Discovery ownership is saved before publishing, restored after restart, and
+removed on deletion or discovery-prefix change, just like measurements.
+
+The offline analyzer additionally handles complete, already-reassembled
+multi-DTC PGN reports, but it does **not** perform CAN transport reassembly.
+Single-frame diagnostics require `FF FF` filler bytes; malformed lengths/filler
+raise explicit errors. Only SPN conversion method 0 is decoded. Legacy method 1
+is marked `unsupported_conversion`, with no inferred SPN. An all-zero DTC means
+no reported faults; an all-`FF` DTC means unavailable, **not healthy**.
+Occurrence count 127 is unavailable, not a count. Reserved/unavailable lamp
+states are preserved rather than treated as lit lamps.
+
+Active and previously active reports have separate topics/entities. State is
+non-retained, expires after 60 seconds, and is never replayed on reconnect.
+These are controller reports, not a diagnosis or a vehicle safety signal.
+J1587 PID 194 entries are decoded as described below; Allison selector-code and
+other manufacturer-specific on-wire encodings remain opaque. The reference
+lookup does not invent translations or automatically select controller profiles.
+No fault clearing or diagnostic requests are transmitted.
+Live BLE reception is still not implemented.
+
+### SAE J1708 / J1587 support
+
+**J1708 is the data link; J1587 defines the MID/PID application data.** Support
+is read-only and transport-independent, not a serial-port driver or a working
+BlueFire BLE receiver. `MqttBridge.async_process_j1587(J1587Report(...))`
+accepts a complete, normalized parameter value. Its data excludes the PID,
+variable-parameter byte-count prefix and J1708 checksum. MID must be 128–255,
+PID 0–1023, with exact fixed-width and supported-value lengths.
+The existing BlueFire `PIDData` parser still requires an explicit pre-3.19
+or 3.19+ firmware format; app version is not a firmware-format selector.
+Before connecting a live receiver, verify the vendor payload's normalization
+against hardware. Do not guess whether a byte-count prefix is present.
+
+`parse_j1708_message()` and `MqttBridge.async_process_j1708()` instead accept
+**one complete checksummed J1708 datagram**, bounded to 2–21 bytes.
+The checksum includes MID, parameter bytes and the trailing checksum byte;
+their sum modulo 256 must equal zero. The parser handles multiple parameters,
+one-/two-byte values, variable-parameter counts and leading PID page extensions.
+It strips the byte-count/checksum fields to produce normalized reports.
+Malformed datagrams and unsupported special PID 254 framing raise explicit
+errors; a corrupt later parameter cannot publish earlier parameters from the
+same datagram. Broker delivery itself is not transactional.
+
+Datagram boundaries must be supplied by the driver/capture. There is no
+checksum-scanning resynchronization or serial idle-time inference, and no
+support for larger stationary messages, PID 192 multisection assembly,
+transmission/arbitration, diagnostic requests or clearing. Non-J1587 J1708
+MIDs below 128 remain opaque in offline analysis; the MQTT telemetry sink
+rejects them rather than inventing PID meanings.
+
+| Numeric PID | Decoded value | Output unit |
+| --- | --- | --- |
+| 84 | Vehicle speed | km/h |
+| 91 / 92 / 96 | Accelerator position / engine load / fuel level | % |
+| 100 | Engine oil pressure | kPa |
+| 105 / 110 | Intake manifold / coolant temperature | °C |
+| 168 | Electrical system voltage | V |
+| 183 | Fuel rate | L/h |
+| 190 | Engine speed | rpm |
+| 235 / 247 | Idle / total engine hours | h |
+| 236 / 250 | Idle / total fuel used | L |
+| 245 | Total vehicle distance | km |
+
+J1587 uses its own scales, little-endian value lengths and native units:
+for example PID 190 uses **0.25 rpm/bit**, not J1939 SPN 190's 0.125.
+Fahrenheit, mph, psi and US gallons are converted explicitly into the table's
+units. All-ones supported values become `null` using the observed BlueFire
+unavailable convention. J1939's upper reserved raw ranges are **not** reused.
+Zero values and converted negative temperatures remain valid. Labels for other
+PIDs (including transmission temperature) do not imply a verified value decoder.
+The [code reference](docs/code-reference.md) records every implemented scale.
+
+PID 194 diagnostic entries preserve MID, PID versus SID namespace, expanded
+codes, four-bit FMI, active/inactive status, optional occurrence count and raw
+bytes. A missing optional occurrence count is `null`, not zero. An empty list
+means **No faults in this report**, not a vehicle-wide all-clear. These are
+entries in the current parameter report, not an accumulated historical fault
+database. J1587 FMI 15 remains reserved; it is not J1939's least-severe high
+threshold. Detroit mappings require an explicit reference profile for lookup;
+the live publication path does not infer one from MID 128.
+
+| Topic | Content |
+| --- | --- |
+| `vehicle/{vehicle}/j1587/availability` | Independent J1587 online/offline status |
+| `vehicle/{vehicle}/j1587/{mid}/report` | Raw normalized parameter bytes and dictionary annotation |
+| `vehicle/{vehicle}/j1587/{mid}/pid/{pid}` | Human-readable measurement and explicit unit |
+| `vehicle/{vehicle}/j1587/{mid}/faults/194` | Current active/inactive diagnostic entries and readable summary |
+| `homeassistant/sensor/bluefire_{vehicle}_j1587_{mid}_{pid}/config` | Retained HA discovery with stable, protocol-specific identity |
+
+J1939 and J1587 share the adapter device but never state/entity identities.
+For example, **Engine speed - Engine (128)** is a J1587 sensor, distinct from
+J1939's **Engine speed - Engine (0)**. Unknown PIDs are raw-only.
+States are non-retained QoS 0, discovery/availability retained QoS 1.
+J1587 has an independent 60-second freshness watchdog, plus per-entity expiry;
+J1939 traffic cannot keep J1587 online. Disconnect/shutdown/reconnect invalidates
+both protocols; rediscovery never replays readings. MID/PID ownership is stored
+in a separate `j1587_signals` ledger field, preserving old J1939 records and
+cleaning up both protocols after prefix changes or entry removal.
+
+Offline raw J1708 replay uses a different framing mode, one complete datagram
+per line including checksum, not BlueFire chunks:
+
+```powershell
+python .\scripts\analyze_bluefire.py .\j1708.hex --transport j1708
+```
+
+Synthetic raw J1708 engine-speed datagram for **1000 rpm**:
+
+```text
+80 be a0 0f 13
+```
+
+The `--j1587-format` option applies only to vendor `stream`/`padded` PIDData,
+not raw `j1708` mode. Invalid hex, checksum, width and diagnostic entries fail
+with line-numbered errors. Keep raw vehicle captures private.
 
 ### Prepared signals
 
@@ -438,9 +665,11 @@ are exposed by every app build.
 `stream` accepts arbitrary unpadded chunks; `padded` treats each input line as a
 legacy notification, allowing fragments across lines but dropping only zero
 padding after a completed packet. The script emits local JSONL records with
-explicit report kinds and `hardware_verified: false`. Catalog measurements are
+explicit report kinds and `hardware_verified: false`. J1939 measurements are
 shown only for matching page-zero PGNs with exactly eight data bytes; unknown,
-short or long data stays opaque. It never publishes MQTT or marks telemetry
+short or long PGN data stays opaque. Supported J1587 PIDs and diagnostics use
+their own value decoder; malformed supported values raise errors rather than
+producing zero. It never publishes MQTT or marks telemetry
 online. Any parse/file error returns nonzero; discard earlier output from that
 run rather than treating a partial capture as wholly valid. Files and output
 can contain vehicle identity or location; do not commit or share them unredacted.

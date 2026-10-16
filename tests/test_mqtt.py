@@ -78,7 +78,54 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(signals, [[0, 190]])
         self.assertEqual(set(self.disk["entry"]), {
             "vehicle_id", "discovery_prefix", "signals", "pending",
+            "j1587_signals",
         })
+
+    async def test_j1587_survives_reload_prefix_change_and_entry_removal(self):
+        await self.ledger.async_prepare("entry", "coach", "homeassistant")
+        await self.ledger.async_save_signals(
+            "entry", [[128, 190], [130, 194]], j1587=True
+        )
+        await self.ledger.async_save_signals("entry", [[0, 190]])
+        restored = DiscoveryLedger(self.store)
+        self.assertEqual(
+            await restored.async_prepare("entry", "coach", "custom"),
+            [[0, 190]],
+        )
+        self.assertEqual(await restored.async_get_j1587("entry"),
+                         [[128, 190], [130, 194]])
+        await restored.async_flush_removals(self.publish)
+        for mid, pid in ((128, 190), (130, 194)):
+            self.publish.assert_any_await(
+                "homeassistant/sensor/"
+                f"bluefire_coach_j1587_{mid}_{pid}/config", "", True,
+            )
+        self.assertFalse(any(
+            args.args == ("vehicle/coach/j1587/availability", "", True)
+            for args in self.publish.await_args_list
+        ))
+        self.publish.reset_mock()
+        await restored.async_queue_removal("entry")
+        await DiscoveryLedger(self.store).async_flush_removals(self.publish)
+        self.assertEqual(self.disk, {})
+        self.publish.assert_any_await(
+            "custom/sensor/bluefire_coach_j1587_130_194/config", "", True
+        )
+        self.publish.assert_any_await(
+            "vehicle/coach/j1587/availability", "", True
+        )
+
+    async def test_old_ledger_preserves_protocol_identity_boundaries(self):
+        self.disk = {"entry": {
+            **record(), "j1587_signals": [
+                [128, 190], [128, 513], [0, 190], [130, 194], [130, True],
+            ],
+        }}
+        restored = DiscoveryLedger(self.store)
+        self.assertEqual(await restored.async_prepare(
+            "entry", "coach", "homeassistant"), [[0, 190]])
+        self.assertEqual(await restored.async_get_j1587("entry"),
+                         [[128, 190], [130, 194]])
 
     async def test_prefix_change_withdraws_old_definitions(self):
         self.disk = {"entry": record()}
@@ -109,6 +156,29 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.publish.assert_any_await(
             "vehicle/coach/j1939/availability", "", True
+        )
+
+    async def test_fault_ownership_survives_restart_and_prefix_change(self):
+        self.disk = {
+            "entry": record(signals=[[0, 190], [3, -65226], [11, -65227]])
+        }
+        await self.ledger.async_prepare("entry", "coach", "custom")
+        restored = DiscoveryLedger(self.store)
+        await restored.async_flush_removals(self.publish)
+        for source, identity in ((0, 190), (3, -65226), (11, -65227)):
+            self.publish.assert_any_await(
+                "homeassistant/sensor/"
+                f"bluefire_coach_{source}_{identity}/config", "", True,
+            )
+        self.assertEqual(
+            self.disk["entry"]["signals"],
+            [[0, 190], [3, -65226], [11, -65227]],
+        )
+        await restored.async_queue_removal("entry")
+        await DiscoveryLedger(self.store).async_flush_removals(self.publish)
+        self.assertEqual(self.disk, {})
+        self.publish.assert_any_await(
+            "custom/sensor/bluefire_coach_3_-65226/config", "", True
         )
 
     async def test_failed_cleanup_retains_tombstone_for_retry(self):

@@ -6,7 +6,9 @@ import logging
 from uuid import uuid4
 
 from .const import DOMAIN
-from .telemetry import MqttBridge, valid_vehicle_id, validated_signal_ids
+from .telemetry import (
+    MqttBridge, valid_vehicle_id, validated_j1587_ids, validated_signal_ids,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,6 +70,9 @@ class DiscoveryLedger:
                 "vehicle_id": vehicle,
                 "discovery_prefix": prefix,
                 "signals": signals,
+                "j1587_signals": validated_j1587_ids(
+                    record.get("j1587_signals", [])
+                ),
                 "pending": record.get("pending", False),
             }
         self._loaded = True
@@ -87,16 +92,24 @@ class DiscoveryLedger:
                 "vehicle_id": vehicle_id,
                 "discovery_prefix": prefix,
                 "signals": signals,
+                "j1587_signals": old["j1587_signals"] if old else [],
                 "pending": False,
             }
             await self.store.async_save(self._records)
             return self._records[entry_id]["signals"]
 
-    async def async_save_signals(self, entry_id, signals):
+    async def async_get_j1587(self, entry_id):
+        """Restore MID/PID ownership separately from legacy SPN metadata."""
+        async with self._lock:
+            await self._async_load()
+            return self._records[entry_id]["j1587_signals"]
+
+    async def async_save_signals(self, entry_id, signals, *, j1587=False):
         """Write before publishing any new retained discovery definition."""
         async with self._lock:
             await self._async_load()
-            self._records[entry_id]["signals"] = signals
+            key = "j1587_signals" if j1587 else "signals"
+            self._records[entry_id][key] = signals
             await self.store.async_save(self._records)
 
     async def async_queue_removal(self, entry_id):
@@ -119,6 +132,7 @@ class DiscoveryLedger:
                     publish,
                     discovery_prefix=record["discovery_prefix"],
                     known_signals=record["signals"],
+                    known_j1587=record["j1587_signals"],
                 )
                 await bridge.async_remove_discovery()
                 # A prefix change may leave an active entry on the same state
@@ -129,6 +143,7 @@ class DiscoveryLedger:
                     for other in self._records.values()
                 ):
                     await publish(bridge.availability_topic, "", True)
+                    await publish(bridge.j1587.availability_topic, "", True)
                 del self._records[entry_id]
                 await self.store.async_save(self._records)
 
