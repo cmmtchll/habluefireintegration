@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from custom_components.bluefire.protocol import ProtocolError
+from custom_components.bluefire.signals import SIGNALS
 from scripts.analyze_bluefire import analyze_capture, main
 
 
@@ -28,7 +29,7 @@ class CaptureAnalysisTests(unittest.TestCase):
         self.assertFalse(rpm["hardware_verified"])
         self.assertNotIn("can_id", rpm)
         self.assertIn(
-            {"spn": 190, "value": 1000, "unit": "rpm"}, rpm["signals"]
+            {**SIGNALS[0].metadata(), "value": 1000}, rpm["signals"]
         )
         self.assertEqual(heartbeat["kind"], "adapter_message")
         self.assertNotIn("signals", heartbeat)
@@ -42,7 +43,7 @@ class CaptureAnalysisTests(unittest.TestCase):
 
     def test_other_protocols_and_unknown_commands(self):
         for packet, kind, options in (
-            ("00 07 07 9a 80 01 00 02 12 34 9b", "j1587_report",
+            ("00 06 06 9a 80 01 00 01 12 d0", "j1587_report",
              {"j1587_extended": False}),
             ("00 09 09 ae 07 e8 01 00 0c 02 1f 40 f2", "obd_report", {}),
             ("00 02 02 42 01 bc", "adapter_message", {}),
@@ -65,7 +66,7 @@ class CaptureAnalysisTests(unittest.TestCase):
         for record in records:
             if record["kind"] == "pgn_report":
                 self.assertIn(
-                    {"spn": 190, "value": 1000, "unit": "rpm"},
+                    {**SIGNALS[0].metadata(), "value": 1000},
                     record["signals"],
                 )
             else:

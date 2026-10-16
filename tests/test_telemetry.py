@@ -203,6 +203,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.async_disconnected()
         self.assertEqual(
             self.messages(), [
+                ("vehicle/coach/j1587/availability", "offline", True),
                 ("vehicle/coach/j1939/availability", "offline", True)])
 
     async def test_vendor_reports_cannot_enter_the_can_frame_contract(self):
@@ -355,12 +356,12 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         self.publish.reset_mock()
         await self.bridge.async_remove_discovery()
         self.assertEqual(
-            self.messages()[0],
+            self.messages()[1],
             (self.bridge.availability_topic,
              "offline",
              True))
         self.assertTrue(all(payload == "" and retain for _,
-                        payload, retain in self.messages()[1:]))
+                        payload, retain in self.messages()[2:]))
 
     async def test_every_signal_publishes_state_and_discovery_metadata(self):
         for pgn in {signal.pgn for signal in SIGNALS}:
@@ -445,9 +446,9 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         )
         await restored.async_disconnected()
         await restored.async_rediscover()
-        self.assertEqual(len(self.messages()), 3)
+        self.assertEqual(len(self.messages()), 4)
         self.assertEqual(self.messages()[0][1], "offline")
-        for topic, payload, retain in self.messages()[1:]:
+        for topic, payload, retain in self.messages()[2:]:
             self.assertTrue(topic.endswith("/config"))
             self.assertEqual(
                 json.loads(payload)["device"]["name"], "Coach adapter"
@@ -473,10 +474,10 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             known_signals=[[0, 190], [3, 190]], save_discovery=save,
         )
         await bridge.async_remove_discovery()
-        self.assertEqual(len(self.messages()), 3)
+        self.assertEqual(len(self.messages()), 4)
         self.assertTrue(all(
             payload == "" and retain
-            for _, payload, retain in self.messages()[1:]
+            for _, payload, retain in self.messages()[2:]
         ))
         save.assert_awaited_once_with([])
         self.assertEqual(bridge.discovery, {})
