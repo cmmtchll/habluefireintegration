@@ -1,0 +1,7 @@
+inspect_adapter:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
