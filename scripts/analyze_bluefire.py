@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "capture", type=Path,
-        help="ASCII hex file, one receive chunk per line, one stream only",
+        help="ASCII receive hex or Adapter.txt, one ordered chunk per line",
     )
     parser.add_argument(
         "--transport", choices=("stream", "padded"), required=True,

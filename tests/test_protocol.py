@@ -76,6 +76,32 @@ class ReceiveTests(unittest.TestCase):
         self.assertEqual(decoder.pending_bytes, 10)
         self.assertEqual(decoder.feed(RPM_PACKET[10:]), (RPM_BODY,))
 
+    def test_modern_stream_keeps_tails_after_completing_a_fragment(self):
+        decoder = ReceiveDecoder()
+        self.assertEqual(decoder.feed(RPM_PACKET[:4]), ())
+        self.assertEqual(
+            decoder.feed(RPM_PACKET[4:] + HEARTBEAT + RPM_PACKET[:2]),
+            (RPM_BODY, b"\xff"),
+        )
+        self.assertEqual(decoder.pending_bytes, 2)
+        self.assertEqual(decoder.feed(RPM_PACKET[2:]), (RPM_BODY,))
+        decoder.finish()
+
+    def test_pgn_header_pattern_is_not_a_synchronization_marker(self):
+        nested = b"\x42" + RPM_PACKET + b"\x00"
+        self.assertEqual(ReceiveDecoder().feed(packet(nested)), (nested,))
+        for corrupt in (
+            b"\x42" + RPM_PACKET,
+            packet(nested)[:-1] + b"\x00" + RPM_PACKET,
+            b"\x00\x0f\x0f\x97" + bytes(15) + RPM_PACKET,
+        ):
+            decoder = ReceiveDecoder()
+            with self.subTest(corrupt=corrupt):
+                with self.assertRaises(ProtocolError):
+                    decoder.feed(corrupt)
+                self.assertEqual(decoder.pending_bytes, 0)
+                self.assertEqual(decoder.feed(HEARTBEAT), (b"\xff",))
+
     def test_notification_padding_is_not_another_header(self):
         decoder = ReceiveDecoder(padded_notifications=True)
         self.assertEqual(
@@ -224,6 +250,30 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(
                 parse_message(body), AdapterMessage(body[0], body[1:])
             )
+
+    def test_newer_control_commands_are_not_guessed_or_correlated(self):
+        commands = (
+            0, 9, 10, 128, 129, 130, 131, 168, 169, 171, 177, 178,
+            197, 198, 201, 206, 207, 214, 215, 216, 255,
+        )
+        for command in commands:
+            # A telemetry-looking control body must remain opaque.
+            body = bytes((command,)) + RPM_PACKET
+            decoded, = ReceiveDecoder().feed(packet(body))
+            with self.subTest(command=command):
+                self.assertEqual(
+                    parse_message(decoded), AdapterMessage(command, RPM_PACKET)
+                )
+        for body in (
+            bytes.fromhex("c9 18 f0 04 03"), RPM_BODY, b"\xb1\x12\x34",
+            bytes((151, 3)) + RPM_BODY[2:],
+        ):
+            with self.subTest(body=body):
+                report = parse_message(body)
+                self.assertFalse(hasattr(report, "can_id"))
+                if isinstance(report, PgnReport):
+                    self.assertEqual(report.pgn, 61444)
+                    self.assertEqual(report.source_address, body[1])
 
     def test_truncated_headers_and_inexact_lengths_are_rejected(self):
         examples = (
