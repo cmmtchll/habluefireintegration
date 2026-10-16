@@ -4,6 +4,10 @@ import json
 import unittest
 from unittest.mock import AsyncMock, Mock
 
+from custom_components.bluefire.protocol import (
+    AdapterMessage,
+    PgnReport,
+)
 from custom_components.bluefire.telemetry import (
     Frame,
     MqttBridge,
@@ -87,7 +91,7 @@ class DecodeTests(unittest.TestCase):
                 data = bytearray(8)
                 data[signal.start + signal.length - 1] = marker
                 with self.subTest(spn=signal.spn, marker=marker):
-                    self.assertIsNone(signal.decode(data))
+                    self.assertIsNone(signal.decode(bytes(data)))
 
     def test_zero_and_negative_values_are_valid(self):
         signals = {signal.spn: signal for signal in SIGNALS}
@@ -152,7 +156,7 @@ class DecodeTests(unittest.TestCase):
                     data[signal.start:end] = raw.to_bytes(
                         signal.length, "little"
                     )
-                    value = signal.decode(data)
+                    value = signal.decode(bytes(data))
                     if valid:
                         self.assertAlmostEqual(
                             value, raw * signal.resolution + signal.offset,
@@ -175,6 +179,17 @@ class DecodeTests(unittest.TestCase):
                     signal.decode(bytes(8)), signal.offset
                 )
 
+    def test_incomplete_reports_cannot_become_plausible_measurements(self):
+        for signal in SIGNALS:
+            for length in range(8):
+                with self.subTest(spn=signal.spn, length=length):
+                    with self.assertRaises(ValueError):
+                        signal.decode(bytes(length))
+            for data in (bytes(9), bytearray(8), "abcdefgh", None):
+                with self.subTest(spn=signal.spn, data=data):
+                    with self.assertRaises(ValueError):
+                        signal.decode(data)
+
 
 class PublishingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -189,6 +204,16 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.messages(), [
                 ("vehicle/coach/j1939/availability", "offline", True)])
+
+    async def test_vendor_reports_cannot_enter_the_can_frame_contract(self):
+        for report in (
+            PgnReport(0, 61444, 6, 0, bytes(8)),
+            AdapterMessage(255, b""),
+            bytes(8),
+        ):
+            with self.subTest(report=report), self.assertRaises(ValueError):
+                await self.bridge.async_process_frame(report)
+        self.publish.assert_not_awaited()
 
     async def test_discovery_and_unit_explicit_state(self):
         await self.bridge.async_process_frame(

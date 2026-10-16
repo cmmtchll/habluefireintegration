@@ -6,7 +6,7 @@ No Android gateway is required or planned.
 
 > **Status: groundwork, not a working BlueFire receiver.** You can configure the
 > integration offline and inspect a powered adapter's BLE service metadata.
-> Continuous BLE reception, BlueFire authentication/framing, and reconnection of
+> Continuous BLE reception, BlueFire authentication, and reconnection of
 > a live telemetry stream are **not implemented**. No vehicle readings are
 > fabricated, and connecting to BLE alone never marks telemetry online.
 
@@ -19,6 +19,8 @@ No Android gateway is required or planned.
   Bluetooth scanners, including compatible proxies.
 - Transport-independent decoding of 37 byte-aligned J1939 SPNs, including
   reserved/error/not-available handling, engineering units, and source addresses.
+- Hardware-unverified offline receive framing and PGN/J1587/OBD report analysis
+  based on local inspection of the Android 9.7.5 APK; no adapter writes.
 - MQTT publishing/discovery code, source-separated readings, raw frame output,
   retained availability, freshness watchdog, durable discovery ownership,
   broker reconnect/birth handling, and non-retained live state.
@@ -279,12 +281,126 @@ the readable demo. Its older compatibility limits must not be applied blindly to
 current adapters. No vendor binaries or translated proprietary implementation
 are bundled here.
 
+### Findings from Android 9.7.5
+
+The locally supplied APK was inspected as a ZIP, its Xamarin assembly store
+identified, and the relevant managed types examined with ILSpy 9.1.0.7988.
+The application logic is in the LZ4-compressed `BlueFire` assembly, not just
+the Android Java/Dalvik layer. No APK, DLL, decompiled source, authentication
+material, or actual vehicle captures are included in this repository.
+APK SHA-256:
+`e838af5f52adc3503b81814e562486d8f8f4b14ce56330206870ef04256c395e`.
+The version is the supplied filename's label, not independent vendor provenance.
+
+These are **static observations of this app build, not a verified adapter
+specification**. Method names below identify the evidence without reproducing
+the app's implementation:
+
+| Area | Observation | Evidence in the managed assembly |
+| --- | --- | --- |
+| Receive framing | Two big-endian length bytes, their XOR byte, a nonempty message body, and one checksum byte | `CommBase.GetDataLength`, `CheckPackets` |
+| Receive checksum | Complement of the body's 8-bit end-around-carry sum; excludes the three header bytes | `CommBase.CalcChecksum` |
+| Direction matters | Client writes instead use a two-byte length and a checksum that also includes those length bytes, plus a legacy BLE packet selector | `CommData.SendData`, `CommBaseBLE.SendData` |
+| Report dispatch | Command 151 is PGNData, 154 is PIDData, 174 is OBDData; 255 is heartbeat | `PIDCommands`, `CommData.CheckPid` |
+| PGN report | Source byte, big-endian 16-bit PGN field, priority byte, data-page byte, data-length byte, then variable-length data | `CommData.AddPGNData`, `Helper.BytesToUInt16` |
+| Byte order | Vendor envelope fields are big-endian; standard CAN signal values remain little-endian | `Helper.BytesToUInt16`, `CANToInt16`, `CommData.ProcessPGN` |
+| J1587 firmware split | Before firmware 3.19: big-endian 16-bit PID; 3.19+: up to three `FF` page extensions followed by a PID byte | `CommData.AddPIDData` |
+| Transport variants | Original BLE uses separate adapter/client characteristics; EZ uses a serial-like service; Bluetooth Classic is another path | `CommBaseBLE.SetGuids`, `CommBLE.GetServices` |
+| Fragment handling | Receive chunks are accumulated; serial/Classic paths preserve trailing messages, while original BLE discards the completing notification's tail | `CommBase.CheckPackets` |
+| Connection lifecycle | Version/time exchange, compatibility, authentication, bus availability, filters and heartbeat are separate concerns | `CommData.StartAuthentication`, `CheckPid`, `FinishAuthentication` |
+
+The original BLE UUID candidates observed in `CommBaseBLE` are:
+
+| Role | UUID |
+| --- | --- |
+| Adapter service | `b65d50ef-db0a-4f24-9e32-189bf1d5f6d5` |
+| J1939 notification characteristic | `c5a7757d-04e7-410a-aa0f-2614427fb1f6` |
+| J1708 notification characteristic | `b972d4e5-238c-43a3-8dab-c3265268b978` |
+| Client service | `1d7f10c5-a793-43d5-82b2-464a74e795be` |
+| Client packet 1 / 2 / 3 | `4526e59b-a6e6-40ea-a842-972883e7fb3c` / `de106755-294c-4b02-8103-06be37461300` / `17e7a79a-9bcc-4f15-9508-c84cc9179101` |
+| EZ service | `65333333-a115-11e2-9e9a-0800200ca100` |
+| EZ receive / client write | `65333333-a115-11e2-9e9a-0800200ca102` / `65333333-a115-11e2-9e9a-0800200ca101` |
+
+Compare these with the explicit `bluefire.inspect_adapter` inventory. They are
+not automatic discovery matchers or permission to subscribe/write. Device names
+and manufacturer ID `FFFF` alone are not reliable identity checks.
+
+**Important contract boundary:** a PGN report is not necessarily an original
+eight-byte CAN frame. It has no explicit full arbitration ID, can contain
+transport-protocol data, and its PDU1/destination and data-page interpretation
+need captures. The app also handles BAM/RTS separately. The offline parser
+preserves these metadata bytes without inventing a CAN ID, padding short data,
+decoding transport packets, or relabeling J1587/OBD as J1939. It does not associate
+the app's separate arbitration-ID response with reports without correlation
+evidence. A future live driver must either prove that association or introduce
+a separately versioned PGN-report contract; it cannot silently fabricate the
+raw-frame fields of the existing MQTT contract.
+
+### Offline replay and resilience checks
+
+`custom_components/bluefire/protocol.py` is an independent, receive-only
+behavioral parser with no Home Assistant, BLE or MQTT I/O. It is not imported
+by the running integration. `ReceiveDecoder` supports split headers/payloads,
+concatenated stream messages, and explicit zero-padded notification mode.
+It rejects invalid header XORs, checksum failures, inexact inner lengths and
+over-limit packets with `ProtocolError`, clearing pending data on failure.
+It deliberately does not scan arbitrary bytes for a plausible new header:
+there is no verified synchronization marker, and the checksum is not
+cryptographic authentication.
+
+The analysis limit is **264 total bytes / 260 body bytes**, informed by the
+app's `MaxReceiveLength` constant, not a proven universal firmware limit.
+Pending storage never exceeds 264 bytes, even with large concatenated input.
+Original BLE tail bytes are accepted only when zero; nonzero padding,
+coalesced legacy packets and larger firmware formats require investigation,
+not silent acceptance. Use one decoder per characteristic/capture session;
+call `reset()` on disconnect and `finish()` at capture end to reject truncation.
+J1587's firmware format must be selected explicitly, never inferred by trying
+both parsers. Control/heartbeat messages cannot establish vehicle availability.
+
+For local analysis, create an ASCII file containing **adapter-to-client
+notification values only**, one hex chunk per line. Keep characteristics,
+directions and connection sessions separate; do not feed a full HCI/btsnoop
+file, client writes, or unrelated BLE traffic directly. Select the framing
+mode from the observed transport, not the device name alone:
+
+```powershell
+python .\scripts\analyze_bluefire.py .\capture.hex --transport stream
+python .\scripts\analyze_bluefire.py .\capture.hex --transport padded --j1587-format extended
+```
+
+`stream` accepts arbitrary unpadded chunks; `padded` treats each input line as a
+legacy notification, allowing fragments across lines but dropping only zero
+padding after a completed packet. The script emits local JSONL records with
+explicit report kinds and `hardware_verified: false`. Catalog measurements are
+shown only for matching page-zero PGNs with exactly eight data bytes; unknown,
+short or long data stays opaque. It never publishes MQTT or marks telemetry
+online. Any parse/file error returns nonzero; discard earlier output from that
+run rather than treating a partial capture as wholly valid. Files and output
+can contain vehicle identity or location; do not commit or share them unredacted.
+
+Example **synthetic**, not an adapter capture, representing 1000 rpm:
+
+```text
+00 0f 0f 97 00 f0 04 06 00 08 ff ff 7d 40 1f ff ff ff 88
+```
+
+Regression coverage includes every two-chunk split, byte-at-a-time delivery,
+deterministic randomized fragmentation/coalescing, receive-length boundaries,
+checksum carry/bit corruption, truncation, session reset, padding ambiguity,
+inner length mismatches, explicit J1587 formats, unknown/control commands and
+the MQTT frame/report boundary. Signal decoding now rejects incomplete data
+instead of letting an empty/partial slice become a plausible zero/low value.
+These vectors establish internal behavior, not vendor/hardware compatibility.
+
 To complete reception, obtain the applicable protocol and usage permissions, then:
 
 1. Implement the verified connection/authentication/subscription sequence using
    Home Assistant's Bluetooth APIs; do not guess UUIDs from characteristic names.
-2. Reassemble and validate BlueFire messages, extracting complete J1939 CAN
-   frames before calling `MqttBridge.async_process_frame(Frame(can_id, data))`.
+2. Validate the offline receive format against captures, including maximum
+   sizes, padding, notification interleaving and transport-specific behavior.
+   Establish how PGN reports map to original CAN identifiers before calling
+   `MqttBridge.async_process_frame(Frame(can_id, data))`; never guess that ID.
 3. Manage BLE cancellation and bounded reconnect/backoff; notify the MQTT bridge
    of transport loss. The MQTT ownership ledger and freshness watchdog are
    already prepared, but the future receiver must integrate its own lifecycle
