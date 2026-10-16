@@ -51,6 +51,65 @@ class CaptureAnalysisTests(unittest.TestCase):
                 record, = self.analyze(packet, **options)
                 self.assertEqual(record["kind"], kind)
 
+    def test_modern_controls_interleaved_with_fragmented_reports(self):
+        records = self.analyze(
+            "00 01 01 ff 00 00 03 03 83 01 f4 86 00 0f\r\n"
+            "0f 97 00 f0 04 06 00 08 ff ff 7d 40 1f ff ff ff 88 "
+            "00 03 03 b1 12 34 08\r\n"
+            "00 01 01 d6 29\r\n"
+        )
+        self.assertEqual(
+            [record["command"] for record in records],
+            [255, 131, 151, 177, 214],
+        )
+        for record in records:
+            if record["kind"] == "pgn_report":
+                self.assertIn(
+                    {"spn": 190, "value": 1000, "unit": "rpm"},
+                    record["signals"],
+                )
+            else:
+                self.assertEqual(record["kind"], "adapter_message")
+                self.assertNotIn("signals", record)
+            self.assertNotIn("can_id", record)
+
+    def test_arb_id_response_does_not_manufacture_report_can_ids(self):
+        records = self.analyze(
+            "00 05 05 c9 18 f0 04 03 26\n"
+            "00 0f 0f 97 00 f0 04 06 00 08 ff ff 7d 40 1f ff ff ff 88\n"
+        )
+        self.assertEqual(records[0]["kind"], "adapter_message")
+        self.assertEqual(records[0]["command"], 201)
+        self.assertEqual(records[1]["kind"], "pgn_report")
+        self.assertEqual(records[1]["source_address"], 0)
+        for record in records:
+            self.assertNotIn("can_id", record)
+            self.assertNotIn("arbitration_id", record)
+
+    def test_vendor_adapter_txt_replays_without_conversion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Adapter.txt"
+            path.write_bytes(
+                b"00 0F 0F 97 00 F0 04 06 00 08 FF FF 7D 40 1F FF FF FF "
+                b"88 00 01 \r\n01 FF 00 \r\n"
+            )
+            output, errors = StringIO(), StringIO()
+            with redirect_stdout(output), redirect_stderr(errors):
+                self.assertEqual(
+                    main([str(path), "--transport", "stream"]), 0
+                )
+            records = [
+                json.loads(line) for line in output.getvalue().splitlines()
+            ]
+            self.assertEqual(
+                [record["kind"] for record in records],
+                ["pgn_report", "adapter_message"],
+            )
+            self.assertEqual(
+                [record["line"] for record in records], [1, 2]
+            )
+            self.assertEqual(errors.getvalue(), "")
+
     def test_errors_have_line_numbers_and_no_capture_contents(self):
         for text in (
             "\nzz\n", "00 00 00\n", "00 01 01 ff 01\n",

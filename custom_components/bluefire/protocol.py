@@ -1,6 +1,7 @@
 """Offline receive-format analysis, not a live BlueFire driver.
 
-Derived from behavioral observations of Android 9.7.5; hardware-unverified.
+Based on static observations of Android 9.7.5/11.2.3 and Windows 12.5.6.
+All formats remain hardware-unverified.
 No authentication, writes, automatic resynchronization, or CAN-ID fabrication.
 """
 
@@ -31,7 +32,9 @@ def receive_checksum(body: bytes) -> int:
 class ReceiveDecoder:
     """Bounded, incremental adapter-to-client packet decoder.
 
-    Use a separate instance per capture stream/characteristic. Stream mode
+    Use a separate instance per independently framed capture stream/session.
+    Newer apps merge both EZ characteristic callbacks into one ordered queue;
+    do not split or reorder their Adapter.txt recording lines. Stream mode
     preserves concatenated packets; padded-notification mode accepts one
     packet followed by zero padding in the completing notification. Nonzero
     tails are rejected rather than guessed to be padding or a second packet.

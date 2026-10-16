@@ -20,7 +20,8 @@ No Android gateway is required or planned.
 - Transport-independent decoding of 37 byte-aligned J1939 SPNs, including
   reserved/error/not-available handling, engineering units, and source addresses.
 - Hardware-unverified offline receive framing and PGN/J1587/OBD report analysis
-  based on local inspection of the Android 9.7.5 APK; no adapter writes.
+  based on local inspection of Android 9.7.5/11.2.3 and Windows 12.5.6 packages;
+  no adapter writes.
 - MQTT publishing/discovery code, source-separated readings, raw frame output,
   retained availability, freshness watchdog, durable discovery ownership,
   broker reconnect/birth handling, and non-retained live state.
@@ -336,6 +337,53 @@ evidence. A future live driver must either prove that association or introduce
 a separately versioned PGN-report contract; it cannot silently fabricate the
 raw-frame fields of the existing MQTT contract.
 
+### Cross-version findings: Android 11.2.3 and Windows 12.5.6
+
+Both newer packages were inspected locally without executing the applications
+or their installer scripts. Android's binary manifest identifies
+`com.bluefire_llc.apps`, version name `11.2.3`, version code `122`. The Windows
+MSIX manifest identifies `BlueFireLLC.BlueFireApps`, version `12.5.6.0`, x64.
+These are package-declared identities, not independent signature verification.
+
+| Package | SHA-256 |
+| --- | --- |
+| Android 11.2.3 APK | `bcf59700abbbacd0e0faf10819c87acc83d69cf4dd56a9556417def9d85fd6aa` |
+| Windows `Apps_12.5.6.0_x64.msix` | `0ab3ccfceee263fb8d8924d11733aa89cbcfe6bc95f9527b1d40067cf9f4e696` |
+
+Android 11.2.3 stores `Apps.dll` in a version-2 assembly store inside the
+`payload` ELF section of `libassemblies.arm64-v8a.blob.so`; its app image is
+LZ4-compressed. The Windows MSIX contains `Apps.dll` directly. The targeted
+managed types were examined using the same ILSpy version as above; no native
+application code was run. Extracted assemblies and decompiled material were
+removed after the comparison and are not dependencies of the integration.
+
+| Area | Evidence in the newer builds | Consequence for this project |
+| --- | --- | --- |
+| Receive envelope | `CommBase.GetDataLength` and `CalcChecksum` match between the two newer builds, ignoring whitespace, and retain the earlier observed format | No speculative new framing variant or checksum is needed |
+| Telemetry reports | `PIDCommands`, `CommData.AddPGNData`, `AddPIDData`, `AddOBDData` retain commands 151/154/174 and their field layouts; both newer PIDData handlers use extensions without the older legacy-format branch | Keep report types separate and select the actual firmware format explicitly; app version is not adapter firmware |
+| BLE service family | Android `CommBaseBLE.SetGuids` and Windows `CommBase.SetGuids` use only the EZ service/receive/send UUIDs listed above; both `IsValidAdapter` paths explicitly reject the exact name `BlueFire LE` | Original LE support cannot be inferred from the newer apps; keep older UUID findings separate from modern EZ findings |
+| Notification routing | Both `CommBLE.GetCharacteristicData` paths accept notifications from receive **and send** characteristics and feed one packet queue | A characteristic named "send" does not make its incoming notifications client writes; preserve direction and callback order |
+| Stream handling | Both `CommBase.CheckPackets` implementations preserve bytes after each complete message | Modern captures use stream mode, not legacy padding/discard assumptions |
+| Startup/control evolution | `CommData.CheckPid` starts version exchange on the first heartbeat and branches between firmware 3.x and 4.x; `PIDCommands` adds authentication command 169 and calls command 177 `GetBuildDate` instead of the earlier `GetFirmware` | Do not transplant the 9.7.5 startup sequence or assign version-independent meaning to opaque control bodies |
+| Recovery policy | Both `CheckPacketErrors` call `CheckAnotherPGN`, which looks for `0F 0F 97` around a candidate PGN packet | This is an app heuristic, not a proven synchronization marker; our parser still raises and clears fragments instead of scanning payloads |
+| Empty PGN data | Windows `AddPGNData` rejects zero length; the Android handler has no equivalent explicit zero-length check | Preserve empty reports as opaque analysis data, but never manufacture signal values from them |
+| Numeric missing data | `Helper.IsHexFF` checks all-`FF` fields, and many `ProcessPGN` branches skip assignment when missing | Do not emulate stale-value retention or weaken our catalog's reserved/error handling to match the display app |
+| Raw recording | `CommBase.QueuePacketData`, `RecordData`, `PlayRecording` use `Adapter.txt`: one hex-encoded incoming queue chunk per line | Existing local replay can consume that recording format without running the vendor app or converting it to invented CAN frames |
+
+The format agreement strengthens the static evidence, **not** the claim of
+hardware compatibility. The 264-byte analysis ceiling remains a safety policy,
+not a measured firmware maximum. No additional commands, credentials, pairing,
+subscription or authentication sequence are implemented from these packages.
+The control and arbitration-ID messages remain opaque; interleaving an
+arbitration-ID response with PGN reports does not establish a reliable mapping.
+
+Additional synthetic regressions cover modern stream tails across notification
+fragments, PGN-header-like bytes inside opaque messages, fail-closed handling of
+corruption before plausible packets, newer control messages interleaved with
+telemetry, `Adapter.txt` line endings/spacing, and valid-to-invalid MQTT values
+without retaining an old value or borrowing another source's reading.
+There are still no real adapter recordings in the tests.
+
 ### Offline replay and resilience checks
 
 `custom_components/bluefire/protocol.py` is an independent, receive-only
@@ -353,21 +401,39 @@ app's `MaxReceiveLength` constant, not a proven universal firmware limit.
 Pending storage never exceeds 264 bytes, even with large concatenated input.
 Original BLE tail bytes are accepted only when zero; nonzero padding,
 coalesced legacy packets and larger firmware formats require investigation,
-not silent acceptance. Use one decoder per characteristic/capture session;
+not silent acceptance. Use one decoder per independently framed stream/session;
 call `reset()` on disconnect and `finish()` at capture end to reject truncation.
 J1587's firmware format must be selected explicitly, never inferred by trying
 both parsers. Control/heartbeat messages cannot establish vehicle availability.
 
 For local analysis, create an ASCII file containing **adapter-to-client
-notification values only**, one hex chunk per line. Keep characteristics,
-directions and connection sessions separate; do not feed a full HCI/btsnoop
-file, client writes, or unrelated BLE traffic directly. Select the framing
-mode from the observed transport, not the device name alone:
+notification values only**, one hex chunk per line. Keep directions and
+connection sessions separate, and retain characteristic metadata in the
+original capture. Do not feed a full HCI/btsnoop file, client writes, or unrelated
+BLE traffic directly. Select the framing mode from the observed transport, not
+the device name alone:
 
 ```powershell
 python .\scripts\analyze_bluefire.py .\capture.hex --transport stream
 python .\scripts\analyze_bluefire.py .\capture.hex --transport padded --j1587-format extended
 ```
+
+If you obtain an `Adapter.txt` recording from either newer app, its raw hex-line
+format already fits the analyzer:
+
+```powershell
+python .\scripts\analyze_bluefire.py .\Adapter.txt --transport stream --j1587-format extended
+```
+
+Preserve the file's chunk order: those apps record a single receive queue
+shared by both EZ characteristics, not separate independent per-characteristic
+files. For other raw captures, establish the correct stream grouping before
+merging or separating characteristic values; this tool cannot infer it.
+The recording has no timestamps or characteristic identifiers, so it cannot
+prove reporting cadence, notification provenance, or session boundaries.
+It may also contain handshake/security-related data; keep the original private.
+This is a format observation, not a guarantee that recording/export controls
+are exposed by every app build.
 
 `stream` accepts arbitrary unpadded chunks; `padded` treats each input line as a
 legacy notification, allowing fragments across lines but dropping only zero

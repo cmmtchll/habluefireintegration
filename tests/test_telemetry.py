@@ -277,15 +277,22 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_not_available_replaces_previous_measurement_with_null(self):
         await self.bridge.async_process_frame(
+            frame(61444, "ff ff 7d 40 1f ff ff ff")
+        )
+        payload = next(payload for topic, payload,
+                       _ in self.messages() if topic.endswith("/spn/190"))
+        self.assertEqual(json.loads(payload)["value"], 1000)
+        config = json.loads(next(
+            payload for topic, payload, _ in self.messages()
+            if topic.endswith("_190/config")
+        ))
+        self.publish.reset_mock()
+        await self.bridge.async_process_frame(
             frame(61444, "ff ff ff ff ff ff ff ff")
         )
         payload = next(payload for topic, payload,
                        _ in self.messages() if topic.endswith("/spn/190"))
         self.assertIsNone(json.loads(payload)["value"])
-        config = json.loads(next(
-            payload for topic, payload, _ in self.messages()
-            if topic.endswith("_190/config")
-        ))
         # MQTT numeric sensors treat "None" as unknown but ignore empty text,
         # which would retain stale readings while resetting their expiry timer.
         self.assertEqual(
@@ -293,6 +300,30 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             "{{ value_json.value if value_json.value "
             "is not none else 'None' }}",
         )
+
+    async def test_invalid_values_do_not_reuse_another_sources_reading(self):
+        await self.bridge.async_process_frame(
+            frame(61444, "ff ff 7d 40 1f ff ff ff", source=0)
+        )
+        for marker in range(0xFB, 0x100):
+            for source in (0, 3):
+                self.publish.reset_mock()
+                data = bytes((255, 255, 125, 0, marker, 255, 255, 255))
+                await self.bridge.async_process_frame(
+                    Frame((6 << 26) | (61444 << 8) | source, data)
+                )
+                topic, payload, retain = next(
+                    message for message in self.messages()
+                    if message[0].endswith("/spn/190")
+                )
+                with self.subTest(marker=marker, source=source):
+                    self.assertEqual(
+                        topic, f"vehicle/coach/j1939/{source}/spn/190"
+                    )
+                    state = json.loads(payload)
+                    self.assertIsNone(state["value"])
+                    self.assertEqual(state["source_address"], source)
+                    self.assertFalse(retain)
 
     async def test_rediscovery_never_replays_old_measurements(self):
         await self.bridge.async_process_frame(
