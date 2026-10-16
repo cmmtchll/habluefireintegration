@@ -20,7 +20,8 @@ No Android gateway is required or planned.
 - Transport-independent decoding of 37 byte-aligned J1939 SPNs, including
   reserved/error/not-available handling, engineering units, and source addresses.
 - MQTT publishing/discovery code, source-separated readings, raw frame output,
-  availability, broker reconnect handling, and non-retained live state.
+  retained availability, freshness watchdog, durable discovery ownership,
+  broker reconnect/birth handling, and non-retained live state.
 - Hardware-free unittest tests, real configuration-schema validation, and
   repeatable PEP 8 checks.
 
@@ -54,6 +55,44 @@ vehicle commissioning run.
 
 No broker credentials are stored by this integration; it uses HA's MQTT client.
 There are no adapter passwords or PGN transmit/reset controls.
+
+### Link to MQTT
+
+1. Install or choose an MQTT broker, for example the Mosquitto broker app on
+   HA OS. The broker is infrastructure; it does not replace this integration.
+2. Configure **Settings → Devices & services → MQTT** with that broker. Configure
+   authentication and, when appropriate, TLS there, not in BlueFire. Avoid
+   exposing an unauthenticated broker to the internet.
+3. Leave HA MQTT discovery enabled to have measurement entities created
+   automatically. BlueFire reads the configured MQTT discovery prefix and
+   birth topic/payload, including a disabled birth message; it does not invent a
+   second broker login or MQTT connection. Reload BlueFire after changing those
+   MQTT options. This settings lookup is isolated because HA provides no public
+   discovery-settings getter.
+4. Add BlueFire as described above. The integration prepares its stable MQTT
+   vehicle namespace, but no measurements or MQTT-discovered engine device will
+   appear until the native receiver is completed and valid frames arrive.
+5. When live reception is available, all measurements from one adapter are
+   grouped under one MQTT-owned device with stable identifiers. The BlueFire
+   integration's diagnostic device remains separate; do not manually create
+   duplicate MQTT YAML sensors or assume HA merges devices across config entries.
+   MAC corrections do not change MQTT topics or unique IDs.
+
+In the MQTT integration's **Configure → Listen to a topic** tool, listen to
+`vehicle/liberty_h3_45/j1939/#` (replace the vehicle ID). Expect retained `offline`
+in preparation mode, not sample engine data. Once receiving, inspect numeric
+`value`, explicit `unit`, PGN, SPN, source address and UTC timestamp. An external
+MQTT client can subscribe to the same topics; it does not need Home Assistant
+discovery to understand the JSON.
+
+On permanent BlueFire entry removal, retained discovery definitions are cleared
+with empty retained payloads, including those known before a restart. Ordinary
+unload/reload keeps discovery, but marks the stream offline. Removal while the
+broker is down is recorded in HA storage and retried on reconnect while HA is
+running. If HA restarts with no BlueFire entries left, pending cleanup resumes
+the next time BlueFire is set up. Do not delete that storage before cleanup.
+Discovery-prefix changes similarly withdraw the previous prefix's definitions.
+Only source/SPN ownership is persisted—never live readings or broker credentials.
 
 ### Find and specify the Bluetooth MAC address
 
@@ -111,7 +150,7 @@ For a vehicle identifier `liberty_h3_45` and engine source address `0`:
 | Topic | Content |
 | --- | --- |
 | `vehicle/liberty_h3_45/j1939/availability` | `offline` or `online` |
-| `vehicle/liberty_h3_45/j1939/0/frame` | Full CAN identifier, PGN, priority, source address, eight data bytes in hex |
+| `vehicle/liberty_h3_45/j1939/0/frame` | CAN arbitration ID, extended-frame flag, DLC, PGN, priority, source address and hex payload |
 | `vehicle/liberty_h3_45/j1939/0/spn/190` | Engine-speed measurement in rpm |
 | `homeassistant/sensor/bluefire_liberty_h3_45_0_190/config` | Retained HA MQTT sensor discovery |
 
@@ -139,14 +178,45 @@ guessed signals.
 PDU1 destination addresses are excluded from PGNs. Transport-protocol multi-packet
 messages, DM1 faults, manufacturer-specific signals, and CAN FD are not decoded.
 
-Live state/raw frames use QoS 0 and are not retained. Discovery is retained.
-Retained availability stays `offline`; transient `online` messages are sent only
-on frames, so a new subscriber cannot revive an old retained online state.
-Individual sensors expire after 60 seconds without an update; online adapter
-availability is not proof that every measurement is current. MQTT reconnect
-resets availability and replays definitions known during that runtime, not cached
-measurements. No lossless recording, cross-restart discovery registry, or live
-stream watchdog is claimed at this stage.
+### Interoperability and delivery semantics
+
+This follows the common CAN-to-MQTT gateway split: raw frames for CAN consumers,
+normalized engineering measurements for dashboards, retained discovery for HA,
+and a separate device-availability topic. It is **not** a drop-in schema for
+every CAN gateway, OVMS, Torque, or OBD-II application; those applications have
+their own topic/payload contracts. J1939 SPNs are not interchangeable with
+OBD-II Mode/PID values. A downstream adapter must map any application-specific
+schema explicitly rather than relabeling an SPN as a PID.
+
+Raw frame JSON includes the common envelope shown above (without measurement
+fields) plus `can_id`, its synonymous `arbitration_id`, `is_extended_id: true`,
+`dlc: 8`, `priority`, and `data` as exactly 16 lowercase hexadecimal characters.
+The full 29-bit identifier is preserved, including PDU1 destination bits; the
+separate `pgn` is destination-independent. Topics partition by vehicle, protocol,
+and transmitting ECU source address, so two ECUs reporting an SPN cannot collide.
+Null/global source addresses 254/255 do not create transmitter entities.
+
+- Live state/raw frames: **QoS 0, non-retained**. No obsolete values are replayed
+  into a fresh session. There is no lossless CAN recorder or exactly-once claim.
+- Discovery and availability: **QoS 1, retained**. New subscribers see current
+  advertised availability. Consumers must tolerate duplicate delivery.
+- Availability transitions to `online` only after receiving a complete valid
+  frame. Disconnect, reconnect initialization, graceful HA shutdown and unloading
+  publish `offline`. Definitions are restored across restarts and republished
+  on broker reconnect and the configured HA MQTT birth message.
+- A watchdog checks every 15 seconds and withdraws device availability after
+  60 seconds without a frame (at the next check). Each MQTT sensor independently
+  expires 60 seconds after its last update, even if another SPN keeps arriving.
+  Device availability alone does not establish measurement freshness.
+- The integration uses HA's shared MQTT client and **cannot set a per-device
+  Last Will** on that connection. The watchdog cannot run after a process crash
+  or blocked HA event loop; retained `online` may then be stale. External
+  consumers must enforce measurement timestamps/timeouts and may additionally
+  monitor HA's configured MQTT birth/will topic. MQTT sensors' `expire_after`
+  provides the HA-side safeguard. Never interpret availability as a safety signal.
+
+The topic/payload contract remains version 1 and existing entity IDs are
+preserved. The additional raw-frame fields are additive, not renamed fields.
 
 ### Prepared signals
 
@@ -213,9 +283,10 @@ To complete reception, obtain the applicable protocol and usage permissions, the
    Home Assistant's Bluetooth APIs; do not guess UUIDs from characteristic names.
 2. Reassemble and validate BlueFire messages, extracting complete J1939 CAN
    frames before calling `MqttBridge.async_process_frame(Frame(can_id, data))`.
-3. Manage cancellation, bounded reconnect/backoff, disconnect availability,
-   per-signal freshness and a live-stream watchdog. Persist discovery identifiers
-   for clean entry removal and cross-restart re-advertisement.
+3. Manage BLE cancellation and bounded reconnect/backoff; notify the MQTT bridge
+   of transport loss. The MQTT ownership ledger and freshness watchdog are
+   already prepared, but the future receiver must integrate its own lifecycle
+   and verify an appropriate reporting cadence for each signal.
 4. Verify signal values and missing-data behavior against the vendor app and
    recorded fixtures from the actual adapter. On-change delivery needs a verified
    refresh policy; do not replay stale values merely to defeat sensor expiry.
@@ -227,6 +298,33 @@ config-entry-based setup, device grouping and diagnostics. It organizes existing
 HA entities; it is not a Bluetooth driver. Once the receiver is completed, map
 the discovered MQTT sensors into HAVRV's chassis/power systems. There is no
 runtime dependency on HAVRV or duplication of its RV profile/dashboard code.
+
+## Integration or app?
+
+**Keep this as an integration for direct Home Assistant use.** BLE notification
+callbacks, reconnect timers and MQTT publishing are asynchronous work that fits
+HA's event loop. Use HA-managed tasks and timer helpers, avoid blocking I/O or
+`while`/sleep polling in callbacks, and cancel/unsubscribe on entry unload.
+Nothing here requires a cron scheduler or a separate container for timing.
+The J1939 decoder/publisher remains transport-independent and testable.
+
+An **app** (formerly add-on) is a separate service/container. Choose that path if
+you need collection to survive HA Core restarts, an independent MQTT connection
+and Last Will, native/vendor libraries incompatible with HA, process isolation,
+or HA-independent logging/consumers. A Supervisor-managed app targets HA OS;
+a standalone service/container is the equivalent for other hosts. A separate
+bridge may need its own Bluetooth access/proxy support; it cannot assume HA's
+Bluetooth APIs are available outside HA.
+
+For a genuinely HA-independent, MQTT-first vehicle gateway, that independent
+service would be a sensible architecture—not “better scheduling” by itself.
+Avoid running two receivers against the same adapter. Neither packaging choice
+solves the still-missing verified BlueFire BLE protocol.
+
+References: [HA MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery),
+[MQTT sensor expiry](https://www.home-assistant.io/integrations/sensor.mqtt/),
+[Bluetooth APIs](https://developers.home-assistant.io/docs/core/bluetooth/api/),
+and [HA architecture](https://developers.home-assistant.io/docs/architecture_index/).
 
 ## Development checks
 

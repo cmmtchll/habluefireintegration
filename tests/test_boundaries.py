@@ -7,7 +7,11 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from custom_components.bluefire import async_setup_entry, async_unload_entry
+from custom_components.bluefire import (
+    async_remove_entry,
+    async_setup_entry,
+    async_unload_entry,
+)
 
 
 def module(name, **attributes):
@@ -24,9 +28,21 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.callbacks = []
         self.tasks = []
+        self.intervals = []
+        self.birth = []
+        self.shutdown = []
+        self.store = SimpleNamespace(
+            async_load=AsyncMock(return_value=None),
+            async_save=AsyncMock(),
+        )
         self.mqtt = SimpleNamespace(
             async_wait_for_mqtt_client=AsyncMock(return_value=True),
             async_publish=AsyncMock(),
+            async_subscribe=AsyncMock(
+                side_effect=lambda hass, topic, cb, qos: (
+                    self.birth.append((topic, cb)) or Mock()
+                )
+            ),
             is_connected=Mock(return_value=True),
             async_subscribe_connection_status=Mock(
                 side_effect=lambda hass, cb: self.callbacks.append(
@@ -48,6 +64,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             "homeassistant.const": module(
                 "homeassistant.const",
                 Platform=SimpleNamespace(SENSOR="sensor"),
+                EVENT_HOMEASSISTANT_STOP="homeassistant_stop",
             ),
             "homeassistant.core": module(
                 "homeassistant.core", callback=lambda func: func
@@ -56,6 +73,19 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 "homeassistant.exceptions",
                 ConfigEntryNotReady=BoundaryError,
                 HomeAssistantError=BoundaryError,
+            ),
+            "homeassistant.helpers": module("homeassistant.helpers"),
+            "homeassistant.helpers.storage": module(
+                "homeassistant.helpers.storage",
+                Store=Mock(return_value=self.store),
+            ),
+            "homeassistant.helpers.event": module(
+                "homeassistant.helpers.event",
+                async_track_time_interval=Mock(
+                    side_effect=lambda hass, cb, interval: (
+                        self.intervals.append(cb) or Mock()
+                    )
+                ),
             ),
             "bleak": module("bleak"),
             "bleak.exc": module("bleak.exc", BleakError=BoundaryError),
@@ -67,11 +97,25 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         })
         self.modules.start()
         self.addCleanup(self.modules.stop)
-        self.hass = SimpleNamespace(config_entries=SimpleNamespace(
-            async_forward_entry_setups=AsyncMock(),
-            async_unload_platforms=AsyncMock(return_value=True),
-        ))
+        self.hass = SimpleNamespace(
+            data={},
+            config_entries=SimpleNamespace(
+                async_forward_entry_setups=AsyncMock(),
+                async_unload_platforms=AsyncMock(return_value=True),
+                async_entries=Mock(return_value=[]),
+            ),
+            bus=SimpleNamespace(async_listen_once=Mock(
+                side_effect=lambda event, cb: (
+                    self.shutdown.append(cb) or Mock()
+                )
+            )),
+            async_create_task=lambda coro, name: self.create_task(
+                None, coro, name
+            ),
+        )
         self.entry = SimpleNamespace(
+            entry_id="test-entry",
+            title="Coach adapter",
             data={"vehicle_id": "coach"},
             async_on_unload=Mock(),
             async_create_task=self.create_task,
@@ -89,9 +133,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         entries.async_forward_entry_setups.assert_awaited_once()
         self.mqtt.async_publish.assert_awaited_once_with(
             self.hass, "vehicle/coach/j1939/availability", "offline",
-            qos=0, retain=True,
+            qos=1, retain=True,
         )
-        self.entry.async_on_unload.assert_called_once()
+        self.assertEqual(self.entry.async_on_unload.call_count, 4)
 
     async def test_missing_mqtt_client_is_retryable(self):
         self.mqtt.async_wait_for_mqtt_client.return_value = False
@@ -105,9 +149,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.mqtt.is_connected.return_value = False
         self.assertTrue(await async_setup_entry(self.hass, self.entry))
         self.mqtt.async_publish.assert_not_awaited()
-        self.callbacks[0](False)
+        self.callbacks[-1](False)
         self.assertEqual(self.tasks, [])
-        self.callbacks[0](True)
+        self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
         self.assertEqual(self.mqtt.async_publish.await_count, 1)
 
@@ -116,7 +160,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         topic = "homeassistant/sensor/test/config"
         self.entry.runtime_data.bridge.discovery[topic] = "{}"
         self.mqtt.async_publish.reset_mock()
-        self.callbacks[0](True)
+        self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
         calls = self.mqtt.async_publish.await_args_list
         self.assertEqual(len(calls), 2)
@@ -193,3 +237,109 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result, {
                 "protocol_status": "protocol_required", "gatt_services": []})
+
+    async def test_custom_birth_settings_and_prefix(self):
+        self.hass.config_entries.async_entries.return_value = [
+            SimpleNamespace(
+                data={},
+                options={
+                    "discovery_prefix": "custom/ha",
+                    "birth_message": {
+                        "topic": "custom/status", "payload": "up",
+                    },
+                },
+            )
+        ]
+        await async_setup_entry(self.hass, self.entry)
+        self.assertEqual(self.birth[0][0], "custom/status")
+        bridge = self.entry.runtime_data.bridge
+        self.assertEqual(bridge.discovery_prefix, "custom/ha")
+        bridge.discovery["custom/ha/sensor/test/config"] = "{}"
+        self.mqtt.async_publish.reset_mock()
+        await self.birth[0][1](SimpleNamespace(payload="online"))
+        self.mqtt.async_publish.assert_not_awaited()
+        await self.birth[0][1](SimpleNamespace(payload="up"))
+        self.mqtt.async_publish.assert_awaited_once_with(
+            self.hass, "custom/ha/sensor/test/config", "{}",
+            qos=1, retain=True,
+        )
+
+    async def test_disabled_birth_does_not_subscribe(self):
+        self.hass.config_entries.async_entries.return_value = [
+            SimpleNamespace(data={}, options={"birth_message": {}})
+        ]
+        await async_setup_entry(self.hass, self.entry)
+        self.mqtt.async_subscribe.assert_not_awaited()
+        self.assertEqual(self.entry.async_on_unload.call_count, 3)
+
+    async def test_shutdown_withdraws_availability(self):
+        await async_setup_entry(self.hass, self.entry)
+        self.mqtt.async_publish.reset_mock()
+        await self.shutdown[0](object())
+        self.mqtt.async_publish.assert_awaited_once_with(
+            self.hass, "vehicle/coach/j1939/availability", "offline",
+            qos=1, retain=True,
+        )
+
+    async def test_watchdog_calls_bridge_only_while_broker_connected(self):
+        await async_setup_entry(self.hass, self.entry)
+        bridge = self.entry.runtime_data.bridge
+        bridge.async_check_stale = AsyncMock()
+        await self.intervals[0](object())
+        bridge.async_check_stale.assert_awaited_once()
+        self.mqtt.is_connected.return_value = False
+        await self.intervals[0](object())
+        bridge.async_check_stale.assert_awaited_once()
+
+    async def test_removal_uses_ledger_after_runtime_data_is_gone(self):
+        from custom_components.bluefire.telemetry import Frame
+
+        await async_setup_entry(self.hass, self.entry)
+        await self.entry.runtime_data.bridge.async_process_frame(
+            Frame(0x18F00400, bytes(8))
+        )
+        await async_unload_entry(self.hass, self.entry)
+        del self.entry.runtime_data
+        self.mqtt.async_publish.reset_mock()
+        await async_remove_entry(self.hass, self.entry)
+        cleared = [
+            call.args[1] for call in self.mqtt.async_publish.await_args_list
+            if call.args[2] == ""
+        ]
+        self.assertIn(
+            "homeassistant/sensor/bluefire_coach_0_190/config", cleared
+        )
+        self.assertIn("vehicle/coach/j1939/availability", cleared)
+
+    async def test_offline_removal_is_flushed_on_later_broker_connection(self):
+        from custom_components.bluefire.telemetry import Frame
+
+        await async_setup_entry(self.hass, self.entry)
+        await self.entry.runtime_data.bridge.async_process_frame(
+            Frame(0x18F00400, bytes(8))
+        )
+        await async_unload_entry(self.hass, self.entry)
+        del self.entry.runtime_data
+        self.mqtt.is_connected.return_value = False
+        self.mqtt.async_publish.reset_mock()
+        await async_remove_entry(self.hass, self.entry)
+        self.mqtt.async_publish.assert_not_awaited()
+        self.assertTrue(
+            self.store.async_save.await_args.args[0]["test-entry"]["pending"]
+        )
+        self.mqtt.is_connected.return_value = True
+        # The ledger's independent connection listener survives entry unload.
+        self.callbacks[0](True)
+        await asyncio.gather(*self.tasks)
+        self.assertEqual(self.store.async_save.await_args.args[0], {})
+
+    async def test_removal_without_mqtt_client_keeps_pending_cleanup(self):
+        await async_setup_entry(self.hass, self.entry)
+        del self.entry.runtime_data
+        self.mqtt.is_connected.side_effect = KeyError("mqtt")
+        self.mqtt.async_publish.reset_mock()
+        await async_remove_entry(self.hass, self.entry)
+        self.mqtt.async_publish.assert_not_awaited()
+        self.assertTrue(
+            self.store.async_save.await_args.args[0]["test-entry"]["pending"]
+        )

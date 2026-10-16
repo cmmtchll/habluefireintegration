@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import re
+from time import monotonic
+
+from .const import TELEMETRY_TIMEOUT
 
 
 def valid_vehicle_id(value: str) -> bool:
@@ -139,6 +142,20 @@ SIGNALS = (
 
 # topic, JSON/string payload, retain. Inject Home Assistant's MQTT publisher.
 Publish = Callable[[str, str, bool], Awaitable[None]]
+SaveDiscovery = Callable[[list[list[int]]], Awaitable[None]]
+
+
+def validated_signal_ids(value) -> list[list[int]]:
+    """Filter persisted discovery metadata without trusting stored topics."""
+    spns = {signal.spn for signal in SIGNALS}
+    if not isinstance(value, list):
+        return []
+    return [
+        item for item in value
+        if isinstance(item, list) and len(item) == 2
+        and type(item[0]) is int and 0 <= item[0] <= 253
+        and type(item[1]) is int and item[1] in spns
+    ]
 
 
 class MqttBridge:
@@ -148,31 +165,119 @@ class MqttBridge:
     Call async_disconnected on every transport loss and before reconnecting.
     """
 
-    def __init__(self, vehicle_id: str, publish: Publish) -> None:
+    def __init__(
+        self,
+        vehicle_id: str,
+        publish: Publish,
+        *,
+        discovery_prefix: str = "homeassistant",
+        device_name: str | None = None,
+        known_signals: list[list[int]] | None = None,
+        save_discovery: SaveDiscovery | None = None,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
         if not valid_vehicle_id(vehicle_id):
             raise ValueError("Invalid vehicle identifier")
         self.vehicle_id = vehicle_id
         self.prefix = f"vehicle/{vehicle_id}/j1939"
         self.publish = publish
+        self.discovery_prefix = discovery_prefix
+        self.device_name = device_name or f"{vehicle_id} J1939"
         self.discovery: dict[str, str] = {}
+        self._known_signals: set[tuple[int, int]] = set()
+        self._save_discovery = save_discovery
+        self._clock = clock
+        self._last_frame: float | None = None
+        self._online = False
         self._frame_lock = asyncio.Lock()
+        catalog = {signal.spn: signal for signal in SIGNALS}
+        for source, spn in validated_signal_ids(known_signals):
+            self._known_signals.add((source, spn))
+            topic, payload = self._discovery_message(source, catalog[spn])
+            self.discovery[topic] = payload
 
     @property
     def availability_topic(self) -> str:
         return f"{self.prefix}/availability"
 
     async def async_disconnected(self) -> None:
-        """Never leave retained adapter-online state behind."""
-        await self.publish(self.availability_topic, "offline", True)
+        """Invalidate freshness and withdraw retained online state."""
+        async with self._frame_lock:
+            self._last_frame = None
+            self._online = False
+            await self.publish(self.availability_topic, "offline", True)
+
+    async def async_check_stale(self) -> None:
+        """Expire device availability without replaying old measurements."""
+        async with self._frame_lock:
+            if (
+                self._last_frame is not None
+                and self._clock() - self._last_frame >= TELEMETRY_TIMEOUT
+            ):
+                self._last_frame = None
+                self._online = False
+                await self.publish(self.availability_topic, "offline", True)
 
     async def async_rediscover(self) -> None:
         """Replay definitions, not cached readings, on MQTT/HA restart."""
-        for topic, payload in tuple(self.discovery.items()):
-            await self.publish(topic, payload, True)
+        async with self._frame_lock:
+            for topic, payload in self.discovery.items():
+                await self.publish(topic, payload, True)
+
+    def _discovery_message(
+        self, source: int, signal: Signal
+    ) -> tuple[str, str]:
+        """Build discovery from trusted definitions, not stored payloads."""
+        unique_id = f"bluefire_{self.vehicle_id}_{source}_{signal.spn}"
+        config = {
+            "name": signal.name,
+            "unique_id": unique_id,
+            "state_topic": f"{self.prefix}/{source}/spn/{signal.spn}",
+            "value_template": (
+                "{{ value_json.value if value_json.value "
+                "is not none else 'None' }}"
+            ),
+            "unit_of_measurement": signal.unit,
+            "state_class": signal.state_class,
+            "availability_topic": self.availability_topic,
+            "payload_available": "online",
+            "payload_not_available": "offline",
+            "expire_after": TELEMETRY_TIMEOUT,
+            "device": {
+                "identifiers": [f"bluefire_{self.vehicle_id}"],
+                "name": self.device_name,
+                "manufacturer": "BlueFire",
+            },
+            "origin": {
+                "name": "BlueFire",
+                "support_url": (
+                    "https://github.com/cmmtchll/habluefireintegration"
+                ),
+            },
+        }
+        if signal.device_class:
+            config["device_class"] = signal.device_class
+        topic = f"{self.discovery_prefix}/sensor/{unique_id}/config"
+        return topic, json.dumps(config)
+
+    async def _async_remember(self, source: int, spn: int) -> None:
+        """Persist ownership before creating retained broker configuration."""
+        identity = (source, spn)
+        if identity in self._known_signals:
+            return
+        updated = self._known_signals | {identity}
+        if self._save_discovery is not None:
+            await self._save_discovery([
+                list(item) for item in sorted(updated)
+            ])
+        self._known_signals = updated
 
     async def async_process_frame(self, frame: Frame) -> None:
         """Accept a verified, reassembled frame from a future BLE driver."""
         async with self._frame_lock:
+            if frame.source_address >= 254:
+                # Null/global addresses are not valid transmitter identities.
+                return
             await self._async_process_frame(frame)
 
     async def _async_process_frame(self, frame: Frame) -> None:
@@ -190,6 +295,9 @@ class MqttBridge:
             json.dumps({
                 **common,
                 "can_id": frame.can_id,
+                "arbitration_id": frame.can_id,
+                "is_extended_id": True,
+                "dlc": len(frame.data),
                 "priority": frame.priority,
                 "data": frame.data.hex(),
             }),
@@ -201,33 +309,11 @@ class MqttBridge:
             state_topic = (
                 f"{self.prefix}/{frame.source_address}/spn/{signal.spn}"
             )
-            unique_id = (
-                f"bluefire_{self.vehicle_id}_"
-                f"{frame.source_address}_{signal.spn}"
+            discovery_topic, payload = self._discovery_message(
+                frame.source_address, signal
             )
-            discovery_topic = f"homeassistant/sensor/{unique_id}/config"
             if discovery_topic not in self.discovery:
-                config = {
-                    "name": signal.name,
-                    "unique_id": unique_id,
-                    "state_topic": state_topic,
-                    "value_template": (
-                        "{{ value_json.value if value_json.value "
-                        "is not none else 'None' }}"
-                    ),
-                    "unit_of_measurement": signal.unit,
-                    "state_class": signal.state_class,
-                    "availability_topic": self.availability_topic,
-                    "expire_after": 60,
-                    "device": {
-                        "identifiers": [f"bluefire_{self.vehicle_id}"],
-                        "name": f"{self.vehicle_id} J1939",
-                        "manufacturer": "BlueFire",
-                    },
-                }
-                if signal.device_class:
-                    config["device_class"] = signal.device_class
-                payload = json.dumps(config)
+                await self._async_remember(frame.source_address, signal.spn)
                 await self.publish(discovery_topic, payload, True)
                 self.discovery[discovery_topic] = payload
             await self.publish(
@@ -241,13 +327,20 @@ class MqttBridge:
                 False,
             )
         # A transport connection alone is not evidence of usable vehicle data.
-        # Leave retained "offline" in the broker. After a process crash, a new
-        # subscriber must not resurrect cached availability as live telemetry.
-        await self.publish(self.availability_topic, "online", False)
+        self._last_frame = self._clock()
+        if not self._online:
+            await self.publish(self.availability_topic, "online", True)
+            self._online = True
 
     async def async_remove_discovery(self) -> None:
-        """Remove this runtime's retained discovery definitions."""
+        """Remove definitions including those restored from storage."""
         await self.async_disconnected()
-        for topic in tuple(self.discovery):
-            await self.publish(topic, "", True)
-        self.discovery.clear()
+        async with self._frame_lock:
+            for source, spn in sorted(self._known_signals):
+                signal = next(item for item in SIGNALS if item.spn == spn)
+                topic, _ = self._discovery_message(source, signal)
+                await self.publish(topic, "", True)
+            if self._save_discovery is not None:
+                await self._save_discovery([])
+            self._known_signals.clear()
+            self.discovery.clear()

@@ -7,6 +7,7 @@ starts a speculative subscription or publishes fabricated vehicle data.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .const import DOMAIN, STATUS_PROTOCOL_REQUIRED
@@ -81,27 +82,62 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Prepare MQTT without claiming an operational BLE receiver."""
     from homeassistant.components import mqtt
-    from homeassistant.const import Platform
+    from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
     from homeassistant.core import callback
     from homeassistant.exceptions import ConfigEntryNotReady
+    from homeassistant.helpers.event import async_track_time_interval
 
     from .const import CONF_VEHICLE_ID
+    from .mqtt import (
+        async_flush_removals,
+        async_get_ledger,
+        async_publish,
+        mqtt_settings,
+    )
     from .telemetry import MqttBridge
 
     async def publish(topic: str, payload: str, retain: bool) -> None:
-        await mqtt.async_publish(hass, topic, payload, qos=0, retain=retain)
+        await async_publish(hass, topic, payload, retain)
 
     if not await mqtt.async_wait_for_mqtt_client(hass):
         raise ConfigEntryNotReady(
             "Configure the Home Assistant MQTT integration first"
         )
 
-    bridge = MqttBridge(entry.data[CONF_VEHICLE_ID], publish)
+    settings = mqtt_settings(hass)
+    ledger = await async_get_ledger(hass)
+    signals = await ledger.async_prepare(
+        entry.entry_id, entry.data[CONF_VEHICLE_ID], settings.discovery_prefix
+    )
+
+    async def save_discovery(known_signals):
+        await ledger.async_save_signals(entry.entry_id, known_signals)
+
+    bridge = MqttBridge(
+        entry.data[CONF_VEHICLE_ID], publish,
+        discovery_prefix=settings.discovery_prefix,
+        device_name=entry.title,
+        known_signals=signals,
+        save_discovery=save_discovery,
+    )
     entry.runtime_data = BlueFireRuntime(bridge)
 
     async def mqtt_ready() -> None:
+        await async_flush_removals(hass, ledger)
         await bridge.async_disconnected()
         await bridge.async_rediscover()
+
+    async def birth_received(message):
+        if message.payload == settings.birth_payload:
+            await bridge.async_rediscover()
+
+    async def check_freshness(now):
+        if mqtt.is_connected(hass):
+            await bridge.async_check_stale()
+
+    async def shutdown(event):
+        if mqtt.is_connected(hass):
+            await bridge.async_disconnected()
 
     @callback
     def connection_changed(connected: bool) -> None:
@@ -113,6 +149,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(
         mqtt.async_subscribe_connection_status(hass, connection_changed)
     )
+    if settings.birth_topic:
+        entry.async_on_unload(await mqtt.async_subscribe(
+            hass, settings.birth_topic, birth_received, qos=1
+        ))
+    entry.async_on_unload(async_track_time_interval(
+        hass, check_freshness, timedelta(seconds=15)
+    ))
+    entry.async_on_unload(hass.bus.async_listen_once(
+        EVENT_HOMEASSISTANT_STOP, shutdown
+    ))
     if mqtt.is_connected(hass):
         await mqtt_ready()
     await hass.config_entries.async_forward_entry_setups(
@@ -133,3 +179,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if mqtt.is_connected(hass):
         await entry.runtime_data.bridge.async_disconnected()
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Queue retained discovery removal without relying on runtime_data."""
+    from .mqtt import async_flush_removals, async_get_ledger
+
+    ledger = await async_get_ledger(hass)
+    await ledger.async_queue_removal(entry.entry_id)
+    await async_flush_removals(hass, ledger)
