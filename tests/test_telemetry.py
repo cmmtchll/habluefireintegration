@@ -132,6 +132,16 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.async_process_frame(frame(61444, "ff ff ff ff ff ff ff ff"))
         payload = next(payload for topic, payload, _ in self.messages() if topic.endswith("/spn/190"))
         self.assertIsNone(json.loads(payload)["value"])
+        config = json.loads(next(
+            payload for topic, payload, _ in self.messages()
+            if topic.endswith("_190/config")
+        ))
+        # MQTT numeric sensors treat "None" as unknown but ignore empty strings,
+        # which would retain stale readings while resetting their expiry timer.
+        self.assertEqual(
+            config["value_template"],
+            "{{ value_json.value if value_json.value is not none else 'None' }}",
+        )
 
     async def test_rediscovery_never_replays_old_measurements(self):
         await self.bridge.async_process_frame(frame(61444, "ff ff 7d 40 1f ff ff ff"))

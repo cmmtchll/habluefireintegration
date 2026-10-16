@@ -92,7 +92,8 @@ Example **synthetic** measurement illustrating the schema, not received data:
 ```
 
 Timestamps are UTC ingestion time, not ECU timestamps. Numerical invalid values
-become JSON `null`, never zero or `"NA"`. Valid negative temperatures/torque are
+become JSON `null`, never zero or `"NA"`; MQTT discovery converts null to HA's
+explicit `None`/unknown state rather than preserving an old value. Valid negative temperatures/torque are
 preserved. Unknown PGNs are passed through as raw frames without guessed signals.
 PDU1 destination addresses are excluded from PGNs. Transport-protocol multi-packet
 messages, DM1 faults, manufacturer-specific signals, and CAN FD are not decoded.

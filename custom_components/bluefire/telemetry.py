@@ -149,7 +149,7 @@ class MqttBridge:
                     "name": signal.name,
                     "unique_id": unique_id,
                     "state_topic": state_topic,
-                    "value_template": "{{ value_json.value if value_json.value is not none else '' }}",
+                    "value_template": "{{ value_json.value if value_json.value is not none else 'None' }}",
                     "unit_of_measurement": signal.unit,
                     "state_class": signal.state_class,
                     "availability_topic": self.availability_topic,
