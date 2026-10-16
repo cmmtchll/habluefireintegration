@@ -1,0 +1,163 @@
+rules:
+  action-setup:
+    status: done
+    comment: The read-only inspection service is registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
+  appropriate-polling:
+    status: exempt
+    comment: The integration does not poll the adapter; its timer only expires stale MQTT availability.
+  brands:
+    status: todo
+    comment: No BlueFire brand image asset is currently included in this repository.
+  common-modules:
+    status: done
+    comment: Frame parsing and the MQTT bridge are centralized in custom_components/bluefire/telemetry.py.
+  config-flow-test-coverage:
+    status: todo
+    comment: Config-flow tests exist, but there is no coverage measurement or full coverage threshold.
+  config-flow:
+    status: done
+    comment: UI setup and reconfiguration forms are implemented in custom_components/bluefire/config_flow.py and translated in custom_components/bluefire/strings.json.
+  dependency-transparency:
+    status: done
+    comment: Runtime dependencies and Home Assistant integrations are declared in custom_components/bluefire/manifest.json.
+  docs-actions:
+    status: done
+    comment: The read-only adapter inspection action and its limits are documented in README.md.
+  docs-triggers:
+    status: exempt
+    comment: BlueFire provides no integration-specific triggers to document.
+  docs-conditions:
+    status: exempt
+    comment: BlueFire provides no integration-specific conditions to document.
+  docs-high-level-description:
+    status: done
+    comment: Integration purpose, status, and boundaries are described in README.md.
+  docs-installation-instructions:
+    status: done
+    comment: Manual installation and initial setup instructions are provided in README.md.
+  docs-removal-instructions:
+    status: done
+    comment: Retained MQTT discovery cleanup on permanent entry removal is documented in README.md.
+  entity-event-setup:
+    status: exempt
+    comment: The current diagnostic entity has no state-event listener requiring registration or removal.
+  entity-unique-id:
+    status: done
+    comment: The diagnostic entity and MQTT discoveries use stable unique identifiers in custom_components/bluefire/sensor.py and custom_components/bluefire/telemetry.py.
+  has-entity-name:
+    status: done
+    comment: The protocol diagnostic entity uses Home Assistant entity naming in custom_components/bluefire/sensor.py.
+  runtime-data:
+    status: done
+    comment: Per-entry runtime state is stored on the config entry in custom_components/bluefire/__init__.py.
+  test-before-configure:
+    status: todo
+    comment: Setup is intentionally offline-ready and does not verify a BlueFire adapter or protocol before creating an entry.
+  test-before-setup:
+    status: exempt
+    comment: No BlueFire receiver connection is attempted during setup; MQTT readiness is checked before setup continues.
+  unique-config-entry:
+    status: done
+    comment: Duplicate adapter addresses and MQTT vehicle identifiers are rejected in custom_components/bluefire/config_flow.py.
+  action-exceptions:
+    status: done
+    comment: Inspection failures and invalid config entries raise Home Assistant validation errors in custom_components/bluefire/__init__.py.
+  config-entry-unloading:
+    status: done
+    comment: Entry unload and retained-state cleanup are implemented in custom_components/bluefire/__init__.py and covered by tests/test_boundaries.py.
+  docs-configuration-parameters:
+    status: done
+    comment: Adapter identity, vehicle identifier constraints, and MQTT configuration are documented in README.md.
+  docs-installation-parameters:
+    status: done
+    comment: README.md documents manual installation and states the Home Assistant and MQTT prerequisites.
+  entity-unavailable:
+    status: todo
+    comment: Future live telemetry entities and their unavailable behavior are not yet implemented or validated.
+  integration-owner:
+    status: done
+    comment: An active owner is declared in custom_components/bluefire/manifest.json.
+  log-when-unavailable:
+    status: todo
+    comment: Rate-limited unavailable and recovery logging for a live BLE receiver is not implemented.
+  parallel-updates:
+    status: exempt
+    comment: There are no polling entity updates; MQTT telemetry is created and updated outside the sensor platform.
+  reauthentication-flow:
+    status: exempt
+    comment: The integration currently uses no credentials or authenticated external service.
+  test-coverage:
+    status: todo
+    comment: The test suite has no measured integration coverage or enforced 95 percent threshold.
+  devices:
+    status: done
+    comment: The diagnostic sensor is associated with a config-entry device in custom_components/bluefire/sensor.py.
+  diagnostics:
+    status: done
+    comment: Redacted config-entry diagnostics are provided in custom_components/bluefire/diagnostics.py and tested in tests/test_boundaries.py.
+  discovery-update-info:
+    status: todo
+    comment: The integration does not currently track or update adapter network identity information.
+  discovery:
+    status: todo
+    comment: Nearby adapters can be selected manually, but automatic compatible-device discovery is not implemented.
+  docs-data-update:
+    status: done
+    comment: The MQTT topics, freshness, availability, and update semantics are documented in README.md.
+  docs-examples:
+    status: todo
+    comment: The README has a synthetic payload example but no end-user automation examples yet.
+  docs-known-limitations:
+    status: done
+    comment: The missing BLE receiver and unsupported protocol behavior are clearly listed in README.md.
+  docs-supported-devices:
+    status: done
+    comment: README.md explains the BlueFire adapter scope and that hardware compatibility is not yet verified.
+  docs-supported-functions:
+    status: done
+    comment: Implemented setup, diagnostics, MQTT behavior, and unimplemented receiver functions are described in README.md.
+  docs-troubleshooting:
+    status: done
+    comment: README.md includes guidance for missing BLE devices, MQTT setup, adapter inspection, and offline behavior.
+  docs-use-cases:
+    status: todo
+    comment: Dedicated end-user use cases are not yet documented.
+  dynamic-devices:
+    status: todo
+    comment: Dynamic Home Assistant device addition after initial setup is not implemented.
+  entity-category:
+    status: done
+    comment: The protocol status entity is categorized as diagnostic in custom_components/bluefire/sensor.py.
+  entity-device-class:
+    status: done
+    comment: The protocol status entity and prepared telemetry use appropriate device classes in custom_components/bluefire/sensor.py and custom_components/bluefire/telemetry.py.
+  entity-disabled-by-default:
+    status: exempt
+    comment: No optional or noisy native entity set is currently generated by the integration.
+  entity-translations:
+    status: todo
+    comment: Config and service strings are translated, but the diagnostic entity has no translation key.
+  exception-translations:
+    status: todo
+    comment: Service validation errors currently use inline English text rather than translated exception strings.
+  icon-translations:
+    status: todo
+    comment: No BlueFire-owned entity icon translations are currently defined.
+  reconfiguration-flow:
+    status: done
+    comment: Adapter MAC and name can be corrected while preserving vehicle identity in custom_components/bluefire/config_flow.py.
+  repair-issues:
+    status: todo
+    comment: No repair issue is currently raised for the missing BlueFire protocol or other user-actionable conditions.
+  stale-devices:
+    status: todo
+    comment: Stale device registry cleanup is not implemented or tested.
+  async-dependency:
+    status: done
+    comment: BLE inspection uses Home Assistant's asynchronous connection helpers in custom_components/bluefire/bluetooth.py.
+  inject-websession:
+    status: exempt
+    comment: The integration makes no HTTP requests and has no HTTP dependency.
+  strict-typing:
+    status: todo
+    comment: Strict static type checking is not configured or enforced for the integration.
