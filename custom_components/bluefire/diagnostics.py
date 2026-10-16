@@ -4,7 +4,7 @@ from .const import STATUS_PROTOCOL_REQUIRED
 
 
 async def async_get_config_entry_diagnostics(hass, entry):
-    """Avoid serial numbers, VIN, Bluetooth address, and user vehicle labels."""
+    """Omit serial numbers, VIN, Bluetooth address, and vehicle labels."""
     return {
         "protocol_status": STATUS_PROTOCOL_REQUIRED,
         "gatt_services": entry.runtime_data.services,

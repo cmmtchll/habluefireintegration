@@ -4,7 +4,12 @@ import json
 import unittest
 from unittest.mock import AsyncMock
 
-from custom_components.bluefire.telemetry import Frame, MqttBridge, SIGNALS, valid_vehicle_id
+from custom_components.bluefire.telemetry import (
+    Frame,
+    MqttBridge,
+    SIGNALS,
+    valid_vehicle_id,
+)
 
 
 def frame(pgn, data, source=0):
@@ -36,7 +41,17 @@ class FrameTests(unittest.TestCase):
     def test_topic_identifier_validation(self):
         for value in ("liberty_h3_45", "coach-1", "a", "0"):
             self.assertTrue(valid_vehicle_id(value))
-        for value in ("", "+", "#", "/coach", "a/b", "Coach", "_coach", "a" * 65, "a\n"):
+        for value in (
+            "",
+            "+",
+            "#",
+            "/coach",
+            "a/b",
+            "Coach",
+            "_coach",
+            "a" * 65,
+            "a\n",
+        ):
             self.assertFalse(valid_vehicle_id(value))
             with self.assertRaises(ValueError):
                 MqttBridge(value, AsyncMock())
@@ -89,15 +104,21 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_telemetry_before_a_frame(self):
         await self.bridge.async_disconnected()
-        self.assertEqual(self.messages(), [("vehicle/coach/j1939/availability", "offline", True)])
+        self.assertEqual(
+            self.messages(), [
+                ("vehicle/coach/j1939/availability", "offline", True)])
 
     async def test_discovery_and_unit_explicit_state(self):
-        await self.bridge.async_process_frame(frame(61444, "ff ff 7d 40 1f ff ff ff"))
+        await self.bridge.async_process_frame(
+            frame(61444, "ff ff 7d 40 1f ff ff ff")
+        )
         messages = self.messages()
-        config = json.loads(next(payload for topic, payload, _ in messages if topic.endswith("_190/config")))
+        config = json.loads(next(payload for topic, payload,
+                            _ in messages if topic.endswith("_190/config")))
         self.assertEqual(config["unit_of_measurement"], "rpm")
         self.assertEqual(config["expire_after"], 60)
-        topic, payload, retain = next(message for message in messages if message[0].endswith("/spn/190"))
+        topic, payload, retain = next(
+            message for message in messages if message[0].endswith("/spn/190"))
         self.assertEqual(topic, "vehicle/coach/j1939/0/spn/190")
         state = json.loads(payload)
         self.assertEqual(state["value"], 1000)
@@ -108,19 +129,25 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["unit"], "rpm")
         self.assertTrue(state["timestamp"].endswith("+00:00"))
         self.assertFalse(retain)
-        self.assertEqual(messages[-1], (self.bridge.availability_topic, "online", False))
+        self.assertEqual(
+            messages[-1], (self.bridge.availability_topic, "online", False))
 
     async def test_discovery_once_per_source_and_spn(self):
         value = frame(61444, "ff ff 7d 40 1f ff ff ff")
         await self.bridge.async_process_frame(value)
         await self.bridge.async_process_frame(value)
-        await self.bridge.async_process_frame(frame(61444, "ff ff 7d 40 1f ff ff ff", source=3))
-        configs = [topic for topic, _, _ in self.messages() if topic.endswith("/config")]
+        await self.bridge.async_process_frame(
+            frame(61444, "ff ff 7d 40 1f ff ff ff", source=3)
+        )
+        configs = [topic for topic, _,
+                   _ in self.messages() if topic.endswith("/config")]
         self.assertEqual(len(configs), 4)
         self.assertEqual(len(set(configs)), 4)
 
     async def test_unknown_pgn_is_preserved_without_guessing(self):
-        await self.bridge.async_process_frame(frame(65000, "01 02 03 04 05 06 07 08"))
+        await self.bridge.async_process_frame(
+            frame(65000, "01 02 03 04 05 06 07 08")
+        )
         messages = self.messages()
         self.assertEqual(len(messages), 2)
         raw = json.loads(messages[0][1])
@@ -129,42 +156,60 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(messages[0][2])
 
     async def test_not_available_replaces_previous_measurement_with_null(self):
-        await self.bridge.async_process_frame(frame(61444, "ff ff ff ff ff ff ff ff"))
-        payload = next(payload for topic, payload, _ in self.messages() if topic.endswith("/spn/190"))
+        await self.bridge.async_process_frame(
+            frame(61444, "ff ff ff ff ff ff ff ff")
+        )
+        payload = next(payload for topic, payload,
+                       _ in self.messages() if topic.endswith("/spn/190"))
         self.assertIsNone(json.loads(payload)["value"])
         config = json.loads(next(
             payload for topic, payload, _ in self.messages()
             if topic.endswith("_190/config")
         ))
-        # MQTT numeric sensors treat "None" as unknown but ignore empty strings,
+        # MQTT numeric sensors treat "None" as unknown but ignore empty text,
         # which would retain stale readings while resetting their expiry timer.
         self.assertEqual(
             config["value_template"],
-            "{{ value_json.value if value_json.value is not none else 'None' }}",
+            "{{ value_json.value if value_json.value "
+            "is not none else 'None' }}",
         )
 
     async def test_rediscovery_never_replays_old_measurements(self):
-        await self.bridge.async_process_frame(frame(61444, "ff ff 7d 40 1f ff ff ff"))
+        await self.bridge.async_process_frame(
+            frame(61444, "ff ff 7d 40 1f ff ff ff")
+        )
         self.publish.reset_mock()
         await self.bridge.async_rediscover()
         self.assertEqual(len(self.messages()), 2)
-        self.assertTrue(all(topic.endswith("/config") and retain for topic, _, retain in self.messages()))
+        self.assertTrue(all(topic.endswith("/config")
+                        and retain for topic, _, retain in self.messages()))
 
     async def test_discovery_failure_is_retryable(self):
         self.publish.side_effect = [None, RuntimeError("broker unavailable")]
         with self.assertRaises(RuntimeError):
-            await self.bridge.async_process_frame(frame(61444, "ff ff 7d 40 1f ff ff ff"))
+            await self.bridge.async_process_frame(
+                frame(61444, "ff ff 7d 40 1f ff ff ff")
+            )
         self.assertEqual(self.bridge.discovery, {})
         self.publish.side_effect = None
-        await self.bridge.async_process_frame(frame(61444, "ff ff 7d 40 1f ff ff ff"))
+        await self.bridge.async_process_frame(
+            frame(61444, "ff ff 7d 40 1f ff ff ff")
+        )
         self.assertEqual(len(self.bridge.discovery), 2)
 
     async def test_remove_discovery_clears_retained_definitions(self):
-        await self.bridge.async_process_frame(frame(61444, "ff ff 7d 40 1f ff ff ff"))
+        await self.bridge.async_process_frame(
+            frame(61444, "ff ff 7d 40 1f ff ff ff")
+        )
         self.publish.reset_mock()
         await self.bridge.async_remove_discovery()
-        self.assertEqual(self.messages()[0], (self.bridge.availability_topic, "offline", True))
-        self.assertTrue(all(payload == "" and retain for _, payload, retain in self.messages()[1:]))
+        self.assertEqual(
+            self.messages()[0],
+            (self.bridge.availability_topic,
+             "offline",
+             True))
+        self.assertTrue(all(payload == "" and retain for _,
+                        payload, retain in self.messages()[1:]))
 
 
 if __name__ == "__main__":

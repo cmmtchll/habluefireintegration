@@ -1,4 +1,4 @@
-"""Unit-test HA/BLE boundaries with mocks, not a substitute for commissioning."""
+"""Test HA/BLE boundaries with mocks, not hardware commissioning."""
 
 import asyncio
 import importlib
@@ -29,7 +29,8 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             async_publish=AsyncMock(),
             is_connected=Mock(return_value=True),
             async_subscribe_connection_status=Mock(
-                side_effect=lambda hass, cb: self.callbacks.append(cb) or Mock()
+                side_effect=lambda hass, cb: self.callbacks.append(
+                    cb) or Mock()
             ),
         )
         self.client = SimpleNamespace(services=[], disconnect=AsyncMock())
@@ -40,12 +41,17 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.modules = patch.dict(sys.modules, {
             "homeassistant": module("homeassistant"),
             "homeassistant.components": module(
-                "homeassistant.components", mqtt=self.mqtt, bluetooth=self.bluetooth
+                "homeassistant.components",
+                mqtt=self.mqtt,
+                bluetooth=self.bluetooth,
             ),
             "homeassistant.const": module(
-                "homeassistant.const", Platform=SimpleNamespace(SENSOR="sensor")
+                "homeassistant.const",
+                Platform=SimpleNamespace(SENSOR="sensor"),
             ),
-            "homeassistant.core": module("homeassistant.core", callback=lambda func: func),
+            "homeassistant.core": module(
+                "homeassistant.core", callback=lambda func: func
+            ),
             "homeassistant.exceptions": module(
                 "homeassistant.exceptions",
                 ConfigEntryNotReady=BoundaryError,
@@ -79,9 +85,11 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_offline_preparation_does_not_connect_ble(self):
         self.assertTrue(await async_setup_entry(self.hass, self.entry))
         self.connect.assert_not_awaited()
-        self.hass.config_entries.async_forward_entry_setups.assert_awaited_once()
+        entries = self.hass.config_entries
+        entries.async_forward_entry_setups.assert_awaited_once()
         self.mqtt.async_publish.assert_awaited_once_with(
-            self.hass, "vehicle/coach/j1939/availability", "offline", qos=0, retain=True
+            self.hass, "vehicle/coach/j1939/availability", "offline",
+            qos=0, retain=True,
         )
         self.entry.async_on_unload.assert_called_once()
 
@@ -89,7 +97,8 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.mqtt.async_wait_for_mqtt_client.return_value = False
         with self.assertRaises(BoundaryError):
             await async_setup_entry(self.hass, self.entry)
-        self.hass.config_entries.async_forward_entry_setups.assert_not_awaited()
+        entries = self.hass.config_entries
+        entries.async_forward_entry_setups.assert_not_awaited()
         self.mqtt.async_publish.assert_not_awaited()
 
     async def test_setup_with_broker_offline_waits_for_reconnect(self):
@@ -104,7 +113,8 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_replays_definitions_but_no_state(self):
         await async_setup_entry(self.hass, self.entry)
-        self.entry.runtime_data.bridge.discovery["homeassistant/sensor/test/config"] = "{}"
+        topic = "homeassistant/sensor/test/config"
+        self.entry.runtime_data.bridge.discovery[topic] = "{}"
         self.mqtt.async_publish.reset_mock()
         self.callbacks[0](True)
         await asyncio.gather(*self.tasks)
@@ -137,16 +147,21 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         api = importlib.import_module("custom_components.bluefire.bluetooth")
         self.client.services = [
             SimpleNamespace(uuid="service", characteristics=[
-                SimpleNamespace(uuid="characteristic", properties=["notify", "write"])
+                SimpleNamespace(uuid="characteristic",
+                                properties=["notify", "write"])
             ])
         ]
         result = await api.async_inspect(self.hass, "AA:BB:CC:DD:EE:FF")
         self.assertEqual(result, [{
             "uuid": "service",
-            "characteristics": [{"uuid": "characteristic", "properties": ["notify", "write"]}],
+            "characteristics": [{
+                "uuid": "characteristic",
+                "properties": ["notify", "write"],
+            }],
         }])
         self.client.disconnect.assert_awaited_once()
-        # The fake client intentionally offers no reads, subscriptions or writes.
+        # The fake client intentionally offers no reads, subscriptions or
+        # writes.
 
     async def test_inspection_offline_error_does_not_connect(self):
         api = importlib.import_module("custom_components.bluefire.bluetooth")
@@ -172,5 +187,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         api = importlib.import_module("custom_components.bluefire.diagnostics")
         await async_setup_entry(self.hass, self.entry)
         self.entry.data["address"] = "AA:BB:CC:DD:EE:FF"
-        result = await api.async_get_config_entry_diagnostics(self.hass, self.entry)
-        self.assertEqual(result, {"protocol_status": "protocol_required", "gatt_services": []})
+        result = await api.async_get_config_entry_diagnostics(
+            self.hass, self.entry
+        )
+        self.assertEqual(
+            result, {
+                "protocol_status": "protocol_required", "gatt_services": []})

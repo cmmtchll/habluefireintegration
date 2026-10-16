@@ -27,6 +27,13 @@ class BlueFireRuntime:
     inspecting: bool = False
 
 
+def CONFIG_SCHEMA(config: dict) -> dict:
+    """Reject YAML configuration; BlueFire is configured through the UI."""
+    from homeassistant.helpers import config_validation as cv
+
+    return cv.config_entry_only_config_schema(DOMAIN)(config)
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Register an explicit, read-only GATT inspection action."""
     import voluptuous as vol
@@ -45,14 +52,17 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             or entry.domain != DOMAIN
             or entry.state is not ConfigEntryState.LOADED
         ):
-            raise ServiceValidationError("Select a loaded BlueFire config entry")
+            raise ServiceValidationError(
+                "Select a loaded BlueFire config entry")
         runtime = entry.runtime_data
         if runtime.inspecting:
             raise ServiceValidationError("Inspection is already running")
         runtime.inspecting = True
         try:
             runtime.services = await async_inspect(hass, entry.data["address"])
-            return {"status": STATUS_PROTOCOL_REQUIRED, "services": runtime.services}
+            return {
+                "status": STATUS_PROTOCOL_REQUIRED,
+                "services": runtime.services}
         finally:
             runtime.inspecting = False
 
@@ -80,7 +90,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await mqtt.async_publish(hass, topic, payload, qos=0, retain=retain)
 
     if not await mqtt.async_wait_for_mqtt_client(hass):
-        raise ConfigEntryNotReady("Configure the Home Assistant MQTT integration first")
+        raise ConfigEntryNotReady(
+            "Configure the Home Assistant MQTT integration first")
 
     bridge = MqttBridge(entry.data[CONF_VEHICLE_ID], publish)
     entry.runtime_data = BlueFireRuntime(bridge)
@@ -92,14 +103,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     @callback
     def connection_changed(connected: bool) -> None:
         if connected:
-            entry.async_create_task(hass, mqtt_ready(), "BlueFire MQTT reconnect")
+            entry.async_create_task(
+                hass, mqtt_ready(), "BlueFire MQTT reconnect")
 
     entry.async_on_unload(
         mqtt.async_subscribe_connection_status(hass, connection_changed)
     )
     if mqtt.is_connected(hass):
         await mqtt_ready()
-    await hass.config_entries.async_forward_entry_setups(entry, [Platform.SENSOR])
+    await hass.config_entries.async_forward_entry_setups(
+        entry, [Platform.SENSOR]
+    )
     return True
 
 
@@ -108,7 +122,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.const import Platform
     from homeassistant.components import mqtt
 
-    if not await hass.config_entries.async_unload_platforms(entry, [Platform.SENSOR]):
+    if not await hass.config_entries.async_unload_platforms(
+        entry, [Platform.SENSOR]
+    ):
         return False
     if mqtt.is_connected(hass):
         await entry.runtime_data.bridge.async_disconnected()

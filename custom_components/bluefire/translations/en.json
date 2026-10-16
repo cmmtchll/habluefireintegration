@@ -2,6 +2,21 @@
   "config": {
     "step": {
       "user": {
+        "title": "Set up BlueFire",
+        "description": "Choose a nearby BLE device or enter its MAC address for offline preparation. Live BlueFire telemetry is not implemented yet.",
+        "menu_options": {
+          "discovered": "Choose a nearby Bluetooth device",
+          "manual": "Enter a MAC address manually (works offline)"
+        }
+      },
+      "discovered": {
+        "title": "Select your adapter",
+        "description": "These are nearby connectable BLE devices, not verified BlueFire adapters. Compare the name and MAC address with your adapter before continuing. Nothing is connected or probed during setup.",
+        "data": {
+          "address": "Bluetooth device"
+        }
+      },
+      "manual": {
         "title": "Prepare a BlueFire adapter",
         "description": "Offline preparation only: live BLE reception is not implemented yet. The BlueFire wire protocol must be verified before telemetry can be received. MQTT and Bluetooth must be configured in Home Assistant.",
         "data": {
@@ -10,17 +25,33 @@
           "vehicle_id": "Vehicle MQTT identifier"
         },
         "data_description": {
+          "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "vehicle_id": "1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure BlueFire",
+        "description": "Correct the adapter name or Bluetooth MAC address. This does not verify hardware compatibility. Your vehicle MQTT identifier and existing entities are preserved.",
+        "data": {
+          "name": "Adapter name",
+          "address": "Bluetooth MAC address"
+        },
+        "data_description": {
+          "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted."
         }
       }
     },
     "error": {
-      "invalid_address": "Enter a Bluetooth MAC address in AA:BB:CC:DD:EE:FF format.",
+      "invalid_address": "Enter the adapter's individual Bluetooth MAC, such as AA:BB:CC:DD:EE:FF, AA-BB-CC-DD-EE-FF or AABBCCDDEEFF.",
+      "invalid_name": "Enter a non-empty adapter name.",
+      "invalid_selection": "Select a device from the list.",
       "invalid_vehicle_id": "Use 1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
       "vehicle_id_in_use": "Another adapter already uses this vehicle MQTT identifier."
     },
     "abort": {
-      "already_configured": "This adapter is already configured."
+      "already_configured": "This adapter is already configured.",
+      "no_devices_found": "No unconfigured connectable BLE devices were found. Restart setup and choose manual MAC entry to prepare offline.",
+      "reconfigure_successful": "Adapter settings updated."
     }
   },
   "services": {

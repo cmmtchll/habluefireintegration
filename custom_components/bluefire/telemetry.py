@@ -13,7 +13,7 @@ import re
 
 
 def valid_vehicle_id(value: str) -> bool:
-    """Restrict vehicle identifiers to a single, predictable MQTT topic level."""
+    """Restrict vehicle identifiers to a single MQTT topic level."""
     return re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", value) is not None
 
 
@@ -61,7 +61,8 @@ class Signal:
     state_class: str = "measurement"
 
     def decode(self, data: bytes) -> float | None:
-        raw = int.from_bytes(data[self.start : self.start + self.length], "little")
+        raw = int.from_bytes(
+            data[self.start: self.start + self.length], "little")
         # J1939 numerical ranges FB..FF denote reserved/error/not-available.
         if raw >= 0xFB << (8 * (self.length - 1)):
             return None
@@ -73,15 +74,22 @@ SIGNALS = (
     Signal(61444, 513, "Actual engine torque", 2, 1, 1, -125, "%"),
     Signal(61443, 91, "Accelerator pedal position", 1, 1, 0.4, 0, "%"),
     Signal(61443, 92, "Engine load", 2, 1, 1, 0, "%"),
-    Signal(65262, 110, "Engine coolant temperature", 0, 1, 1, -40, "°C", "temperature"),
-    Signal(65262, 175, "Engine oil temperature", 2, 2, 0.03125, -273, "°C", "temperature"),
+    Signal(65262, 110, "Engine coolant temperature",
+           0, 1, 1, -40, "°C", "temperature"),
+    Signal(65262, 175, "Engine oil temperature", 2,
+           2, 0.03125, -273, "°C", "temperature"),
     Signal(65263, 100, "Engine oil pressure", 3, 1, 4, 0, "kPa", "pressure"),
-    Signal(65263, 109, "Engine coolant pressure", 6, 1, 2, 0, "kPa", "pressure"),
+    Signal(65263, 109, "Engine coolant pressure",
+           6, 1, 2, 0, "kPa", "pressure"),
     Signal(65263, 111, "Engine coolant level", 7, 1, 0.4, 0, "%"),
-    Signal(65265, 84, "Wheel-based vehicle speed", 1, 2, 1 / 256, 0, "km/h", "speed"),
-    Signal(65266, 183, "Engine fuel rate", 0, 2, 0.05, 0, "L/h", "volume_flow_rate"),
-    Signal(65253, 247, "Engine total hours", 0, 4, 0.05, 0, "h", "duration", "total_increasing"),
-    Signal(65248, 245, "Total vehicle distance", 4, 4, 0.125, 0, "km", "distance", "total_increasing"),
+    Signal(65265, 84, "Wheel-based vehicle speed",
+           1, 2, 1 / 256, 0, "km/h", "speed"),
+    Signal(65266, 183, "Engine fuel rate", 0, 2,
+           0.05, 0, "L/h", "volume_flow_rate"),
+    Signal(65253, 247, "Engine total hours", 0, 4, 0.05,
+           0, "h", "duration", "total_increasing"),
+    Signal(65248, 245, "Total vehicle distance", 4, 4,
+           0.125, 0, "km", "distance", "total_increasing"),
     Signal(65271, 168, "Battery potential", 4, 2, 0.05, 0, "V", "voltage"),
 )
 
@@ -119,7 +127,7 @@ class MqttBridge:
             await self.publish(topic, payload, True)
 
     async def async_process_frame(self, frame: Frame) -> None:
-        """Accept a verified, fully reassembled frame from a future BLE driver."""
+        """Accept a verified, reassembled frame from a future BLE driver."""
         async with self._frame_lock:
             await self._async_process_frame(frame)
 
@@ -135,21 +143,34 @@ class MqttBridge:
         }
         await self.publish(
             f"{self.prefix}/{frame.source_address}/frame",
-            json.dumps({**common, "can_id": frame.can_id, "priority": frame.priority, "data": frame.data.hex()}),
+            json.dumps({
+                **common,
+                "can_id": frame.can_id,
+                "priority": frame.priority,
+                "data": frame.data.hex(),
+            }),
             False,
         )
         for signal in SIGNALS:
             if signal.pgn != frame.pgn:
                 continue
-            state_topic = f"{self.prefix}/{frame.source_address}/spn/{signal.spn}"
-            unique_id = f"bluefire_{self.vehicle_id}_{frame.source_address}_{signal.spn}"
+            state_topic = (
+                f"{self.prefix}/{frame.source_address}/spn/{signal.spn}"
+            )
+            unique_id = (
+                f"bluefire_{self.vehicle_id}_"
+                f"{frame.source_address}_{signal.spn}"
+            )
             discovery_topic = f"homeassistant/sensor/{unique_id}/config"
             if discovery_topic not in self.discovery:
                 config = {
                     "name": signal.name,
                     "unique_id": unique_id,
                     "state_topic": state_topic,
-                    "value_template": "{{ value_json.value if value_json.value is not none else 'None' }}",
+                    "value_template": (
+                        "{{ value_json.value if value_json.value "
+                        "is not none else 'None' }}"
+                    ),
                     "unit_of_measurement": signal.unit,
                     "state_class": signal.state_class,
                     "availability_topic": self.availability_topic,
@@ -181,7 +202,7 @@ class MqttBridge:
         await self.publish(self.availability_topic, "online", False)
 
     async def async_remove_discovery(self) -> None:
-        """Remove definitions created during this runtime when deleting an entry."""
+        """Remove this runtime's retained discovery definitions."""
         await self.async_disconnected()
         for topic in tuple(self.discovery):
             await self.publish(topic, "", True)
