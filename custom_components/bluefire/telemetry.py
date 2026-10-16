@@ -5,6 +5,7 @@ implementation before constructing a Frame. They are not raw CAN frames.
 """
 
 from collections.abc import Awaitable, Callable
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -102,6 +103,7 @@ class MqttBridge:
         self.prefix = f"vehicle/{vehicle_id}/j1939"
         self.publish = publish
         self.discovery: dict[str, str] = {}
+        self._frame_lock = asyncio.Lock()
 
     @property
     def availability_topic(self) -> str:
@@ -113,11 +115,15 @@ class MqttBridge:
 
     async def async_rediscover(self) -> None:
         """Replay definitions, not cached readings, on MQTT/HA restart."""
-        for topic, payload in self.discovery.items():
+        for topic, payload in tuple(self.discovery.items()):
             await self.publish(topic, payload, True)
 
     async def async_process_frame(self, frame: Frame) -> None:
         """Accept a verified, fully reassembled frame from a future BLE driver."""
+        async with self._frame_lock:
+            await self._async_process_frame(frame)
+
+    async def _async_process_frame(self, frame: Frame) -> None:
         timestamp = datetime.now(timezone.utc).isoformat()
         common = {
             "schema_version": 1,
@@ -177,5 +183,6 @@ class MqttBridge:
     async def async_remove_discovery(self) -> None:
         """Remove definitions created during this runtime when deleting an entry."""
         await self.async_disconnected()
-        for topic in self.discovery:
+        for topic in tuple(self.discovery):
             await self.publish(topic, "", True)
+        self.discovery.clear()
