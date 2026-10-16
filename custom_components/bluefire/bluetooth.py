@@ -7,6 +7,7 @@ from bleak_retry_connector import (
     BleakClientWithServiceCache,
     establish_connection,
 )
+
 from homeassistant.components import bluetooth
 from homeassistant.exceptions import HomeAssistantError
 
@@ -14,7 +15,8 @@ from homeassistant.exceptions import HomeAssistantError
 async def async_inspect(hass, address: str) -> list[dict]:
     """Connect on request and list GATT metadata without reading values."""
     device = bluetooth.async_ble_device_from_address(
-        hass, address, connectable=True)
+        hass, address, connectable=True
+    )
     if device is None:
         raise HomeAssistantError(
             "Adapter is not visible to a connectable Home Assistant "
@@ -37,8 +39,10 @@ async def async_inspect(hass, address: str) -> list[dict]:
                     {
                         "uuid": service.uuid,
                         "characteristics": [
-                            {"uuid": characteristic.uuid, "properties": list(
-                                characteristic.properties)}
+                            {
+                                "uuid": characteristic.uuid,
+                                "properties": list(characteristic.properties),
+                            }
                             for characteristic in service.characteristics
                         ],
                     }

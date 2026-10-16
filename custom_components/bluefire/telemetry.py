@@ -4,8 +4,8 @@ BlueFire notification bytes MUST be unwrapped by a verified vendor protocol
 implementation before constructing a Frame. They are not raw CAN frames.
 """
 
-from collections.abc import Awaitable, Callable
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -61,9 +61,12 @@ class Signal:
     state_class: str = "measurement"
 
     def decode(self, data: bytes) -> float | None:
+        """Decode a catalogued numeric SPN from a complete J1939 payload."""
         raw = int.from_bytes(
-            data[self.start: self.start + self.length], "little")
-        # J1939 numerical ranges FB..FF denote reserved/error/not-available.
+            data[self.start:self.start + self.length], "little"
+        )
+        # These numeric SPNs reserve the upper raw ranges. Do not apply this
+        # rule to enumerations (for example gear 0xFB means Park).
         if raw >= 0xFB << (8 * (self.length - 1)):
             return None
         return round(raw * self.resolution + self.offset, 6)
@@ -91,6 +94,47 @@ SIGNALS = (
     Signal(65248, 245, "Total vehicle distance", 4, 4,
            0.125, 0, "km", "distance", "total_increasing"),
     Signal(65271, 168, "Battery potential", 4, 2, 0.05, 0, "V", "voltage"),
+    Signal(65276, 96, "Fuel level", 1, 1, 0.4, 0, "%"),
+    Signal(65269, 108, "Barometric pressure", 0, 1, 0.5, 0, "kPa", "pressure"),
+    Signal(65269, 171, "Ambient air temperature", 3, 2, 0.03125, -273,
+           "°C", "temperature"),
+    Signal(65269, 172, "Engine air intake temperature", 5, 1, 1, -40,
+           "°C", "temperature"),
+    Signal(65270, 102, "Intake manifold pressure", 1, 1, 2, 0,
+           "kPa", "pressure"),
+    Signal(65270, 105, "Intake manifold temperature", 2, 1, 1, -40,
+           "°C", "temperature"),
+    Signal(65270, 106, "Air inlet pressure", 3, 1, 2, 0, "kPa", "pressure"),
+    Signal(65270, 107, "Air filter differential pressure", 4, 1, 0.05, 0,
+           "kPa", "pressure"),
+    Signal(65270, 173, "Exhaust gas temperature", 5, 2, 0.03125, -273,
+           "°C", "temperature"),
+    Signal(65272, 124, "Transmission oil level", 1, 1, 0.4, 0, "%"),
+    Signal(65272, 126, "Transmission filter differential pressure", 2, 1, 2, 0,
+           "kPa", "pressure"),
+    Signal(65272, 127, "Transmission oil pressure", 3, 1, 16, 0,
+           "kPa", "pressure"),
+    Signal(65272, 177, "Transmission oil temperature", 4, 2, 0.03125, -273,
+           "°C", "temperature"),
+    Signal(65257, 182, "Engine trip fuel used", 0, 4, 0.5, 0,
+           "L", "volume", "total_increasing"),
+    Signal(65257, 250, "Engine total fuel used", 4, 4, 0.5, 0,
+           "L", "volume", "total_increasing"),
+    Signal(65244, 236, "Engine total idle fuel used", 0, 4, 0.5, 0,
+           "L", "volume", "total_increasing"),
+    Signal(65244, 235, "Engine total idle hours", 4, 4, 0.05, 0,
+           "h", "duration", "total_increasing"),
+    Signal(65271, 167, "Charging system potential", 2, 2, 0.05, 0,
+           "V", "voltage"),
+    Signal(65263, 94, "Engine fuel delivery pressure", 0, 1, 4, 0,
+           "kPa", "pressure"),
+    Signal(65263, 98, "Engine oil level", 2, 1, 0.4, 0, "%"),
+    Signal(65262, 174, "Engine fuel temperature", 1, 1, 1, -40,
+           "°C", "temperature"),
+    Signal(65262, 176, "Engine turbocharger oil temperature", 4, 2, 0.03125,
+           -273, "°C", "temperature"),
+    Signal(65262, 52, "Engine intercooler temperature", 6, 1, 1, -40,
+           "°C", "temperature"),
 )
 
 # topic, JSON/string payload, retain. Inject Home Assistant's MQTT publisher.

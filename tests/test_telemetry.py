@@ -62,13 +62,15 @@ class DecodeTests(unittest.TestCase):
         fixtures = (
             (61444, "ff ff 7d 40 1f ff ff ff", {190: 1000, 513: 0}),
             (61443, "ff 7d 32 ff ff ff ff ff", {91: 50, 92: 50}),
-            (65262, "64 ff a0 2e ff ff ff ff", {110: 60, 175: 100}),
-            (65263, "ff ff ff 32 ff ff 19 7d", {100: 200, 109: 50, 111: 50}),
+            (65262, "64 ff a0 2e ff ff ff ff",
+             {110: 60, 175: 100, 174: None, 176: None, 52: None}),
+            (65263, "ff ff ff 32 ff ff 19 7d",
+             {100: 200, 109: 50, 111: 50, 94: None, 98: None}),
             (65265, "ff 00 32 ff ff ff ff ff", {84: 50}),
             (65266, "c8 00 ff ff ff ff ff ff", {183: 10}),
             (65253, "20 4e 00 00 ff ff ff ff", {247: 1000}),
             (65248, "ff ff ff ff 40 1f 00 00", {245: 1000}),
-            (65271, "ff ff ff ff e0 01 ff ff", {168: 24}),
+            (65271, "ff ff ff ff e0 01 ff ff", {168: 24, 167: None}),
         )
         for pgn, data, expected in fixtures:
             with self.subTest(pgn=pgn):
@@ -92,6 +94,86 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(signals[190].decode(bytes(8)), 0)
         self.assertEqual(signals[110].decode(bytes(8)), -40)
         self.assertEqual(signals[513].decode(bytes(8)), -125)
+
+    def test_additional_signal_fixtures(self):
+        fixtures = (
+            (65276, 96, "ff 7d ff ff ff ff ff ff", 50),
+            (65269, 108, "c8 ff ff ff ff ff ff ff", 100),
+            (65269, 171, "ff ff ff a0 24 ff ff ff", 20),
+            (65269, 172, "ff ff ff ff ff 3c ff ff", 20),
+            (65270, 102, "ff 64 ff ff ff ff ff ff", 200),
+            (65270, 105, "ff ff 50 ff ff ff ff ff", 40),
+            (65270, 106, "ff ff ff 32 ff ff ff ff", 100),
+            (65270, 107, "ff ff ff ff 14 ff ff ff", 1),
+            (65270, 173, "ff ff ff ff ff a0 60 ff", 500),
+            (65272, 124, "ff 7d ff ff ff ff ff ff", 50),
+            (65272, 126, "ff ff 05 ff ff ff ff ff", 10),
+            (65272, 127, "ff ff ff 64 ff ff ff ff", 1600),
+            (65272, 177, "ff ff ff ff 60 2d ff ff", 90),
+            (65257, 182, "c8 00 00 00 ff ff ff ff", 100),
+            (65257, 250, "ff ff ff ff 20 4e 00 00", 10000),
+            (65244, 236, "d0 07 00 00 ff ff ff ff", 1000),
+            (65244, 235, "ff ff ff ff 20 4e 00 00", 1000),
+            (65271, 167, "ff ff 1c 02 ff ff ff ff", 27),
+            (65263, 94, "32 ff ff ff ff ff ff ff", 200),
+            (65263, 98, "ff ff 7d ff ff ff ff ff", 50),
+            (65262, 174, "ff 46 ff ff ff ff ff ff", 30),
+            (65262, 176, "ff ff ff ff a0 2e ff ff", 100),
+            (65262, 52, "ff ff ff ff ff ff 50 ff", 40),
+        )
+        for pgn, spn, data, expected in fixtures:
+            with self.subTest(pgn=pgn, spn=spn):
+                signal = next(
+                    item for item in SIGNALS
+                    if item.pgn == pgn and item.spn == spn
+                )
+                self.assertEqual(signal.decode(bytes.fromhex(data)), expected)
+        original = {
+            190, 513, 91, 92, 110, 175, 100, 109, 111,
+            84, 183, 247, 245, 168,
+        }
+        self.assertEqual(
+            original | {spn for _, spn, _, _ in fixtures},
+            {signal.spn for signal in SIGNALS},
+        )
+
+    def test_numeric_valid_range_boundaries(self):
+        for signal in SIGNALS:
+            first_invalid = 0xFB << (8 * (signal.length - 1))
+            for raw, valid in (
+                (0, True),
+                (first_invalid - 1, True),
+                (first_invalid, False),
+                ((1 << (8 * signal.length)) - 1, False),
+            ):
+                with self.subTest(spn=signal.spn, raw=raw):
+                    data = bytearray([0xFF] * 8)
+                    end = signal.start + signal.length
+                    data[signal.start:end] = raw.to_bytes(
+                        signal.length, "little"
+                    )
+                    value = signal.decode(data)
+                    if valid:
+                        self.assertAlmostEqual(
+                            value, raw * signal.resolution + signal.offset,
+                            places=5,
+                        )
+                    else:
+                        self.assertIsNone(value)
+
+    def test_catalog_layout_and_unique_identities(self):
+        self.assertEqual(
+            len({(s.pgn, s.spn) for s in SIGNALS}), len(SIGNALS)
+        )
+        for signal in SIGNALS:
+            with self.subTest(spn=signal.spn):
+                self.assertIn(signal.length, (1, 2, 4))
+                self.assertGreaterEqual(signal.start, 0)
+                self.assertLessEqual(signal.start + signal.length, 8)
+                self.assertGreater(signal.resolution, 0)
+                self.assertEqual(
+                    signal.decode(bytes(8)), signal.offset
+                )
 
 
 class PublishingTests(unittest.IsolatedAsyncioTestCase):
@@ -210,6 +292,36 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
              True))
         self.assertTrue(all(payload == "" and retain for _,
                         payload, retain in self.messages()[1:]))
+
+    async def test_every_signal_publishes_state_and_discovery_metadata(self):
+        for pgn in {signal.pgn for signal in SIGNALS}:
+            await self.bridge.async_process_frame(
+                Frame((6 << 26) | (pgn << 8) | 3, bytes(8))
+            )
+        messages = {
+            topic: (payload, retain)
+            for topic, payload, retain in self.messages()
+        }
+        for signal in SIGNALS:
+            with self.subTest(spn=signal.spn):
+                key = f"bluefire_coach_3_{signal.spn}"
+                config, retain = messages[
+                    f"homeassistant/sensor/{key}/config"
+                ]
+                config = json.loads(config)
+                self.assertTrue(retain)
+                self.assertEqual(config["state_class"], signal.state_class)
+                self.assertEqual(
+                    config.get("device_class"), signal.device_class
+                )
+                self.assertEqual(config["unit_of_measurement"], signal.unit)
+                payload, retain = messages[config["state_topic"]]
+                state = json.loads(payload)
+                self.assertFalse(retain)
+                self.assertEqual(state["value"], signal.offset)
+                self.assertEqual(state["pgn"], signal.pgn)
+                self.assertEqual(state["source_address"], 3)
+                self.assertEqual(state["unit"], signal.unit)
 
 
 if __name__ == "__main__":

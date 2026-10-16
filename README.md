@@ -12,15 +12,17 @@ No Android gateway is required or planned.
 
 ## What is ready
 
-- Offline config flow with unique Bluetooth addresses and vehicle identifiers.
+- UI setup with nearby-device selection or offline manual MAC entry, duplicate
+  prevention, and reconfiguration without changing entity/MQTT identity.
 - Diagnostic `Protocol status` sensor showing `protocol_required`.
 - Explicit, read-only BLE GATT inspection via Home Assistant's connectable
   Bluetooth scanners, including compatible proxies.
-- Transport-independent decoding of 14 byte-aligned J1939 SPNs, including
+- Transport-independent decoding of 37 byte-aligned J1939 SPNs, including
   reserved/error/not-available handling, engineering units, and source addresses.
 - MQTT publishing/discovery code, source-separated readings, raw frame output,
   availability, broker reconnect handling, and non-retained live state.
-- Hardware-free tests using Python's standard library.
+- Hardware-free unittest tests, real configuration-schema validation, and
+  repeatable PEP 8 checks.
 
 The MQTT publisher is deliberately **not connected to BLE notifications yet**.
 BlueFire notification payloads are not assumed to be raw CAN frames.
@@ -33,17 +35,55 @@ This foundation has hardware-free tests, not a verified full Home Assistant or
 vehicle commissioning run.
 
 1. Copy the repository's `custom_components/bluefire` directory into your
-   Home Assistant configuration's `custom_components` directory and restart HA.
+   Home Assistant configuration directory. The resulting manifest path should
+   be `/config/custom_components/bluefire/manifest.json` on HA OS, **not**
+   `/config/custom_components/habluefireintegration/custom_components/...`.
+   Restart Home Assistant after installing or upgrading the files.
 2. In **Settings → Devices & services → Add integration**, select **BlueFire**.
-3. Enter the adapter's Bluetooth MAC address, an adapter name, and a vehicle MQTT
-   identifier. `liberty_h3_45` is the default identifier, not a vehicle-detection
-   rule. The identifier must be unique and use 1–64 lowercase letters, digits,
-   underscores or hyphens, starting with a letter or digit.
-4. Configuration does not require the adapter nearby. Expect **Protocol required**,
+3. Choose **Choose a nearby Bluetooth device** when the adapter is powered and
+   visible, or **Enter a MAC address manually (works offline)** otherwise.
+   The nearby list includes all connectable BLE devices, not verified BlueFire
+   matches. Select only the adapter you recognize; confirm or correct its MAC
+   and name on the following form. Setup never connects to or probes a device.
+4. Enter a vehicle MQTT identifier. `liberty_h3_45` is the default identifier,
+   not a vehicle-detection rule. The identifier must be unique and use 1–64
+   lowercase letters, digits, underscores or hyphens, starting with a letter
+   or digit. Blank adapter names and duplicate MACs/topics are rejected.
+5. Configuration does not require the adapter nearby. Expect **Protocol required**,
    an offline MQTT availability message, and **no engine MQTT sensors yet**.
 
 No broker credentials are stored by this integration; it uses HA's MQTT client.
 There are no adapter passwords or PGN transmit/reset controls.
+
+### Find and specify the Bluetooth MAC address
+
+Use the **BlueFire peripheral's** BLE address, not your HA computer, phone,
+ESPHome proxy, Wi-Fi adapter or vehicle VIN. With the adapter powered, use the
+nearby-device list above or the Bluetooth advertisement monitor in HA's Bluetooth
+integration to match the adapter's name and address. Names alone are not proof
+of device identity. The selection list excludes already configured addresses.
+There are no automatic discovery matchers until BlueFire identifiers are verified.
+
+Manual entry accepts `AA:BB:CC:DD:EE:01`, `AA-BB-CC-DD-EE-01` or `AABBCCDDEE01`
+(case-insensitive, surrounding spaces ignored) and stores
+`AA:BB:CC:DD:EE:01`. Do not enter this example unless it is your real device.
+All-zero/broadcast addresses, partial MACs and mixed separators are rejected.
+If you do not know the MAC yet, wait until you can identify it; no placeholder
+or random address will make the adapter discoverable.
+
+To correct an offline entry later, select **Reconfigure** from that BlueFire
+entry's menu in **Settings → Devices & services**. Change the MAC or name;
+HA reloads the entry automatically. Diagnostic device/entity IDs remain stable,
+including migration of the earlier MAC-based IDs. The vehicle MQTT identifier
+stays unchanged to avoid orphaning topics and discovered entities. Remove and
+recreate the entry if you intentionally need a different MQTT vehicle identity.
+YAML setup is not supported.
+
+If no nearby devices are shown, choose manual setup, check HA's Bluetooth
+scanner/proxy is connectable, power the adapter, and stop competing BLE apps.
+If MQTT is not configured, configure its broker first; BlueFire setup will retry
+once HA's MQTT client becomes available. Installing BlueFire does not create a
+broker or establish hardware compatibility.
 
 ### When you can power the adapter
 
@@ -93,8 +133,9 @@ Example **synthetic** measurement illustrating the schema, not received data:
 
 Timestamps are UTC ingestion time, not ECU timestamps. Numerical invalid values
 become JSON `null`, never zero or `"NA"`; MQTT discovery converts null to HA's
-explicit `None`/unknown state rather than preserving an old value. Valid negative temperatures/torque are
-preserved. Unknown PGNs are passed through as raw frames without guessed signals.
+explicit `None`/unknown state rather than preserving an old value. Valid negative
+temperatures/torque are preserved. Unknown PGNs pass through as raw frames without
+guessed signals.
 PDU1 destination addresses are excluded from PGNs. Transport-protocol multi-packet
 messages, DM1 faults, manufacturer-specific signals, and CAN FD are not decoded.
 
@@ -113,13 +154,38 @@ stream watchdog is claimed at this stage.
 | --- | --- | --- | --- |
 | 61444 | 190 / 513 | Engine speed / actual torque | rpm / % |
 | 61443 | 91 / 92 | Accelerator position / engine load | % |
-| 65262 | 110 / 175 | Coolant / engine oil temperature | °C |
-| 65263 | 100 / 109 / 111 | Oil pressure / coolant pressure / coolant level | kPa / kPa / % |
+| 65262 | 110 / 174 / 175 / 176 / 52 | Coolant / fuel / oil / turbo oil / intercooler temperature | °C |
+| 65263 | 94 / 98 / 100 / 109 / 111 | Fuel pressure / oil level / oil pressure / coolant pressure / coolant level | kPa / % / kPa / kPa / % |
 | 65265 | 84 | Wheel-based vehicle speed | km/h |
 | 65266 | 183 | Engine fuel rate | L/h |
 | 65253 | 247 | Total engine hours | h |
 | 65248 | 245 | Total vehicle distance | km |
-| 65271 | 168 | Battery potential | V |
+| 65271 | 167 / 168 | Charging system / battery potential | V |
+| 65276 | 96 | Fuel level | % |
+| 65269 | 108 / 171 / 172 | Barometric pressure / ambient temperature / air intake temperature | kPa / °C / °C |
+| 65270 | 102 / 105 / 106 / 107 / 173 | Intake manifold pressure / temperature / inlet pressure / filter differential pressure / exhaust temperature | kPa / °C / kPa / kPa / °C |
+| 65272 | 124 / 126 / 127 / 177 | Transmission oil level / filter differential pressure / oil pressure / oil temperature | % / kPa / kPa / °C |
+| 65257 | 182 / 250 | Trip / total fuel used | L |
+| 65244 | 235 / 236 | Total idle hours / idle fuel used | h / L |
+
+Counters use MQTT `total_increasing`; other readings use `measurement`.
+Numeric raw ranges include `0xFA`, `0xFAFF` and `0xFAFFFFFF` for 1/2/4-byte
+signals respectively. Upper reserved/error/not-available encodings produce
+`null`. This rule applies only to the catalog's numeric signals, not arbitrary
+J1939 enumerations; gears (including the special Park encoding) are not decoded.
+Transmission pressures and temperatures are not assertions about a particular
+Allison transmission's broadcast configuration.
+
+The added signal positions/scales were cross-checked against these public
+implementation references (not normative SAE or vehicle certification):
+
+- [MeatPi's numeric J1939 definitions and valid ranges](https://github.com/meatpiHQ/meatpi-components/blob/d8cd667e4da19813977f3466423ecc93dc84b650/components/j1939/j1939_spn_core.c#L37-L103).
+- [CANboat's J1939 field layouts and SPN identities](https://github.com/canboat/canboat/tree/3de4c8463383e33e74f71232f4b4315ee4600f7c/database/j1939/pgns),
+  specifically PGNs 65244, 65257, 65262, 65263, 65270, 65272 and 65276.
+- [ISOIdent's signal table](https://github.com/florianeidner/isoident/blob/0ab94791c1fb76183ae27fdb242f2ab1b1159913/datasets/signals.CSV#L5284-L5372)
+  for ambient conditions, transmission fluid and charging potential.
+- [Public counter DBC definitions](https://github.com/JoaoCBFreitas/SNMPVeicular/blob/49a8317c65ac3011ccabc71293e0f44eee1ae942/projeto/SocketCAN/J1939/J1939.dbc#L44-L57)
+  for idle/fuel counters and their engineering maxima.
 
 This is a decoder catalog, **not a promise that this coach supplies every signal**.
 Verify the ECM, diagnostic connector, bus wiring and J1939/J1708 availability on
@@ -167,9 +233,22 @@ runtime dependency on HAVRV or duplication of its RV profile/dashboard code.
 From the repository root, run:
 
 ```sh
+python -m pip install -r "$PWD/requirements-dev.txt"
 python -m unittest discover -s "$PWD/tests" -v
+python -m pycodestyle "$PWD/custom_components" "$PWD/tests"
+```
+
+Use Python 3.12+ for these isolated checks; running the integration requires
+HA's supported Python version. PEP 8 uses the default **79-character limit**
+with no ignored violations. To apply formatting before checking:
+
+```sh
+python -m autopep8 --in-place --recursive "$PWD/custom_components" "$PWD/tests"
 ```
 
 Tests use synthetic complete CAN frames and injected MQTT/BLE/HA boundary mocks;
 they do not publish to a broker or contact a device. They cannot establish
-BlueFire compatibility. No external test dependencies are required.
+BlueFire compatibility or replace testing in a running HA instance. Config-flow
+tests use HA's real schema library, Voluptuous, while mocking flow-manager
+helpers; it is supplied by HA in production. Development dependencies are pinned
+separately and do not add packages to the integration's runtime requirements.

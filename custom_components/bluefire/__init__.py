@@ -38,8 +38,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Register an explicit, read-only GATT inspection action."""
     import voluptuous as vol
 
-    from homeassistant.core import SupportsResponse
     from homeassistant.config_entries import ConfigEntryState
+    from homeassistant.core import SupportsResponse
     from homeassistant.exceptions import ServiceValidationError
     from homeassistant.helpers import config_validation as cv
 
@@ -53,7 +53,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             or entry.state is not ConfigEntryState.LOADED
         ):
             raise ServiceValidationError(
-                "Select a loaded BlueFire config entry")
+                "Select a loaded BlueFire config entry"
+            )
         runtime = entry.runtime_data
         if runtime.inspecting:
             raise ServiceValidationError("Inspection is already running")
@@ -62,7 +63,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             runtime.services = await async_inspect(hass, entry.data["address"])
             return {
                 "status": STATUS_PROTOCOL_REQUIRED,
-                "services": runtime.services}
+                "services": runtime.services,
+            }
         finally:
             runtime.inspecting = False
 
@@ -91,7 +93,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not await mqtt.async_wait_for_mqtt_client(hass):
         raise ConfigEntryNotReady(
-            "Configure the Home Assistant MQTT integration first")
+            "Configure the Home Assistant MQTT integration first"
+        )
 
     bridge = MqttBridge(entry.data[CONF_VEHICLE_ID], publish)
     entry.runtime_data = BlueFireRuntime(bridge)
@@ -104,7 +107,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def connection_changed(connected: bool) -> None:
         if connected:
             entry.async_create_task(
-                hass, mqtt_ready(), "BlueFire MQTT reconnect")
+                hass, mqtt_ready(), "BlueFire MQTT reconnect"
+            )
 
     entry.async_on_unload(
         mqtt.async_subscribe_connection_status(hass, connection_changed)
@@ -119,8 +123,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Withdraw availability and unload diagnostic entities."""
-    from homeassistant.const import Platform
     from homeassistant.components import mqtt
+    from homeassistant.const import Platform
 
     if not await hass.config_entries.async_unload_platforms(
         entry, [Platform.SENSOR]
