@@ -1,4 +1,5 @@
 autopep8==2.3.2
 pycodestyle==2.15.0
 PyYAML==6.0.3
+coverage==7.16.2
 voluptuous==0.16.0
