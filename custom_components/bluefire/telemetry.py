@@ -65,6 +65,8 @@ class Signal:
 
     def decode(self, data: bytes) -> float | None:
         """Decode a catalogued numeric SPN from a complete J1939 payload."""
+        if not isinstance(data, bytes) or len(data) != 8:
+            raise ValueError("Expected exactly eight CAN data bytes")
         raw = int.from_bytes(
             data[self.start:self.start + self.length], "little"
         )
@@ -274,6 +276,8 @@ class MqttBridge:
 
     async def async_process_frame(self, frame: Frame) -> None:
         """Accept a verified, reassembled frame from a future BLE driver."""
+        if not isinstance(frame, Frame):
+            raise ValueError("Expected a verified complete CAN Frame")
         async with self._frame_lock:
             if frame.source_address >= 254:
                 # Null/global addresses are not valid transmitter identities.
