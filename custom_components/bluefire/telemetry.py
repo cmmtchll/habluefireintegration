@@ -1,7 +1,8 @@
 """Transport-independent J1939 and J1708/J1587 telemetry and MQTT contracts.
 
-BlueFire notification bytes MUST be unwrapped by a verified vendor protocol
-implementation before constructing a Frame. They are not raw CAN frames.
+BlueFire notification bytes must be decoded before constructing a Frame; they
+are not raw CAN frames. The repository's documented receive observations may
+guide internal implementation, but are not hardware-validated release evidence.
 """
 
 import asyncio

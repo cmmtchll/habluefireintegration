@@ -10,6 +10,11 @@ No Android gateway is required or planned.
 > Continuous BLE reception, BlueFire authentication, and reconnection of
 > a live telemetry stream are **not implemented**. No vehicle readings are
 > fabricated, and connecting to BLE alone never marks telemetry online.
+>
+> Internal receiver development is not blocked on verified traces or actual
+> hardware testing: use the documented static observations and synthetic
+> fixtures, and keep unvalidated behavior explicit. Validate against real
+> adapter traces and hardware before declaring a full public release.
 
 ## What is ready
 
@@ -118,7 +123,9 @@ ESPHome proxy, Wi-Fi adapter or vehicle VIN. With the adapter powered, use the
 nearby-device list above or the Bluetooth advertisement monitor in HA's Bluetooth
 integration to match the adapter's name and address. Names alone are not proof
 of device identity. The selection list excludes already configured addresses.
-There are no automatic discovery matchers until BlueFire identifiers are verified.
+There are no automatic discovery matchers yet. The UUID candidates documented
+below may be used for internal implementation; validate them against an actual
+adapter before declaring a full public release.
 
 Manual entry accepts `AA:BB:CC:DD:EE:01`, `AA-BB-CC-DD-EE-01` or `AABBCCDDEE01`
 (case-insensitive, surrounding spaces ignored) and stores
@@ -549,9 +556,11 @@ The original BLE UUID candidates observed in `CommBaseBLE` are:
 | EZ service | `65333333-a115-11e2-9e9a-0800200ca100` |
 | EZ receive / client write | `65333333-a115-11e2-9e9a-0800200ca102` / `65333333-a115-11e2-9e9a-0800200ca101` |
 
-Compare these with the explicit `bluefire.inspect_adapter` inventory. They are
-not automatic discovery matchers or permission to subscribe/write. Device names
-and manufacturer ID `FFFF` alone are not reliable identity checks.
+Compare these candidate UUIDs with the explicit `bluefire.inspect_adapter`
+inventory when available. They may guide internal listener development, but are
+not proof of hardware compatibility. Device names and manufacturer ID `FFFF`
+alone are not reliable identity checks. Keep reception limited to telemetry;
+do not send vehicle-control or diagnostic commands.
 
 **Important contract boundary:** a PGN report is not necessarily an original
 eight-byte CAN frame. It has no explicit full arbitration ID, can contain
@@ -688,21 +697,30 @@ the MQTT frame/report boundary. Signal decoding now rejects incomplete data
 instead of letting an empty/partial slice become a plausible zero/low value.
 These vectors establish internal behavior, not vendor/hardware compatibility.
 
-To complete reception, obtain the applicable protocol and usage permissions, then:
+The following receiver work is for internal development and may proceed from
+these repository findings without verified adapter traces or actual-hardware
+testing. Keep assumptions visible and treat hardware validation as a gate before
+declaring a full public release:
 
-1. Implement the verified connection/authentication/subscription sequence using
-   Home Assistant's Bluetooth APIs; do not guess UUIDs from characteristic names.
-2. Validate the offline receive format against captures, including maximum
-   sizes, padding, notification interleaving and transport-specific behavior.
-   Establish how PGN reports map to original CAN identifiers before calling
-   `MqttBridge.async_process_frame(Frame(can_id, data))`; never guess that ID.
+1. Implement the connection, authentication and subscription path using Home
+   Assistant's Bluetooth APIs and the documented static observations. Use
+   synthetic fixtures for internal tests; do not infer UUIDs from characteristic
+   names alone.
+2. Exercise receive framing, maximum sizes, padding, notification interleaving
+   and transport variants with synthetic fixtures. PGN reports do not establish
+   original CAN identifiers: never guess one to call
+   `MqttBridge.async_process_frame(Frame(can_id, data))`. Where the report format
+   does not provide a complete CAN frame, preserve it as a distinct report
+   contract rather than fabricating frame fields.
 3. Manage BLE cancellation and bounded reconnect/backoff; notify the MQTT bridge
    of transport loss. The MQTT ownership ledger and freshness watchdog are
-   already prepared, but the future receiver must integrate its own lifecycle
-   and verify an appropriate reporting cadence for each signal.
-4. Verify signal values and missing-data behavior against the vendor app and
-   recorded fixtures from the actual adapter. On-change delivery needs a verified
-   refresh policy; do not replay stale values merely to defeat sensor expiry.
+   already prepared; integrate receiver lifecycle and use an explicit provisional
+   reporting/refresh policy for internal builds. Do not replay stale values merely
+   to defeat sensor expiry.
+4. Before a full public release, validate the supported adapter variants,
+   protocol assumptions, signal values, missing-data behavior and reporting
+   cadence against real adapter traces and hardware. Internal implementation and
+   synthetic testing do not require those release checks to be completed first.
 
 ## HAVRV relationship
 
