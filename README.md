@@ -15,7 +15,11 @@ No Android gateway is required or planned.
 
 - UI setup with nearby-device selection or offline manual MAC entry, duplicate
   prevention, and reconfiguration without changing entity/MQTT identity.
-- Diagnostic `Protocol status` sensor showing `protocol_required`.
+- Diagnostic `Protocol status` sensor showing `protocol_required`, plus
+  receive-health diagnostic sensors (last data/advertisement, signal strength,
+  notification, packet, error and unrecognized-message tallies).
+- Downloadable diagnostics with full entry/MQTT/Bluetooth state and a 20-second
+  raw BLE notification capture with framing, parse and timing analysis.
 - Explicit, read-only BLE GATT inspection via Home Assistant's connectable
   Bluetooth scanners, including compatible proxies.
 - Transport-independent decoding of 37 byte-aligned J1939 SPNs, including
@@ -150,10 +154,74 @@ enumerates metadata, and disconnects; it does not read characteristic values,
 subscribe to notifications, authenticate, or send adapter commands. Offline
 adapters fail with an actionable error instead of repeated background attempts.
 
-The integration's downloadable diagnostics include the last successful inventory
-and protocol status, but omit the Bluetooth address, vehicle label, VIN, and raw
-telemetry. A GATT inventory helps identify the adapter; it does **not** establish
-the wire protocol. Do not publish captures containing vehicle identity or location.
+### Diagnostics and raw capture
+
+Downloading diagnostics (**Settings → Devices & services → BlueFire → ⋮ →
+Download diagnostics**) is a deliberate user action, so the file is **not
+redacted**. It takes about 20 seconds plus connection time and contains:
+
+- Config entry data/options (including the Bluetooth MAC and vehicle ID),
+  integration version and protocol status.
+- MQTT connection state, discovery settings, the persisted discovery ledger
+  record and the live bridge state (online flag, frame age, known signals and
+  discovery topics for J1939 and J1587).
+- Home Assistant's Bluetooth view: scanner counts, whether the address is seen
+  by any/connectable scanners, and the last advertisement (name, RSSI, TX
+  power, source scanner/proxy, age, service UUIDs, manufacturer and service
+  data) before and after the capture.
+- Receive-health counters and RSSI history (`health_before_capture` and
+  `health`), recent error messages and the last capture summary.
+- A **raw notification capture**: the integration connects, subscribes to every
+  notify/indicate characteristic for 20 seconds, then unsubscribes and
+  disconnects. Every notification is listed with its time offset,
+  characteristic UUID/handle, length and hex payload (bounded to 5,000
+  notifications; `dropped_notifications` reports overflow). Subscription
+  failures, MTU, connection time and the full GATT inventory with handles are
+  included.
+- Capture analysis per characteristic in both stream and padded-notification
+  framing: packet counts, framing/parse error messages, decode success rate,
+  command/PGN/J1587/OBD tallies (with names and whether each PGN is known),
+  J1587 firmware formats that parse, sample decoded records, notification
+  rate, mean interval, longest gap and length histogram. `selected_framing`
+  names the mode that explains the data with fewer errors.
+
+Enabling notifications writes only the standard client characteristic
+configuration descriptors. No characteristic values are read, no
+authentication or BlueFire commands are sent and nothing is published to MQTT.
+Adapters that need an authentication handshake may therefore send little or no
+data; an empty capture is itself useful evidence. If another inspection or
+capture is running, or the adapter is not visible, the file reports the capture
+as `skipped`/`failed` and still includes all other state. Stop other apps using
+the adapter first. Review the file before sharing it: it can contain the MAC,
+VIN or location-related vehicle data.
+
+For a capture without the rest of the dump, or a different length, run the
+`bluefire.capture_notifications` action with a 5–60 second `duration`; it
+returns the same capture structure as an action response.
+
+### Diagnostic sensors
+
+The BlueFire device has these diagnostic entities. Counters are in memory, use
+`total_increasing` and reset when Home Assistant restarts.
+
+| Entity | Meaning |
+| --- | --- |
+| Last data seen | Time BLE notification data was last received |
+| Last advertisement | Time HA last saw a passive advertisement; attributes show presence and scanner/proxy |
+| Signal strength | Latest advertisement RSSI in dBm (unknown when HA reports the adapter unavailable); attributes include min/max/mean/spread |
+| Decode success rate | Decoded packets as a percentage of packets plus framing/parse errors |
+| BLE notifications / BLE bytes received | Notification and byte tallies (bytes disabled by default) |
+| Decoded packets | Valid framed packets; attributes split heartbeats and PGN/J1587/OBD reports |
+| Framing errors / Parse errors | Invalid length/checksum/padding and malformed report bodies, with recent messages |
+| Unrecognized messages | Unknown adapter commands plus PGNs absent from the catalog |
+| Connection errors | Failed inspections/captures |
+| MQTT messages published / MQTT publish errors | Publisher tallies (published disabled by default) |
+| Diagnostic captures | Number of captures; attributes summarize the last one |
+| Last error | Most recent error class and message |
+
+Signal strength and last advertisement come from Home Assistant's passive
+Bluetooth advertisement tracking; this never connects to the adapter. Counters
+otherwise change only during captures until a live receiver exists.
 
 ## MQTT contract
 
