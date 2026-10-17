@@ -1,10 +1,10 @@
 rules:
   action-setup:
     status: done
-    comment: The read-only inspection service is registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
+    comment: The read-only inspection and notification-capture services are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
   appropriate-polling:
     status: exempt
-    comment: The integration does not poll the adapter; its timer only expires stale MQTT availability.
+    comment: The integration does not poll the adapter; its timer only expires stale MQTT availability, and diagnostic sensors in custom_components/bluefire/sensor.py read in-memory counters every 15 seconds.
   brands:
     status: done
     comment: The integration provides a local HACS brand icon at custom_components/bluefire/brand/icon.png.
@@ -39,8 +39,8 @@ rules:
     status: done
     comment: Retained MQTT discovery cleanup on permanent entry removal is documented in README.md.
   entity-event-setup:
-    status: exempt
-    comment: The current diagnostic entity has no state-event listener requiring registration or removal.
+    status: done
+    comment: Health sensors register their update listener in async_added_to_hass with async_on_remove in custom_components/bluefire/sensor.py.
   entity-unique-id:
     status: done
     comment: The diagnostic entity and MQTT discoveries use stable unique identifiers in custom_components/bluefire/sensor.py and custom_components/bluefire/telemetry.py.
@@ -72,17 +72,17 @@ rules:
     status: done
     comment: README.md documents manual installation and states the Home Assistant and MQTT prerequisites.
   entity-unavailable:
-    status: todo
-    comment: Future live telemetry entities and their unavailable behavior are not yet implemented or validated.
+    status: done
+    comment: MQTT-discovered telemetry has per-protocol retained availability and freshness expiry; the receiver withdraws availability on connection loss in custom_components/bluefire/receiver.py and custom_components/bluefire/telemetry.py.
   integration-owner:
     status: done
     comment: An active owner is declared in custom_components/bluefire/manifest.json.
   log-when-unavailable:
-    status: todo
-    comment: Rate-limited unavailable and recovery logging for a live BLE receiver is not implemented.
+    status: done
+    comment: Receiver connection failures are logged with bounded exponential reconnect backoff, and successful subscriptions log recovery in custom_components/bluefire/receiver.py.
   parallel-updates:
-    status: exempt
-    comment: There are no polling entity updates; MQTT telemetry is created and updated outside the sensor platform.
+    status: done
+    comment: The sensor platform sets PARALLEL_UPDATES to 0 for in-memory diagnostic updates in custom_components/bluefire/sensor.py.
   reauthentication-flow:
     status: exempt
     comment: The integration currently uses no credentials or authenticated external service.
@@ -94,7 +94,7 @@ rules:
     comment: The diagnostic sensor is associated with a config-entry device in custom_components/bluefire/sensor.py.
   diagnostics:
     status: done
-    comment: Redacted config-entry diagnostics are provided in custom_components/bluefire/diagnostics.py and tested in tests/test_boundaries.py.
+    comment: User-requested, unredacted config-entry diagnostics with a bounded raw BLE notification capture are provided in custom_components/bluefire/diagnostics.py and tested in tests/test_boundaries.py.
   discovery-update-info:
     status: todo
     comment: The integration does not currently track or update adapter network identity information.
@@ -109,13 +109,13 @@ rules:
     comment: The README has a synthetic payload example but no end-user automation examples yet.
   docs-known-limitations:
     status: done
-    comment: The missing BLE receiver and unsupported protocol behavior are clearly listed in README.md.
+    comment: The provisional receiver's missing authentication/startup exchange and hardware-unverified protocol behavior are clearly listed in README.md.
   docs-supported-devices:
     status: done
     comment: README.md explains the BlueFire adapter scope and that hardware compatibility is not yet verified.
   docs-supported-functions:
     status: done
-    comment: Implemented setup, diagnostics, MQTT behavior, and unimplemented receiver functions are described in README.md.
+    comment: Implemented setup, receive-only BLE behavior, diagnostics, MQTT behavior, and protocol limitations are described in README.md.
   docs-troubleshooting:
     status: done
     comment: README.md includes guidance for missing BLE devices, MQTT setup, adapter inspection, and offline behavior.
@@ -127,16 +127,16 @@ rules:
     comment: Dynamic Home Assistant device addition after initial setup is not implemented.
   entity-category:
     status: done
-    comment: The protocol status entity is categorized as diagnostic in custom_components/bluefire/sensor.py.
+    comment: The protocol status and receive-health entities are categorized as diagnostic in custom_components/bluefire/sensor.py.
   entity-device-class:
     status: done
     comment: The protocol status entity and prepared telemetry use appropriate device classes in custom_components/bluefire/sensor.py and custom_components/bluefire/telemetry.py.
   entity-disabled-by-default:
-    status: exempt
-    comment: No optional or noisy native entity set is currently generated by the integration.
+    status: done
+    comment: Byte and MQTT-publish tally sensors are disabled by default in custom_components/bluefire/sensor.py.
   entity-translations:
     status: todo
-    comment: Config and service strings are translated, but the diagnostic entity has no translation key.
+    comment: Config and service strings are translated, but the diagnostic entities have no translation keys.
   exception-translations:
     status: todo
     comment: Service validation errors currently use inline English text rather than translated exception strings.

@@ -68,6 +68,20 @@
           "description": "The BlueFire adapter to inspect."
         }
       }
+    },
+    "capture_notifications": {
+      "name": "Capture notifications",
+      "description": "Connect once, subscribe to every notify/indicate characteristic for a short window and return raw notification bytes with framing, parse, timing and signal-strength analysis. Does not read values, authenticate, or write BlueFire commands. Downloading diagnostics runs the same capture for 20 seconds.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The BlueFire adapter to capture from."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Capture length in seconds (5–60)."
+        }
+      }
     }
   }
 }

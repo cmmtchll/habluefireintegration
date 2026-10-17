@@ -5,3 +5,20 @@ inspect_adapter:
       selector:
         config_entry:
           integration: bluefire
+capture_notifications:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
+    duration:
+      required: false
+      default: 20
+      selector:
+        number:
+          min: 5
+          max: 60
+          step: 1
+          unit_of_measurement: s
+          mode: box

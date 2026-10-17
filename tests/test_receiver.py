@@ -7,6 +7,8 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from custom_components.bluefire.health import Health
+
 
 def module(name, **attributes):
     result = ModuleType(name)
@@ -57,7 +59,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(sys.modules.pop, self.module_name, None)
         self.api = importlib.import_module(self.module_name)
         self.receiver = self.api.BlueFireReceiver(
-            object(), "AA:BB:CC:DD:EE:01", self.bridge
+            object(), "AA:BB:CC:DD:EE:01", self.bridge,
+            health=Health(),
         )
 
     @staticmethod
@@ -79,6 +82,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         report = self.bridge.async_process_pgn_report.await_args.args[0]
         self.assertEqual(report.pgn, 61444)
         self.assertEqual(report.data, bytes.fromhex("00 00 7d 40 1f ff ff ff"))
+        self.assertEqual(self.receiver.health.counters["pgn_reports"], 1)
+        self.assertIsNotNone(self.receiver.health.last_data)
 
     async def test_configured_j1587_format_and_obd_reports_route_separately(
             self):
@@ -98,11 +103,16 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             self.bridge.async_process_obd_report.await_args.args[0].pid, 12
         )
 
-    async def test_j1587_is_ignored_until_firmware_format_is_explicit(self):
-        await self.receiver._async_process_body(
-            bytes.fromhex("9a 80 be 02 34 12")
-        )
+    async def test_j1587_requires_explicit_firmware_format(self):
+        with self.assertRaisesRegex(
+            self.api.ProtocolError, "Select a J1587 firmware format"
+        ):
+            await self.receiver._async_process_body(
+                bytes.fromhex("9a 80 be 02 34 12")
+            )
         self.bridge.async_process_j1587.assert_not_awaited()
+        self.assertEqual(self.receiver.health.counters["parse_errors"], 1)
+        self.assertEqual(self.receiver.health.counters["unknown_commands"], 0)
 
     async def test_controls_and_heartbeats_never_mark_telemetry_online(self):
         for command in (255, 42):
@@ -110,6 +120,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.async_process_pgn_report.assert_not_awaited()
         self.bridge.async_process_j1587.assert_not_awaited()
         self.bridge.async_process_obd_report.assert_not_awaited()
+        self.assertEqual(self.receiver.health.counters["heartbeats"], 1)
+        self.assertEqual(self.receiver.health.counters["unknown_commands"], 1)
 
     async def test_notification_callback_overflow_signals_reconnect(self):
         self.receiver._queue = __import__("asyncio").Queue(maxsize=1)
@@ -187,6 +199,39 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.client.stop_notify.assert_awaited_once_with(characteristic)
         self.client.disconnect.assert_awaited_once()
 
+    async def test_diagnostic_pause_closes_connection_without_offline_publish(
+        self,
+    ):
+        ready = asyncio.Event()
+        characteristic = SimpleNamespace(
+            uuid=self.api.EZ_RECEIVE, properties=["notify"]
+        )
+        self.client.services = [
+            SimpleNamespace(
+                uuid=self.api.EZ_SERVICE,
+                characteristics=[characteristic],
+            )
+        ]
+        self.client.is_connected = True
+
+        async def start_notify(*_args):
+            ready.set()
+
+        self.client.start_notify.side_effect = start_notify
+
+        with patch(
+            "custom_components.bluefire.receiver.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            task = asyncio.create_task(self.receiver.async_run())
+            await asyncio.wait_for(ready.wait(), 1)
+            await self.receiver.async_pause()
+            self.client.disconnect.assert_awaited_once()
+            self.bridge.async_disconnected.assert_not_awaited()
+            self.receiver.async_resume()
+            self.receiver.stop()
+            await asyncio.wait_for(task, 1)
+
     async def test_no_notify_characteristic_is_rejected(self):
         self.client.services = [
             SimpleNamespace(
@@ -221,6 +266,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receiver._async_receive_session.await_count, 2)
         sleep.assert_awaited_once_with(self.api.RECONNECT_MIN)
         self.bridge.async_disconnected.assert_awaited()
+        self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
+        self.assertEqual(self.receiver.health.counters["connection_errors"], 1)
 
     async def test_receiver_stops_cleanly_after_session_returns(self):
         async def session():
