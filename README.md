@@ -5,11 +5,13 @@ focused on a 2003-era **500 HP Detroit Diesel**, **Allison B500** transmission
 and Prevost H3-45 Liberty Coach Elegant Lady.
 No Android gateway is required or planned.
 
-> **Status: groundwork, not a working BlueFire receiver.** You can configure the
-> integration offline and inspect a powered adapter's BLE service metadata.
-> Continuous BLE reception, BlueFire authentication, and reconnection of
-> a live telemetry stream are **not implemented**. No vehicle readings are
-> fabricated, and connecting to BLE alone never marks telemetry online.
+> **Status: provisional internal receiver enabled; hardware not verified.** A
+> loaded entry connects to the documented modern EZ GATT service, subscribes to
+> its receive characteristics, decodes receive packets and routes reports into
+> MQTT. PGN reports use a separate report contract and never invent CAN IDs.
+> Command-level BlueFire authentication/startup is not implemented: static
+> observations do not provide its payloads. Do not treat this as a public
+> release or a validated adapter integration.
 >
 > Internal receiver development is not blocked on verified traces or actual
 > hardware testing: use the documented static observations and synthetic
@@ -18,15 +20,17 @@ No Android gateway is required or planned.
 
 ## What is ready
 
-- UI setup with nearby-device selection or offline manual MAC entry, duplicate
+- UI setup with nearby-device selection or manual MAC entry, duplicate
   prevention, and reconfiguration without changing entity/MQTT identity.
-- Diagnostic `Protocol status` sensor showing `protocol_required`, plus
+- Diagnostic `Protocol status` sensor showing `receiver_enabled`, plus
   receive-health diagnostic sensors (last data/advertisement, signal strength,
   notification, packet, error and unrecognized-message tallies).
 - Downloadable diagnostics with full entry/MQTT/Bluetooth state and a 20-second
   raw BLE notification capture with framing, parse and timing analysis.
 - Explicit, read-only BLE GATT inspection via Home Assistant's connectable
   Bluetooth scanners, including compatible proxies.
+- Provisional receive-only BLE subscriptions for the documented EZ service,
+  bounded reconnect/backoff, receive framing validation, and MQTT report routing.
 - Transport-independent decoding of 37 byte-aligned J1939 SPNs, including
   reserved/error/not-available handling, engineering units, and source addresses.
 - Shared, exportable namespaced dictionary for measurement labels, units,
@@ -45,8 +49,9 @@ No Android gateway is required or planned.
 - Hardware-free unittest tests, real configuration-schema validation, and
   repeatable PEP 8 checks plus a Home Assistant quality-scale checklist audit.
 
-The MQTT publisher is deliberately **not connected to BLE notifications yet**.
-BlueFire notification payloads are not assumed to be raw CAN frames.
+The live receiver is connected to BLE notifications. BlueFire notification
+payloads are not assumed to be raw CAN frames, and command-level authentication
+is not implemented because its wire payload is undocumented in the repository.
 The [known codes and mappings reference](docs/code-reference.md) lists the
 supported IDs, strings, descriptions, units, controller profiles and sources.
 
@@ -64,16 +69,19 @@ vehicle commissioning run.
    Restart Home Assistant after installing or upgrading the files.
 2. In **Settings → Devices & services → Add integration**, select **BlueFire**.
 3. Choose **Choose a nearby Bluetooth device** when the adapter is powered and
-   visible, or **Enter a MAC address manually (works offline)** otherwise.
+visible, or enter its MAC address manually.
    The nearby list includes all connectable BLE devices, not verified BlueFire
    matches. Select only the adapter you recognize; confirm or correct its MAC
-   and name on the following form. Setup never connects to or probes a device.
+   and name on the following form. Setup itself does not connect; the receiver
+   starts when the config entry loads and retries with bounded backoff.
 4. Enter a vehicle MQTT identifier. `liberty_h3_45` is the default identifier,
    not a vehicle-detection rule. The identifier must be unique and use 1–64
    lowercase letters, digits, underscores or hyphens, starting with a letter
    or digit. Blank adapter names and duplicate MACs/topics are rejected.
-5. Configuration does not require the adapter nearby. Expect **Protocol required**,
-   an offline MQTT availability message, and **no engine MQTT sensors yet**.
+5. The adapter can be configured while offline. Expect the diagnostic status
+   **receiver_enabled**. The live receiver attempts a connection with bounded
+   backoff; MQTT availability stays offline until valid report data arrives.
+   Command-level authentication/startup is not implemented.
 
 No broker credentials are stored by this integration; it uses HA's MQTT client.
 There are no adapter passwords or PGN transmit/reset controls.
@@ -91,9 +99,9 @@ There are no adapter passwords or PGN transmit/reset controls.
    second broker login or MQTT connection. Reload BlueFire after changing those
    MQTT options. This settings lookup is isolated because HA provides no public
    discovery-settings getter.
-4. Add BlueFire as described above. The integration prepares its stable MQTT
-   vehicle namespace, but no measurements or MQTT-discovered engine device will
-   appear until the native receiver is completed and valid frames arrive.
+4. Add BlueFire as described above. The integration starts the provisional EZ
+   receiver. Measurement entities appear only for recognized, complete reports;
+   raw PGN reports remain distinct from CAN frames.
 5. When live reception is available, all measurements from one adapter are
    grouped under one MQTT-owned device with stable identifiers. The BlueFire
    integration's diagnostic device remains separate; do not manually create
@@ -102,7 +110,7 @@ There are no adapter passwords or PGN transmit/reset controls.
 
 In the MQTT integration's **Configure → Listen to a topic** tool, listen to
 `vehicle/liberty_h3_45/j1939/#` (replace the vehicle ID). Expect retained `offline`
-in preparation mode, not sample engine data. Once receiving, inspect numeric
+until the first valid report, not sample engine data. Once receiving, inspect numeric
 `value`, explicit `unit`, PGN, SPN, source address and UTC timestamp. An external
 MQTT client can subscribe to the same topics; it does not need Home Assistant
 discovery to understand the JSON.
@@ -158,8 +166,9 @@ Stop other applications using the adapter. In **Developer tools → Actions**, r
 `bluefire.inspect_adapter`, selecting the BlueFire config entry. The response
 contains service UUIDs and characteristic UUIDs/properties. This only connects,
 enumerates metadata, and disconnects; it does not read characteristic values,
-subscribe to notifications, authenticate, or send adapter commands. Offline
-adapters fail with an actionable error instead of repeated background attempts.
+subscribe to notifications, authenticate, or send adapter commands. If the
+receiver is connected, it pauses and releases the adapter for this inspection,
+then resumes.
 
 ### Diagnostics and raw capture
 
@@ -196,7 +205,9 @@ Enabling notifications writes only the standard client characteristic
 configuration descriptors. No characteristic values are read, no
 authentication or BlueFire commands are sent and nothing is published to MQTT.
 Adapters that need an authentication handshake may therefore send little or no
-data; an empty capture is itself useful evidence. If another inspection or
+data; an empty capture is itself useful evidence. The live receive task pauses
+and releases the BLE connection during capture, then resumes without marking
+the MQTT stream offline. If another inspection or
 capture is running, or the adapter is not visible, the file reports the capture
 as `skipped`/`failed` and still includes all other state. Stop other apps using
 the adapter first. Review the file before sharing it: it can contain the MAC,
@@ -221,14 +232,14 @@ The BlueFire device has these diagnostic entities. Counters are in memory, use
 | Decoded packets | Valid framed packets; attributes split heartbeats and PGN/J1587/OBD reports |
 | Framing errors / Parse errors | Invalid length/checksum/padding and malformed report bodies, with recent messages |
 | Unrecognized messages | Unknown adapter commands plus PGNs absent from the catalog |
-| Connection errors | Failed inspections/captures |
+| Connection errors | Failed live receiver connections, inspections or captures |
 | MQTT messages published / MQTT publish errors | Publisher tallies (published disabled by default) |
 | Diagnostic captures | Number of captures; attributes summarize the last one |
 | Last error | Most recent error class and message |
 
 Signal strength and last advertisement come from Home Assistant's passive
 Bluetooth advertisement tracking; this never connects to the adapter. Counters
-otherwise change only during captures until a live receiver exists.
+otherwise update during live reception and captures.
 
 ## MQTT contract
 
@@ -243,6 +254,7 @@ For a vehicle identifier `liberty_h3_45` and engine source address `0`:
 | --- | --- |
 | `vehicle/liberty_h3_45/j1939/availability` | `offline` or `online` |
 | `vehicle/liberty_h3_45/j1939/0/frame` | CAN arbitration ID, extended-frame flag, DLC, PGN, priority, source address and hex payload |
+| `vehicle/liberty_h3_45/j1939/0/report/61444` | Vendor PGN report metadata and bytes, without a fabricated CAN identifier |
 | `vehicle/liberty_h3_45/j1939/0/spn/190` | Engine-speed measurement in rpm |
 | `vehicle/liberty_h3_45/j1939/0/faults/65226` | Active faults, readable summary, lamp states and raw DTCs |
 | `vehicle/liberty_h3_45/j1939/3/faults/65227` | Transmission's previously active faults, separate from active faults |
@@ -427,20 +439,21 @@ J1587 PID 194 entries are decoded as described below; Allison selector-code and
 other manufacturer-specific on-wire encodings remain opaque. The reference
 lookup does not invent translations or automatically select controller profiles.
 No fault clearing or diagnostic requests are transmitted.
-Live BLE reception is still not implemented.
+Live BLE reception is provisional and uses only the documented modern EZ
+service. Original BLE UUID variants and command-level authentication/startup
+are not implemented.
 
 ### SAE J1708 / J1587 support
 
 **J1708 is the data link; J1587 defines the MID/PID application data.** Support
-is read-only and transport-independent, not a serial-port driver or a working
-BlueFire BLE receiver. `MqttBridge.async_process_j1587(J1587Report(...))`
+is read-only and transport-independent. `MqttBridge.async_process_j1587(J1587Report(...))`
 accepts a complete, normalized parameter value. Its data excludes the PID,
 variable-parameter byte-count prefix and J1708 checksum. MID must be 128–255,
 PID 0–1023, with exact fixed-width and supported-value lengths.
-The existing BlueFire `PIDData` parser still requires an explicit pre-3.19
-or 3.19+ firmware format; app version is not a firmware-format selector.
-Before connecting a live receiver, verify the vendor payload's normalization
-against hardware. Do not guess whether a byte-count prefix is present.
+The live BlueFire `PIDData` parser requires an explicit pre-3.19 or 3.19+
+adapter firmware selection; app version is not a firmware-format selector.
+When no format is configured, J1587 `PIDData` is ignored. Do not guess whether
+a byte-count prefix is present.
 
 `parse_j1708_message()` and `MqttBridge.async_process_j1708()` instead accept
 **one complete checksummed J1708 datagram**, bounded to 2–21 bytes.
@@ -765,26 +778,23 @@ the MQTT frame/report boundary. Signal decoding now rejects incomplete data
 instead of letting an empty/partial slice become a plausible zero/low value.
 These vectors establish internal behavior, not vendor/hardware compatibility.
 
-The following receiver work is for internal development and may proceed from
-these repository findings without verified adapter traces or actual-hardware
+The internal receiver now follows the documented modern EZ connection and
+notification observations without verified adapter traces or actual-hardware
 testing. Keep assumptions visible and treat hardware validation as a gate before
 declaring a full public release:
 
-1. Implement the connection, authentication and subscription path using Home
-   Assistant's Bluetooth APIs and the documented static observations. Use
-   synthetic fixtures for internal tests; do not infer UUIDs from characteristic
-   names alone.
-2. Exercise receive framing, maximum sizes, padding, notification interleaving
-   and transport variants with synthetic fixtures. PGN reports do not establish
-   original CAN identifiers: never guess one to call
+1. The receiver subscribes to the modern EZ receive and client-write notification
+   characteristics; both are routed through one ordered stream decoder. It sends
+   no adapter writes. Authentication/startup remains unavailable because the
+   repository does not document the required command payloads.
+2. Receive framing and report routing are exercised with synthetic fixtures.
+   PGN reports do not establish original CAN identifiers: never guess one to call
    `MqttBridge.async_process_frame(Frame(can_id, data))`. Where the report format
    does not provide a complete CAN frame, preserve it as a distinct report
    contract rather than fabricating frame fields.
-3. Manage BLE cancellation and bounded reconnect/backoff; notify the MQTT bridge
-   of transport loss. The MQTT ownership ledger and freshness watchdog are
-   already prepared; integrate receiver lifecycle and use an explicit provisional
-   reporting/refresh policy for internal builds. Do not replay stale values merely
-   to defeat sensor expiry.
+3. BLE cancellation, bounded reconnect/backoff, MQTT offline handling, and a
+   provisional report freshness policy are integrated. Do not replay stale
+   values merely to defeat sensor expiry.
 4. Before a full public release, validate the supported adapter variants,
    protocol assumptions, signal values, missing-data behavior and reporting
    cadence against real adapter traces and hardware. Internal implementation and

@@ -1,14 +1,17 @@
-"""User-requested, unredacted diagnostics including a short raw BLE capture.
+"""User-requested unredacted diagnostics including a short raw BLE capture.
 
-Downloading diagnostics is an explicit user action, so entry data, the
-Bluetooth address and raw notification bytes are included to support
-protocol work. Review the file before sharing it publicly.
+The file may contain adapter identity and vehicle data; review it before
+sharing.
 """
 
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from .const import CAPTURE_SECONDS, DOMAIN, STATUS_PROTOCOL_REQUIRED
+from .const import (
+    CAPTURE_SECONDS,
+    DOMAIN,
+    STATUS_RECEIVER_ENABLED,
+)
 
 
 async def async_get_config_entry_diagnostics(hass, entry):
@@ -27,7 +30,7 @@ async def async_get_config_entry_diagnostics(hass, entry):
     result = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "integration_version": str(integration.version),
-        "protocol_status": STATUS_PROTOCOL_REQUIRED,
+        "protocol_status": STATUS_RECEIVER_ENABLED,
         "entry": {
             "entry_id": entry.entry_id,
             "title": entry.title,
@@ -58,12 +61,16 @@ async def async_get_config_entry_diagnostics(hass, entry):
     else:
         runtime.inspecting = True
         try:
+            if runtime.receiver is not None:
+                await runtime.receiver.async_pause()
             result["capture"] = await async_capture_report(
                 hass, address, runtime.health, CAPTURE_SECONDS
             )
         except HomeAssistantError as err:
             result["capture"] = {"status": "failed", "error": str(err)}
         finally:
+            if runtime.receiver is not None:
+                runtime.receiver.async_resume()
             runtime.inspecting = False
     result["health"] = runtime.health.as_dict()
     return result

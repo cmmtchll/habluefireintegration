@@ -105,6 +105,27 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.flow._abort_if_unique_id_configured.assert_called_once()
         self.bluetooth.async_discovered_service_info.assert_not_called()
 
+    async def test_j1587_firmware_format_is_optional_and_explicit(self):
+        result = await self.flow.async_step_manual({
+            **self.data, "j1587_extended": "Extended (3.19+)",
+        })
+        self.assertEqual(result["data"]["j1587_extended"], True)
+        schema = (await self.flow.async_step_manual())["data_schema"]
+        self.assertEqual(schema({"j1587_extended": "Extended (3.19+)"})[
+            "j1587_extended"
+        ], "Extended (3.19+)")
+        with self.assertRaises(vol.Invalid):
+            schema({"j1587_extended": "Guess"})
+        data, errors = self.flow._validate_input({
+            **self.data, "j1587_extended": "Guess",
+        })
+        self.assertEqual(errors, {"j1587_extended": "invalid_j1587_format"})
+        data, errors = self.flow._validate_input({
+            **self.data, "j1587_extended": False,
+        })
+        self.assertFalse(errors)
+        self.assertIs(data["j1587_extended"], False)
+
     async def test_field_errors_preserve_input(self):
         bad = {"name": " ", "address": "oops", "vehicle_id": "invalid/topic"}
         result = await self.flow.async_step_manual(bad)
@@ -208,10 +229,13 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.flow.async_update_reload_and_abort.assert_not_called()
 
     async def test_reconfigure_schema_excludes_mqtt_identity(self):
-        self.reconfigure_entry()
+        entry = self.reconfigure_entry()
+        entry.data["j1587_extended"] = True
         result = await self.flow.async_step_reconfigure()
         with self.assertRaises(vol.Invalid):
             result["data_schema"](self.data)
-        self.assertEqual(result["data_schema"]({}), {
+        defaults = result["data_schema"]({})
+        self.assertEqual(defaults, {
             "name": self.data["name"], "address": self.data["address"],
+            "j1587_extended": "Extended (3.19+)",
         })

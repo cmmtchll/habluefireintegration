@@ -1,7 +1,7 @@
-"""Offline-ready BlueFire integration.
+"""Provisional BlueFire BLE receiver and MQTT integration.
 
-The vendor BLE wire protocol is not implemented. Configuring an entry never
-starts a speculative subscription or publishes fabricated vehicle data.
+The receiver follows documented EZ observations without claiming hardware
+validation or inventing CAN identifiers/authentication payloads.
 """
 
 from __future__ import annotations
@@ -11,7 +11,11 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from .const import DOMAIN, STATUS_PROTOCOL_REQUIRED
+from .const import (
+    CONF_J1587_EXTENDED,
+    DOMAIN,
+    STATUS_RECEIVER_ENABLED,
+)
 from .health import Health
 
 if TYPE_CHECKING:
@@ -28,6 +32,7 @@ class BlueFireRuntime:
     bridge: MqttBridge
     services: list[dict[str, Any]] = field(default_factory=list)
     inspecting: bool = False
+    receiver: Any = None
     health: Health = field(default_factory=Health)
 
 
@@ -73,26 +78,34 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         entry, runtime = loaded_runtime(call)
         runtime.inspecting = True
         try:
+            if runtime.receiver is not None:
+                await runtime.receiver.async_pause()
             runtime.services = await async_inspect(hass, entry.data["address"])
             return {
-                "status": STATUS_PROTOCOL_REQUIRED,
+                "status": STATUS_RECEIVER_ENABLED,
                 "services": runtime.services,
             }
         except HomeAssistantError as err:
             runtime.health.error("connection_errors", str(err))
             raise
         finally:
+            if runtime.receiver is not None:
+                runtime.receiver.async_resume()
             runtime.inspecting = False
 
     async def capture_notifications(call):
         entry, runtime = loaded_runtime(call)
         runtime.inspecting = True
         try:
+            if runtime.receiver is not None:
+                await runtime.receiver.async_pause()
             return await async_capture_report(
                 hass, entry.data["address"], runtime.health,
                 call.data["duration"],
             )
         finally:
+            if runtime.receiver is not None:
+                runtime.receiver.async_resume()
             runtime.inspecting = False
 
     hass.services.async_register(
@@ -119,7 +132,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Prepare MQTT without claiming an operational BLE receiver."""
+    """Prepare MQTT and start the receive-only BLE task."""
     from homeassistant.components import bluetooth, mqtt
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
     from homeassistant.core import callback
@@ -136,6 +149,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_publish,
         mqtt_settings,
     )
+    from .receiver import BlueFireReceiver
     from .telemetry import MqttBridge
 
     health = Health()
@@ -176,7 +190,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         known_j1587=await ledger.async_get_j1587(entry.entry_id),
         save_j1587=save_j1587,
     )
-    entry.runtime_data = BlueFireRuntime(bridge, health=health)
+    receiver = BlueFireReceiver(
+        hass,
+        entry.data["address"],
+        bridge,
+        health=health,
+        j1587_extended=entry.data.get(CONF_J1587_EXTENDED),
+    )
+    entry.runtime_data = BlueFireRuntime(
+        bridge, receiver=receiver, health=health
+    )
+    entry.runtime_data.services = receiver.services
+    entry.async_on_unload(receiver.stop)
+    entry.async_create_task(
+        hass, receiver.async_run(), "BlueFire BLE receiver"
+    )
 
     async def mqtt_ready() -> None:
         await async_flush_removals(hass, ledger)

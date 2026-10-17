@@ -192,7 +192,7 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         self.entry.unique_id = "AA:BB:CC:DD:EE:02"
         other = self.api.ProtocolStatusSensor(self.entry)
         self.assertEqual(other._attr_unique_id, sensor._attr_unique_id)
-        self.assertEqual(other._attr_native_value, "protocol_required")
+        self.assertEqual(other._attr_native_value, "receiver_enabled")
 
     async def test_legacy_mac_identity_is_migrated_in_place(self):
         self.entities = [

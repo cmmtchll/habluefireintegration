@@ -6,9 +6,19 @@ from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigFlow
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 
-from .const import CONF_VEHICLE_ID, DEFAULT_VEHICLE_ID, DOMAIN
+from .const import (
+    CONF_J1587_EXTENDED,
+    CONF_VEHICLE_ID,
+    DEFAULT_VEHICLE_ID,
+    DOMAIN,
+)
 from .telemetry import valid_vehicle_id
 from .validation import normalize_address
+
+J1587_FORMATS = {
+    "Legacy (before 3.19)": False,
+    "Extended (3.19+)": True,
+}
 
 
 class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -123,6 +133,14 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
             errors[CONF_NAME] = "invalid_name"
         if not valid_vehicle_id(data[CONF_VEHICLE_ID]):
             errors[CONF_VEHICLE_ID] = "invalid_vehicle_id"
+        if CONF_J1587_EXTENDED in user_input:
+            value = user_input[CONF_J1587_EXTENDED]
+            if value in J1587_FORMATS:
+                data[CONF_J1587_EXTENDED] = J1587_FORMATS[value]
+            elif type(value) is bool:
+                data[CONF_J1587_EXTENDED] = value
+            else:
+                errors[CONF_J1587_EXTENDED] = "invalid_j1587_format"
         return data, errors
 
     def _show_settings(self, step_id, defaults, errors):
@@ -140,6 +158,17 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_VEHICLE_ID,
                 default=defaults.get(CONF_VEHICLE_ID, DEFAULT_VEHICLE_ID),
             )] = str
+        if CONF_J1587_EXTENDED in defaults:
+            value = defaults[CONF_J1587_EXTENDED]
+            default_format = (
+                "Extended (3.19+)" if value else "Legacy (before 3.19)"
+            ) if type(value) is bool else value
+            schema[vol.Optional(
+                CONF_J1587_EXTENDED,
+                default=default_format,
+            )] = vol.In(J1587_FORMATS)
+        else:
+            schema[vol.Optional(CONF_J1587_EXTENDED)] = vol.In(J1587_FORMATS)
         return self.async_show_form(
             step_id=step_id,
             data_schema=vol.Schema(schema),

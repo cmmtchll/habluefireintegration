@@ -54,6 +54,10 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         self.runtime = SimpleNamespace(
             inspecting=False, services=[], health=Health()
         )
+        self.receiver = SimpleNamespace(
+            async_pause=AsyncMock(), async_resume=Mock()
+        )
+        self.runtime.receiver = self.receiver
         self.entry = SimpleNamespace(
             domain="bluefire",
             state="loaded",
@@ -124,12 +128,30 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             result,
-            {"status": "protocol_required", "services": [{"uuid": "service"}]},
+            {"status": "receiver_enabled", "services": [{"uuid": "service"}]},
         )
         self.inspected.assert_awaited_once_with(
             self.hass, "AA:BB:CC:DD:EE:01"
         )
+        self.receiver.async_pause.assert_awaited_once()
+        self.receiver.async_resume.assert_called_once()
         self.assertFalse(self.runtime.inspecting)
+
+    async def test_inspection_refreshes_receiver_gatt_inventory(self):
+        self.runtime.services = [{"uuid": "cached-service"}]
+        result = await self.inspect(
+            SimpleNamespace(data={"entry_id": "entry"})
+        )
+        self.assertEqual(
+            result,
+            {
+                "status": "receiver_enabled",
+                "services": [{"uuid": "service"}],
+            },
+        )
+        self.inspected.assert_awaited_once_with(
+            self.hass, "AA:BB:CC:DD:EE:01"
+        )
 
     async def test_inspection_rejects_non_loaded_entry(self):
         self.entry.state = "not_loaded"
@@ -166,6 +188,8 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         self.captured.assert_awaited_once_with(
             self.hass, "AA:BB:CC:DD:EE:01", self.runtime.health, 7
         )
+        self.receiver.async_pause.assert_awaited_once()
+        self.receiver.async_resume.assert_called_once()
         self.assertFalse(self.runtime.inspecting)
         self.captured.side_effect = ConnectionFailure("busy")
         with self.assertRaises(ConnectionFailure):
@@ -203,6 +227,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.callbacks = []
         self.tasks = []
+        self.receiver_tasks = []
         self.intervals = []
         self.birth = []
         self.shutdown = []
@@ -229,9 +254,24 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             stop_notify=AsyncMock(), mtu_size=185,
         )
         self.connect = AsyncMock(return_value=self.client)
+        self.receiver_instances = []
         self.advertisement_callbacks = []
         self.unavailable_callbacks = []
         self.service_info = None
+
+        class Receiver:
+            def __init__(receiver, *args, **kwargs):
+                receiver.args = args
+                receiver.kwargs = kwargs
+                receiver.stop = Mock()
+                receiver.services = []
+                receiver.async_pause = AsyncMock()
+                receiver.async_resume = Mock()
+                self.receiver_instances.append(receiver)
+
+            async def async_run(receiver):
+                return None
+
         self.bluetooth = SimpleNamespace(
             async_ble_device_from_address=Mock(return_value=object()),
             async_last_service_info=Mock(
@@ -303,6 +343,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 BleakClientWithServiceCache=object,
                 establish_connection=self.connect,
             ),
+            "custom_components.bluefire.receiver": module(
+                "custom_components.bluefire.receiver",
+                BlueFireReceiver=Receiver,
+            ),
         })
         self.modules.start()
         self.addCleanup(self.modules.stop)
@@ -325,7 +369,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.entry = SimpleNamespace(
             entry_id="test-entry",
             title="Coach adapter",
-            data={"vehicle_id": "coach"},
+            data={
+                "vehicle_id": "coach",
+                "address": "AA:BB:CC:DD:EE:01",
+            },
             async_on_unload=Mock(),
             async_create_task=self.create_task,
         )
@@ -337,13 +384,18 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 callback(SimpleNamespace(payload=payload))
 
     def create_task(self, hass, coroutine, name):
+        if name == "BlueFire BLE receiver":
+            self.receiver_tasks.append(name)
+            coroutine.close()
+            return Mock()
         task = asyncio.create_task(coroutine, name=name)
         self.tasks.append(task)
         return task
 
-    async def test_offline_preparation_does_not_connect_ble(self):
+    async def test_setup_starts_live_receiver_without_waiting_for_ble(self):
         self.assertTrue(await async_setup_entry(self.hass, self.entry))
         self.connect.assert_not_awaited()
+        self.assertEqual(self.receiver_tasks, ["BlueFire BLE receiver"])
         entries = self.hass.config_entries
         entries.async_forward_entry_setups.assert_awaited_once()
         self.assertEqual(self.mqtt.async_publish.await_count, 2)
@@ -351,7 +403,11 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             self.hass, "vehicle/coach/j1939/availability", "offline",
             qos=1, retain=True,
         )
-        self.assertEqual(self.entry.async_on_unload.call_count, 4)
+        self.assertEqual(self.entry.async_on_unload.call_count, 7)
+        self.assertEqual(len(self.receiver_instances), 1)
+        self.assertEqual(
+            self.receiver_instances[0].kwargs["j1587_extended"], None
+        )
 
     async def test_missing_mqtt_client_is_retryable(self):
         self.mqtt.async_wait_for_mqtt_client.return_value = False
@@ -500,7 +556,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         ]
         await async_setup_entry(self.hass, self.entry)
         self.mqtt.async_subscribe.assert_not_awaited()
-        self.assertEqual(self.entry.async_on_unload.call_count, 3)
+        self.assertEqual(self.entry.async_on_unload.call_count, 6)
 
     async def test_shutdown_withdraws_availability(self):
         await async_setup_entry(self.hass, self.entry)
@@ -761,6 +817,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         await async_setup_entry(self.hass, self.entry)
         self.entry.options = {}
         self.entry.unique_id = None
+        self.entry.data.pop("address")
         result = await api.async_get_config_entry_diagnostics(
             self.hass, self.entry
         )
