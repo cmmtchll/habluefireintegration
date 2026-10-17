@@ -143,6 +143,29 @@ class MqttBridge:
     def availability_topic(self) -> str:
         return f"{self.prefix}/availability"
 
+    def diagnostics(self) -> dict:
+        """Snapshot bridge state for user-requested diagnostics."""
+        result = {
+            "protocol": self.protocol,
+            "vehicle_id": self.vehicle_id,
+            "prefix": self.prefix,
+            "availability_topic": self.availability_topic,
+            "discovery_prefix": self.discovery_prefix,
+            "device_name": self.device_name,
+            "online": self._online,
+            "last_frame_age_s": (
+                None if self._last_frame is None
+                else round(self._clock() - self._last_frame, 3)
+            ),
+            "known_signals": [list(item) for item in sorted(
+                self._known_signals
+            )],
+            "discovery_topics": sorted(self.discovery),
+        }
+        if self.j1587 is not None:
+            result["j1587"] = self.j1587.diagnostics()
+        return result
+
     async def async_disconnected(self) -> None:
         """Invalidate freshness and withdraw retained online state."""
         if self.j1587 is not None:
