@@ -18,7 +18,7 @@
       },
       "manual": {
         "title": "Prepare a BlueFire adapter",
-        "description": "Offline preparation only: live BLE reception is not implemented yet. The BlueFire wire protocol must be verified before telemetry can be received. MQTT and Bluetooth must be configured in Home Assistant.",
+        "description": "Offline preparation only: live BLE reception is not implemented yet, and adapter compatibility has not been tested. MQTT and Bluetooth must be configured in Home Assistant.",
         "data": {
           "name": "Adapter name",
           "address": "Bluetooth MAC address",
