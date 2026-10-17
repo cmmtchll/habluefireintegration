@@ -3,7 +3,9 @@
 import asyncio
 import importlib
 import sys
+from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
+from time import monotonic
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -614,9 +616,15 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_passive_advertisements_track_rssi_without_connecting(self):
         self.ble_entry()
+        self.service_info.time = monotonic() - 60
         await async_setup_entry(self.hass, self.entry)
         health = self.entry.runtime_data.health
         self.assertEqual(health.rssi, -71)
+        self.assertGreaterEqual(
+            (datetime.now(timezone.utc) - health.last_advertisement)
+            .total_seconds(),
+            59,
+        )
         callback, matcher, mode = self.advertisement_callbacks[0]
         self.assertEqual(matcher, {
             "address": "AA:BB:CC:DD:EE:FF", "connectable": False,
@@ -669,12 +677,28 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_capture_bounds_notifications_and_ignores_stop_errors(self):
         api = importlib.import_module("custom_components.bluefire.bluetooth")
-        self.notify_client([("j1939", b"\x00")] * 3)
+        self.notify_client([
+            ("j1939", b"\x00"), ("j1939", b"\x00\x01"),
+            ("j1939", b"\x00\x01\x02"),
+        ])
         self.client.stop_notify.side_effect = BoundaryError("gone")
         with patch.object(api, "MAX_CAPTURE_NOTIFICATIONS", 2):
             result = await api.async_capture(self.hass, "AA:BB", 0)
         self.assertEqual(len(result["notifications"]), 2)
         self.assertEqual(result["dropped_notifications"], 1)
+        self.assertEqual(result["received_notifications"], 3)
+        self.assertEqual(result["received_bytes"], 6)
+        self.assertIsNotNone(result["last_received"])
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_capture_disconnects_when_unsubscribe_times_out(self):
+        api = importlib.import_module("custom_components.bluefire.bluetooth")
+        self.notify_client([("j1939", b"\x00")])
+        self.client.stop_notify.side_effect = TimeoutError("cleanup timeout")
+
+        with self.assertRaisesRegex(BoundaryError, "cleanup timeout"):
+            await api.async_capture(self.hass, "AA:BB", 0)
+
         self.client.disconnect.assert_awaited_once()
 
     async def test_capture_failures_are_actionable(self):

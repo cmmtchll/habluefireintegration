@@ -7,6 +7,7 @@ are evidence for protocol work; nothing here publishes vehicle telemetry.
 
 from collections import Counter
 from dataclasses import asdict
+from datetime import datetime
 
 from .catalog import lookup
 from .protocol import (
@@ -223,12 +224,23 @@ def serialize_notifications(notifications: list[dict]) -> list[dict]:
     ]
 
 
-def record_capture(health, analysis: dict, *, notify: bool = True) -> None:
+def record_capture(
+    health, analysis: dict, *, received_notifications: int | None = None,
+    received_bytes: int | None = None, last_received: datetime | None = None,
+    notify: bool = True,
+) -> None:
     """Fold the selected framing mode's totals into the entry counters."""
     totals = analysis["totals"][analysis["selected_framing"]]
     timing = analysis["timing"]
-    health.count("notifications", timing["notifications"])
-    health.count("bytes", timing["bytes"])
+    health.count(
+        "notifications",
+        timing["notifications"] if received_notifications is None
+        else received_notifications,
+    )
+    health.count(
+        "bytes",
+        timing["bytes"] if received_bytes is None else received_bytes,
+    )
     for name in (
         "packets", "heartbeats", "unknown_commands", "unrecognized_pgns",
         "pgn_reports", "j1587_reports", "obd_reports",
@@ -241,8 +253,8 @@ def record_capture(health, analysis: dict, *, notify: bool = True) -> None:
             messages = summary[kind.replace("errors", "error_messages")]
             for message, count in messages.items():
                 health.error(kind, message, amount=count, notify=False)
-    if timing["notifications"]:
-        health.data_seen()
+    if received_notifications or timing["notifications"]:
+        health.data_seen(last_received)
     health.capture_completed({
         "selected_framing": selected, **timing, **totals,
     }, notify=notify)

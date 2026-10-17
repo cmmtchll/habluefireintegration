@@ -7,7 +7,8 @@ starts a speculative subscription or publishes fabricated vehicle data.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from .const import DOMAIN, STATUS_PROTOCOL_REQUIRED
@@ -229,7 +230,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass, address, connectable=False
         )
         if last is not None:
-            health.advertisement(last.rssi, last.source)
+            observed_at = datetime.now(timezone.utc) - timedelta(
+                seconds=monotonic() - last.time
+            )
+            health.advertisement(last.rssi, last.source, observed_at)
         entry.async_on_unload(bluetooth.async_register_callback(
             hass, advertisement,
             bluetooth.BluetoothCallbackMatcher(

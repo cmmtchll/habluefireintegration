@@ -96,12 +96,15 @@ class Health:
         if notify:
             self.notify()
 
-    def data_seen(self) -> None:
-        self.last_data = self._clock()
+    def data_seen(self, observed_at: datetime | None = None) -> None:
+        self.last_data = observed_at or self._clock()
 
-    def advertisement(self, rssi: int | None, source: str | None) -> None:
+    def advertisement(
+        self, rssi: int | None, source: str | None,
+        observed_at: datetime | None = None,
+    ) -> None:
         """Track passive advertisements; never connects to the adapter."""
-        now = self._clock()
+        now = observed_at or self._clock()
         changed = self.present is not True
         self.counters["advertisements"] += 1
         self.last_advertisement = now

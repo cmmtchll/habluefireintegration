@@ -6,6 +6,7 @@ BlueFire commands.
 """
 
 import asyncio
+from datetime import datetime, timezone
 from time import monotonic
 
 from bleak.exc import BleakError
@@ -88,13 +89,21 @@ async def async_capture(hass, address: str, duration: float) -> dict:
     device = _device(hass, address)
     notifications: list[dict] = []
     dropped = 0
+    received_notifications = 0
+    received_bytes = 0
+    last_received = None
     started = monotonic()
     subscribed = []
     failures = []
 
     def receiver(characteristic):
         def received(_sender, data) -> None:
-            nonlocal dropped
+            nonlocal dropped, received_notifications, received_bytes
+            nonlocal last_received
+            payload = bytes(data)
+            received_notifications += 1
+            received_bytes += len(payload)
+            last_received = datetime.now(timezone.utc)
             if len(notifications) >= MAX_CAPTURE_NOTIFICATIONS:
                 dropped += 1
                 return
@@ -102,7 +111,7 @@ async def async_capture(hass, address: str, duration: float) -> dict:
                 "t": round(monotonic() - started, 4),
                 "characteristic": characteristic.uuid,
                 "handle": getattr(characteristic, "handle", None),
-                "data": bytes(data),
+                "data": payload,
             })
         return received
 
@@ -146,13 +155,15 @@ async def async_capture(hass, address: str, duration: float) -> dict:
                 await asyncio.sleep(duration)
                 elapsed = round(monotonic() - started, 3)
             finally:
-                for characteristic, _ in subscribed:
-                    try:
-                        await client.stop_notify(characteristic)
-                    except BleakError:
-                        pass
-                mtu = getattr(client, "mtu_size", None)
-                await client.disconnect()
+                try:
+                    for characteristic, _ in subscribed:
+                        try:
+                            await client.stop_notify(characteristic)
+                        except BleakError:
+                            pass
+                    mtu = getattr(client, "mtu_size", None)
+                finally:
+                    await client.disconnect()
     except (BleakError, TimeoutError) as err:
         raise HomeAssistantError(
             f"BLE capture failed ({type(err).__name__}: {err}); ensure the "
@@ -169,6 +180,9 @@ async def async_capture(hass, address: str, duration: float) -> dict:
         "subscribe_failures": failures,
         "dropped_notifications": dropped,
         "notification_limit": MAX_CAPTURE_NOTIFICATIONS,
+        "received_notifications": received_notifications,
+        "received_bytes": received_bytes,
+        "last_received": last_received,
         "notifications": notifications,
     }
 
@@ -223,8 +237,14 @@ async def async_capture_report(
         health.error("connection_errors", str(err))
         raise
     notifications = raw.pop("notifications")
+    last_received = raw.pop("last_received")
     analysis = analyze_notifications(notifications)
-    record_capture(health, analysis)
+    record_capture(
+        health, analysis,
+        received_notifications=raw["received_notifications"],
+        received_bytes=raw["received_bytes"],
+        last_received=last_received,
+    )
     return {
         "status": "completed",
         "bluetooth_before": before,

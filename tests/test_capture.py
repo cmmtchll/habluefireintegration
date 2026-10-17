@@ -108,6 +108,20 @@ class CaptureAnalysisTests(unittest.TestCase):
         self.assertIsNone(empty.last_data)
         self.assertEqual(empty.counters["captures"], 1)
 
+    def test_capture_health_uses_full_receive_totals_and_timestamp(self):
+        health = Health()
+        observed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        analysis = analyze_notifications([note(0.0, b"\x01\x02")])
+
+        record_capture(
+            health, analysis, received_notifications=5001,
+            received_bytes=10002, last_received=observed_at,
+        )
+
+        self.assertEqual(health.counters["notifications"], 5001)
+        self.assertEqual(health.counters["bytes"], 10002)
+        self.assertEqual(health.last_data, observed_at)
+
 
 class HealthTests(unittest.TestCase):
     def setUp(self):
