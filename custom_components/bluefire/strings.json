@@ -3,30 +3,32 @@
     "step": {
       "user": {
         "title": "Set up BlueFire",
-        "description": "Choose a nearby BLE device or enter its MAC address for offline preparation. Live BlueFire telemetry is not implemented yet.",
+        "description": "Choose a nearby BLE device or enter its MAC address. BlueFire starts a receive-only connection when the entry loads.",
         "menu_options": {
           "discovered": "Choose a nearby Bluetooth device",
-          "manual": "Enter a MAC address manually (works offline)"
+          "manual": "Enter a MAC address manually"
         }
       },
       "discovered": {
         "title": "Select your adapter",
-        "description": "These are nearby connectable BLE devices, not verified BlueFire adapters. Compare the name and MAC address with your adapter before continuing. Nothing is connected or probed during setup.",
+        "description": "These are nearby connectable BLE devices. Compare the name and MAC address with your adapter before continuing. The receiver checks for the documented BlueFire EZ service after setup.",
         "data": {
           "address": "Bluetooth device"
         }
       },
       "manual": {
-        "title": "Prepare a BlueFire adapter",
-        "description": "Offline preparation only: live BLE reception is not implemented yet, and adapter compatibility has not been tested. MQTT and Bluetooth must be configured in Home Assistant.",
+        "title": "Set up a BlueFire adapter",
+        "description": "The receiver subscribes to the documented BlueFire EZ telemetry characteristics after setup. MQTT and Bluetooth must be configured in Home Assistant. Adapter compatibility is not hardware-verified.",
         "data": {
           "name": "Adapter name",
           "address": "Bluetooth MAC address",
-          "vehicle_id": "Vehicle MQTT identifier"
+          "vehicle_id": "Vehicle MQTT identifier",
+          "j1587_extended": "J1587 adapter firmware format"
         },
         "data_description": {
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
-          "vehicle_id": "1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit."
+          "vehicle_id": "1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
+          "j1587_extended": "Optional. Select only if you know the adapter firmware format. Leave blank to ignore J1587 PIDData."
         }
       },
       "reconfigure": {
@@ -34,7 +36,8 @@
         "description": "Correct the adapter name or Bluetooth MAC address. This does not verify hardware compatibility. Your vehicle MQTT identifier and existing entities are preserved.",
         "data": {
           "name": "Adapter name",
-          "address": "Bluetooth MAC address"
+          "address": "Bluetooth MAC address",
+          "j1587_extended": "J1587 adapter firmware format"
         },
         "data_description": {
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted."
@@ -46,6 +49,7 @@
       "invalid_name": "Enter a non-empty adapter name.",
       "invalid_selection": "Select a device from the list.",
       "invalid_vehicle_id": "Use 1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
+      "invalid_j1587_format": "Select a supported J1587 firmware format.",
       "vehicle_id_in_use": "Another adapter already uses this vehicle MQTT identifier."
     },
     "abort": {

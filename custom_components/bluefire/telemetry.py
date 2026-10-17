@@ -23,7 +23,7 @@ from .j1587 import (
     decode_report,
     parse_j1708_message,
 )
-from .protocol import J1587Report
+from .protocol import J1587Report, ObdReport, PgnReport
 from .signals import SIGNALS, Signal
 
 ENTITIES = SIGNALS + DIAGNOSTICS
@@ -280,6 +280,109 @@ class MqttBridge:
             decode_report(report)
         for report in message.reports:
             await self.async_process_j1587(report)
+
+    async def async_process_pgn_report(self, report: PgnReport) -> None:
+        """Publish a vendor PGN report without inventing a CAN identifier."""
+        if not isinstance(report, PgnReport):
+            raise ValueError("Expected a parsed vendor PGN report")
+        async with self._frame_lock:
+            timestamp = datetime.now(timezone.utc).isoformat()
+            common = {
+                "schema_version": 1,
+                "protocol": "j1939",
+                "vehicle_id": self.vehicle_id,
+                "pgn": report.pgn,
+                "source_address": report.source_address,
+                "source_name": source_name(report.source_address),
+                "source_name_basis": "conventional_address_not_verified_identity",
+                "priority": report.priority,
+                "data_page": report.data_page,
+                "catalog_version": CATALOG_VERSION,
+                "timestamp": timestamp,
+            }
+            await self.publish(
+                f"{self.prefix}/{report.source_address}/report/{report.pgn}",
+                json.dumps({**common, "data": report.data.hex()}),
+                False,
+            )
+            if report.source_address < 254 and report.data_page == 0:
+                for signal in SIGNALS:
+                    if (
+                        signal.pgn != report.pgn
+                        or len(report.data) != 8
+                    ):
+                        continue
+                    topic, payload = self._discovery_message(
+                        report.source_address, signal
+                    )
+                    if topic not in self.discovery:
+                        await self._async_remember(
+                            report.source_address, signal.spn
+                        )
+                        await self.publish(topic, payload, True)
+                        self.discovery[topic] = payload
+                    await self.publish(
+                        f"{self.prefix}/{report.source_address}/spn/{signal.spn}",
+                        json.dumps({
+                            **common,
+                            **signal.metadata(),
+                            "value": signal.decode(report.data),
+                        }),
+                        False,
+                    )
+                diagnostic = next(
+                    (
+                        item for item in DIAGNOSTICS
+                        if item.pgn == report.pgn
+                    ),
+                    None,
+                )
+                if diagnostic is not None and len(report.data) == 8:
+                    topic, payload = self._discovery_message(
+                        report.source_address, diagnostic
+                    )
+                    if topic not in self.discovery:
+                        await self._async_remember(
+                            report.source_address, diagnostic.spn
+                        )
+                        await self.publish(topic, payload, True)
+                        self.discovery[topic] = payload
+                    faults = decode_diagnostics(
+                        report.pgn, report.data,
+                        source=report.source_address,
+                    )
+                    await self.publish(
+                        f"{self.prefix}/{report.source_address}/faults/{report.pgn}",
+                        json.dumps({**common, **faults}),
+                        False,
+                    )
+            if report.source_address < 254 and report.data:
+                self._last_frame = self._clock()
+                if not self._online:
+                    await self.publish(
+                        self.availability_topic, "online", True
+                    )
+                    self._online = True
+
+    async def async_process_obd_report(self, report: ObdReport) -> None:
+        """Preserve OBD reports in their own namespace without relabeling them."""
+        if not isinstance(report, ObdReport):
+            raise ValueError("Expected a parsed OBD report")
+        await self.publish(
+            f"vehicle/{self.vehicle_id}/obd/"
+            f"{report.source}/{report.mode}/{report.pid}",
+            json.dumps({
+                "schema_version": 1,
+                "protocol": "obd",
+                "vehicle_id": self.vehicle_id,
+                "source": report.source,
+                "mode": report.mode,
+                "pid": report.pid,
+                "data": report.data.hex(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }),
+            False,
+        )
 
     async def _async_process_frame(self, frame: Frame) -> None:
         diagnostic = next(

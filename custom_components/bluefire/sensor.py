@@ -5,7 +5,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 
-from .const import DOMAIN, STATUS_PROTOCOL_REQUIRED
+from .const import DOMAIN, STATUS_RECEIVER_ENABLED
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -45,8 +45,8 @@ class ProtocolStatusSensor(SensorEntity):
     _attr_name = "Protocol status"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_options = [STATUS_PROTOCOL_REQUIRED]
-    _attr_native_value = STATUS_PROTOCOL_REQUIRED
+    _attr_options = [STATUS_RECEIVER_ENABLED]
+    _attr_native_value = STATUS_RECEIVER_ENABLED
     _attr_should_poll = False
 
     def __init__(self, entry):

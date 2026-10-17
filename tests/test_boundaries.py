@@ -101,7 +101,7 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             result,
-            {"status": "protocol_required", "services": [{"uuid": "service"}]},
+            {"status": "receiver_enabled", "services": [{"uuid": "service"}]},
         )
         self.inspected.assert_awaited_once_with(
             self.hass, "AA:BB:CC:DD:EE:01"
@@ -152,6 +152,18 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.client = SimpleNamespace(services=[], disconnect=AsyncMock())
         self.connect = AsyncMock(return_value=self.client)
+        self.receiver_instances = []
+
+        class Receiver:
+            def __init__(receiver, *args, **kwargs):
+                receiver.args = args
+                receiver.kwargs = kwargs
+                receiver.stop = Mock()
+                self.receiver_instances.append(receiver)
+
+            async def async_run(receiver):
+                return None
+
         self.bluetooth = SimpleNamespace(
             async_ble_device_from_address=Mock(return_value=object())
         )
@@ -195,6 +207,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 BleakClientWithServiceCache=object,
                 establish_connection=self.connect,
             ),
+            "custom_components.bluefire.receiver": module(
+                "custom_components.bluefire.receiver",
+                BlueFireReceiver=Receiver,
+            ),
         })
         self.modules.start()
         self.addCleanup(self.modules.stop)
@@ -217,7 +233,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.entry = SimpleNamespace(
             entry_id="test-entry",
             title="Coach adapter",
-            data={"vehicle_id": "coach"},
+            data={
+                "vehicle_id": "coach",
+                "address": "AA:BB:CC:DD:EE:01",
+            },
             async_on_unload=Mock(),
             async_create_task=self.create_task,
         )
@@ -229,6 +248,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 callback(SimpleNamespace(payload=payload))
 
     def create_task(self, hass, coroutine, name):
+        if name == "BlueFire BLE receiver":
+            coroutine.close()
+            return Mock()
         task = asyncio.create_task(coroutine, name=name)
         self.tasks.append(task)
         return task
@@ -243,7 +265,11 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             self.hass, "vehicle/coach/j1939/availability", "offline",
             qos=1, retain=True,
         )
-        self.assertEqual(self.entry.async_on_unload.call_count, 4)
+        self.assertEqual(self.entry.async_on_unload.call_count, 5)
+        self.assertEqual(len(self.receiver_instances), 1)
+        self.assertEqual(
+            self.receiver_instances[0].kwargs["j1587_extended"], None
+        )
 
     async def test_missing_mqtt_client_is_retryable(self):
         self.mqtt.async_wait_for_mqtt_client.return_value = False
@@ -369,7 +395,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             result, {
-                "protocol_status": "protocol_required", "gatt_services": []})
+                "protocol_status": "receiver_enabled", "gatt_services": []})
 
     async def test_custom_birth_settings_and_prefix(self):
         self.hass.config_entries.async_entries.return_value = [
@@ -403,7 +429,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         ]
         await async_setup_entry(self.hass, self.entry)
         self.mqtt.async_subscribe.assert_not_awaited()
-        self.assertEqual(self.entry.async_on_unload.call_count, 3)
+        self.assertEqual(self.entry.async_on_unload.call_count, 4)
 
     async def test_shutdown_withdraws_availability(self):
         await async_setup_entry(self.hass, self.entry)

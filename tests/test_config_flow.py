@@ -105,6 +105,18 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.flow._abort_if_unique_id_configured.assert_called_once()
         self.bluetooth.async_discovered_service_info.assert_not_called()
 
+    async def test_j1587_firmware_format_is_optional_and_explicit(self):
+        result = await self.flow.async_step_manual({
+            **self.data, "j1587_extended": True,
+        })
+        self.assertEqual(result["data"]["j1587_extended"], True)
+        schema = self.flow.async_step_manual().get("data_schema")
+        self.assertIs(schema({"j1587_extended": "Extended (3.19+)"})[
+            "j1587_extended"
+        ], True)
+        with self.assertRaises(vol.Invalid):
+            schema({"j1587_extended": "Guess"})
+
     async def test_field_errors_preserve_input(self):
         bad = {"name": " ", "address": "oops", "vehicle_id": "invalid/topic"}
         result = await self.flow.async_step_manual(bad)

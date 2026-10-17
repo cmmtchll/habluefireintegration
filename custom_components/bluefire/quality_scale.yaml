@@ -54,8 +54,8 @@ rules:
     status: todo
     comment: Setup is intentionally offline-ready and does not verify a BlueFire adapter or protocol before creating an entry.
   test-before-setup:
-    status: exempt
-    comment: No BlueFire receiver connection is attempted during setup; MQTT readiness is checked before setup continues.
+    status: todo
+    comment: The provisional EZ receiver starts on entry setup; adapter hardware validation remains outstanding.
   unique-config-entry:
     status: done
     comment: Duplicate adapter addresses and MQTT vehicle identifiers are rejected in custom_components/bluefire/config_flow.py.

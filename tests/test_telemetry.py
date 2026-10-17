@@ -216,6 +216,63 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                 await self.bridge.async_process_frame(report)
         self.publish.assert_not_awaited()
 
+    async def test_pgn_report_uses_distinct_contract_without_can_id(self):
+        await self.bridge.async_process_pgn_report(
+            PgnReport(
+                0, 61444, 6, 0,
+                bytes.fromhex("ff ff 7d 40 1f ff ff ff"),
+            )
+        )
+        messages = self.messages()
+        topic, payload, retain = next(
+            item for item in messages if "/report/" in item[0]
+        )
+        report = json.loads(payload)
+        self.assertEqual(topic, "vehicle/coach/j1939/0/report/61444")
+        self.assertEqual(report["data"], "ffff7d401fffffffff")
+        self.assertNotIn("can_id", report)
+        self.assertNotIn("arbitration_id", report)
+        self.assertFalse(retain)
+        state = json.loads(next(
+            payload for topic, payload, _ in messages
+            if topic.endswith("/spn/190")
+        ))
+        self.assertEqual(state["value"], 1000)
+        self.assertNotIn("can_id", state)
+        self.assertIn(
+            (self.bridge.availability_topic, "online", True), messages
+        )
+
+    async def test_short_and_nonzero_page_pgn_reports_stay_raw_only(self):
+        for report in (
+            PgnReport(0, 61444, 6, 0, b"\xff"),
+            PgnReport(0, 61444, 6, 1, bytes(8)),
+            PgnReport(254, 61444, 6, 0, bytes(8)),
+        ):
+            self.publish.reset_mock()
+            bridge = MqttBridge("coach", self.publish)
+            await bridge.async_process_pgn_report(report)
+            self.assertFalse(any(
+                topic.endswith("/spn/190") for topic, _, _ in self.messages()
+            ))
+            online = any(
+                topic == self.bridge.availability_topic
+                and payload == "online"
+                for topic, payload, _ in self.messages()
+            )
+            self.assertEqual(online, report.source_address < 254)
+
+    async def test_obd_report_is_not_published_as_j1939(self):
+        from custom_components.bluefire.protocol import ObdReport
+
+        await self.bridge.async_process_obd_report(
+            ObdReport(0x7E8, 1, 12, b"\x1f\x40")
+        )
+        topic, payload, retain = self.messages()[0]
+        self.assertEqual(topic, "vehicle/coach/obd/2024/1/12")
+        self.assertEqual(json.loads(payload)["protocol"], "obd")
+        self.assertFalse(retain)
+
     async def test_discovery_and_unit_explicit_state(self):
         await self.bridge.async_process_frame(
             frame(61444, "ff ff 7d 40 1f ff ff ff")

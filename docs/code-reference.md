@@ -427,7 +427,7 @@ These require engine MID 128 and the explicit Detroit DDEC III/IV reference prof
 
 ## MQTT mapping
 
-All measurement and diagnostic states are non-retained. Discovery and availability are retained. Each protocol has independent freshness and all discovered sensors expire after 60 seconds. Live BLE reception is not implemented.
+All measurement and diagnostic states are non-retained. Discovery and availability are retained. Each protocol has independent freshness and all discovered sensors expire after 60 seconds. The provisional modern EZ BLE receiver is enabled; adapter compatibility remains hardware-unverified.
 
 | Meaning | Topic pattern |
 | --- | --- |

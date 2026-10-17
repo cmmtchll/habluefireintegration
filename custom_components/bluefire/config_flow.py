@@ -6,7 +6,12 @@ from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigFlow
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 
-from .const import CONF_VEHICLE_ID, DEFAULT_VEHICLE_ID, DOMAIN
+from .const import (
+    CONF_J1587_EXTENDED,
+    CONF_VEHICLE_ID,
+    DEFAULT_VEHICLE_ID,
+    DOMAIN,
+)
 from .telemetry import valid_vehicle_id
 from .validation import normalize_address
 
@@ -123,6 +128,12 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
             errors[CONF_NAME] = "invalid_name"
         if not valid_vehicle_id(data[CONF_VEHICLE_ID]):
             errors[CONF_VEHICLE_ID] = "invalid_vehicle_id"
+        if CONF_J1587_EXTENDED in user_input:
+            value = user_input[CONF_J1587_EXTENDED]
+            if type(value) is not bool:
+                errors[CONF_J1587_EXTENDED] = "invalid_j1587_format"
+            else:
+                data[CONF_J1587_EXTENDED] = value
         return data, errors
 
     def _show_settings(self, step_id, defaults, errors):
@@ -140,6 +151,19 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_VEHICLE_ID,
                 default=defaults.get(CONF_VEHICLE_ID, DEFAULT_VEHICLE_ID),
             )] = str
+        if CONF_J1587_EXTENDED in defaults:
+            schema[vol.Optional(
+                CONF_J1587_EXTENDED,
+                default=defaults[CONF_J1587_EXTENDED],
+            )] = vol.In({
+                "Legacy (before 3.19)": False,
+                "Extended (3.19+)": True,
+            })
+        else:
+            schema[vol.Optional(CONF_J1587_EXTENDED)] = vol.In({
+                "Legacy (before 3.19)": False,
+                "Extended (3.19+)": True,
+            })
         return self.async_show_form(
             step_id=step_id,
             data_schema=vol.Schema(schema),
