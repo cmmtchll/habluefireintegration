@@ -7,10 +7,12 @@ starts a speculative subscription or publishes fabricated vehicle data.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from .const import DOMAIN, STATUS_PROTOCOL_REQUIRED
+from .health import Health
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -26,6 +28,7 @@ class BlueFireRuntime:
     bridge: MqttBridge
     services: list[dict[str, Any]] = field(default_factory=list)
     inspecting: bool = False
+    health: Health = field(default_factory=Health)
 
 
 def CONFIG_SCHEMA(config: dict) -> dict:
@@ -41,12 +44,18 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
     from homeassistant.config_entries import ConfigEntryState
     from homeassistant.core import SupportsResponse
-    from homeassistant.exceptions import ServiceValidationError
+    from homeassistant.exceptions import (
+        HomeAssistantError,
+        ServiceValidationError,
+    )
     from homeassistant.helpers import config_validation as cv
 
-    from .bluetooth import async_inspect
+    from .bluetooth import async_capture_report, async_inspect
+    from .const import (
+        CAPTURE_SECONDS, MAX_CAPTURE_SECONDS, MIN_CAPTURE_SECONDS,
+    )
 
-    async def inspect_adapter(call):
+    def loaded_runtime(call):
         entry = hass.config_entries.async_get_entry(call.data["entry_id"])
         if (
             entry is None
@@ -56,9 +65,12 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             raise ServiceValidationError(
                 "Select a loaded BlueFire config entry"
             )
-        runtime = entry.runtime_data
-        if runtime.inspecting:
+        if entry.runtime_data.inspecting:
             raise ServiceValidationError("Inspection is already running")
+        return entry, entry.runtime_data
+
+    async def inspect_adapter(call):
+        entry, runtime = loaded_runtime(call)
         runtime.inspecting = True
         try:
             runtime.services = await async_inspect(hass, entry.data["address"])
@@ -66,6 +78,20 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 "status": STATUS_PROTOCOL_REQUIRED,
                 "services": runtime.services,
             }
+        except HomeAssistantError as err:
+            runtime.health.error("connection_errors", str(err))
+            raise
+        finally:
+            runtime.inspecting = False
+
+    async def capture_notifications(call):
+        entry, runtime = loaded_runtime(call)
+        runtime.inspecting = True
+        try:
+            return await async_capture_report(
+                hass, entry.data["address"], runtime.health,
+                call.data["duration"],
+            )
         finally:
             runtime.inspecting = False
 
@@ -76,15 +102,31 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         schema=vol.Schema({vol.Required("entry_id"): cv.string}),
         supports_response=SupportsResponse.ONLY,
     )
+    hass.services.async_register(
+        DOMAIN,
+        "capture_notifications",
+        capture_notifications,
+        schema=vol.Schema({
+            vol.Required("entry_id"): cv.string,
+            vol.Optional("duration", default=CAPTURE_SECONDS): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=MIN_CAPTURE_SECONDS, max=MAX_CAPTURE_SECONDS),
+            ),
+        }),
+        supports_response=SupportsResponse.ONLY,
+    )
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Prepare MQTT without claiming an operational BLE receiver."""
-    from homeassistant.components import mqtt
+    from homeassistant.components import bluetooth, mqtt
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
     from homeassistant.core import callback
-    from homeassistant.exceptions import ConfigEntryNotReady
+    from homeassistant.exceptions import (
+        ConfigEntryNotReady,
+        HomeAssistantError,
+    )
     from homeassistant.helpers.event import async_track_time_interval
 
     from .const import CONF_VEHICLE_ID
@@ -96,8 +138,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     from .telemetry import MqttBridge
 
+    health = Health()
+
     async def publish(topic: str, payload: str, retain: bool) -> None:
-        await async_publish(hass, topic, payload, retain)
+        try:
+            await async_publish(hass, topic, payload, retain)
+        except HomeAssistantError as err:
+            health.error("mqtt_errors", f"{topic}: {err}")
+            raise
+        health.count("mqtt_published")
 
     if not await mqtt.async_wait_for_mqtt_client(hass):
         raise ConfigEntryNotReady(
@@ -127,7 +176,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         known_j1587=await ledger.async_get_j1587(entry.entry_id),
         save_j1587=save_j1587,
     )
-    entry.runtime_data = BlueFireRuntime(bridge)
+    entry.runtime_data = BlueFireRuntime(bridge, health=health)
 
     async def mqtt_ready() -> None:
         await async_flush_removals(hass, ledger)
@@ -166,6 +215,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(hass.bus.async_listen_once(
         EVENT_HOMEASSISTANT_STOP, shutdown
     ))
+    address = entry.data.get("address")
+    if address:
+        # Passive advertisement tracking: RSSI/presence, never a connection.
+        @callback
+        def advertisement(service_info, change) -> None:
+            health.advertisement(service_info.rssi, service_info.source)
+
+        @callback
+        def unavailable(service_info) -> None:
+            health.unavailable()
+
+        last = bluetooth.async_last_service_info(
+            hass, address, connectable=False
+        )
+        if last is not None:
+            observed_at = datetime.now(timezone.utc) - timedelta(
+                seconds=monotonic() - last.time
+            )
+            health.advertisement(last.rssi, last.source, observed_at)
+        entry.async_on_unload(bluetooth.async_register_callback(
+            hass, advertisement,
+            bluetooth.BluetoothCallbackMatcher(
+                address=address, connectable=False
+            ),
+            bluetooth.BluetoothScanningMode.PASSIVE,
+        ))
+        entry.async_on_unload(bluetooth.async_track_unavailable(
+            hass, unavailable, address, connectable=False
+        ))
     if mqtt.is_connected(hass):
         await mqtt_ready()
     await hass.config_entries.async_forward_entry_setups(

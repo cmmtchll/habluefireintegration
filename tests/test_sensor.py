@@ -1,5 +1,6 @@
-"""Verify stable diagnostic identity across a MAC-address correction."""
+"""Verify diagnostic entities and stable identity across MAC corrections."""
 
+from datetime import datetime, timezone
 import importlib
 import sys
 from types import SimpleNamespace
@@ -20,8 +21,22 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
             "homeassistant.components": module("homeassistant.components"),
             "homeassistant.components.sensor": module(
                 "homeassistant.components.sensor",
-                SensorDeviceClass=SimpleNamespace(ENUM="enum"),
-                SensorEntity=type("SensorEntity", (), {}),
+                SensorDeviceClass=SimpleNamespace(
+                    ENUM="enum", TIMESTAMP="timestamp",
+                    SIGNAL_STRENGTH="signal_strength", DATA_SIZE="data_size",
+                ),
+                SensorStateClass=SimpleNamespace(
+                    MEASUREMENT="measurement",
+                    TOTAL_INCREASING="total_increasing",
+                ),
+                SensorEntity=type("SensorEntity", (), {
+                    "async_on_remove": lambda self, func: (
+                        self.removers.append(func)
+                    ),
+                    "async_write_ha_state": lambda self: (
+                        self.writes.append(self.native_value)
+                    ),
+                }),
             ),
             "homeassistant.helpers": module(
                 "homeassistant.helpers",
@@ -50,11 +65,118 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         sys.modules.pop(self.module_name, None)
         self.addCleanup(sys.modules.pop, self.module_name, None)
         self.api = importlib.import_module(self.module_name)
+        from custom_components.bluefire.health import Health
+
+        self.health = Health(
+            clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)
+        )
         self.entry = SimpleNamespace(
             entry_id="stable-entry-id",
             unique_id="AA:BB:CC:DD:EE:01",
             title="Coach adapter",
+            runtime_data=SimpleNamespace(health=self.health),
         )
+
+    async def sensors(self):
+        added = Mock()
+        await self.api.async_setup_entry(object(), self.entry, added)
+        return {
+            entity._attr_unique_id.removeprefix("stable-entry-id_"): entity
+            for entity in added.call_args.args[0]
+        }
+
+    async def test_health_sensors_are_diagnostic_and_stable(self):
+        sensors = await self.sensors()
+        self.assertIn("protocol_status", sensors)
+        for key in (
+            "last_data_seen", "last_advertisement", "signal_strength",
+            "decode_success_rate", "notifications", "bytes_received",
+            "packets", "framing_errors", "parse_errors",
+            "unrecognized_messages", "connection_errors", "mqtt_published",
+            "mqtt_errors", "captures", "last_error",
+        ):
+            sensor = sensors[key]
+            self.assertEqual(sensor._attr_entity_category, "diagnostic")
+            self.assertEqual(
+                sensor._attr_device_info["identifiers"],
+                {("bluefire", "stable-entry-id")},
+            )
+        self.assertFalse(
+            sensors["bytes_received"]._attr_entity_registry_enabled_default
+        )
+        self.assertEqual(
+            sensors["signal_strength"]._attr_native_unit_of_measurement,
+            "dBm",
+        )
+        self.assertEqual(
+            sensors["framing_errors"]._attr_state_class, "total_increasing"
+        )
+
+    async def test_health_sensor_values_and_attributes(self):
+        sensors = await self.sensors()
+        self.assertIsNone(sensors["last_data_seen"].native_value)
+        self.assertIsNone(sensors["last_error"].native_value)
+        self.assertIsNone(sensors["notifications"].extra_state_attributes)
+        self.assertEqual(
+            sensors["captures"].extra_state_attributes,
+            {"last_capture": None, "summary": None},
+        )
+        self.assertIsNone(
+            sensors["last_error"].extra_state_attributes["time"]
+        )
+        self.health.advertisement(-70, "hci0")
+        self.health.data_seen()
+        self.health.count("packets", 3)
+        self.health.count("heartbeats")
+        self.health.count("unknown_commands", 2)
+        self.health.error("framing_errors", "Invalid receive length XOR")
+        self.health.error("mqtt_errors", "x" * 300)
+        self.health.capture_completed({"packets": 3})
+        self.assertEqual(sensors["signal_strength"].native_value, -70)
+        self.assertEqual(
+            sensors["signal_strength"].extra_state_attributes["statistics"],
+            {"samples": 1, "min": -70, "max": -70, "mean": -70.0,
+             "spread": 0},
+        )
+        self.assertEqual(
+            sensors["last_data_seen"].native_value,
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(sensors["packets"].native_value, 3)
+        self.assertEqual(
+            sensors["packets"].extra_state_attributes["heartbeats"], 1
+        )
+        self.assertEqual(sensors["unrecognized_messages"].native_value, 2)
+        self.assertEqual(sensors["decode_success_rate"].native_value, 75.0)
+        self.assertEqual(
+            sensors["framing_errors"].extra_state_attributes,
+            {"recent": {"framing_errors: Invalid receive length XOR": 1}},
+        )
+        self.assertEqual(len(sensors["last_error"].native_value), 255)
+        self.assertEqual(
+            sensors["captures"].extra_state_attributes["last_capture"],
+            "2026-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(
+            sensors["last_advertisement"].extra_state_attributes,
+            {"present": True, "source": "hci0"},
+        )
+        self.assertEqual(
+            sensors["last_error"].extra_state_attributes["time"],
+            "2026-01-01T00:00:00+00:00",
+        )
+
+    async def test_health_sensors_push_significant_events(self):
+        sensor = (await self.sensors())["connection_errors"]
+        sensor.removers, sensor.writes = [], []
+        await sensor.async_added_to_hass()
+        self.health.count("connection_errors")
+        self.assertEqual(sensor.writes, [])
+        self.health.error("connection_errors", "not visible")
+        self.assertEqual(sensor.writes, [2])
+        sensor.removers[0]()
+        self.health.unavailable()
+        self.assertEqual(sensor.writes, [2])
 
     async def test_status_entity_does_not_use_mutable_mac(self):
         added = Mock()

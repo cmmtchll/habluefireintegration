@@ -3,10 +3,13 @@
 import asyncio
 import importlib
 import sys
+from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
+from time import monotonic
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from custom_components.bluefire.health import Health
 from custom_components.bluefire import (
     CONFIG_SCHEMA,
     async_setup,
@@ -14,6 +17,16 @@ from custom_components.bluefire import (
     async_setup_entry,
     async_unload_entry,
 )
+
+
+def packet(body):
+    """Frame a receive body exactly as the offline decoder expects."""
+    from custom_components.bluefire.protocol import receive_checksum
+
+    high, low = len(body) >> 8, len(body) & 255
+    return bytes([high, low, high ^ low]) + body + bytes(
+        [receive_checksum(body)]
+    )
 
 
 def module(name, **attributes):
@@ -26,6 +39,10 @@ class BoundaryError(Exception):
     pass
 
 
+class ConnectionFailure(Exception):
+    pass
+
+
 class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.services = {}
@@ -34,7 +51,9 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             self.services[name] = handler
 
         self.service_registration = Mock(side_effect=register_service)
-        self.runtime = SimpleNamespace(inspecting=False, services=[])
+        self.runtime = SimpleNamespace(
+            inspecting=False, services=[], health=Health()
+        )
         self.entry = SimpleNamespace(
             domain="bluefire",
             state="loaded",
@@ -68,6 +87,7 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             "homeassistant.exceptions": module(
                 "homeassistant.exceptions",
                 ServiceValidationError=BoundaryError,
+                HomeAssistantError=ConnectionFailure,
             ),
             "homeassistant.helpers": module(
                 "homeassistant.helpers", config_validation=cv
@@ -84,16 +104,19 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.inspected = AsyncMock(return_value=[{"uuid": "service"}])
+        self.captured = AsyncMock(return_value={"status": "completed"})
         inspect_patch = patch.dict(sys.modules, {
             "custom_components.bluefire.bluetooth": module(
                 "custom_components.bluefire.bluetooth",
                 async_inspect=self.inspected,
+                async_capture_report=self.captured,
             )
         })
         inspect_patch.start()
         self.addCleanup(inspect_patch.stop)
         await async_setup(self.hass, {})
         self.inspect = self.services["inspect_adapter"]
+        self.capture = self.services["capture_notifications"]
 
     async def test_inspection_returns_metadata_and_clears_busy_flag(self):
         result = await self.inspect(
@@ -124,6 +147,57 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             await self.inspect(SimpleNamespace(data={"entry_id": "entry"}))
         self.assertFalse(self.runtime.inspecting)
 
+    async def test_inspection_connection_failure_is_counted(self):
+        self.inspected.side_effect = ConnectionFailure("not visible")
+        with self.assertRaises(ConnectionFailure):
+            await self.inspect(SimpleNamespace(data={"entry_id": "entry"}))
+        self.assertEqual(
+            self.runtime.health.counters["connection_errors"], 1
+        )
+        self.assertEqual(
+            self.runtime.health.last_error, "connection_errors: not visible"
+        )
+
+    async def test_capture_service_uses_duration_and_clears_busy_flag(self):
+        result = await self.capture(SimpleNamespace(
+            data={"entry_id": "entry", "duration": 7}
+        ))
+        self.assertEqual(result, {"status": "completed"})
+        self.captured.assert_awaited_once_with(
+            self.hass, "AA:BB:CC:DD:EE:01", self.runtime.health, 7
+        )
+        self.assertFalse(self.runtime.inspecting)
+        self.captured.side_effect = ConnectionFailure("busy")
+        with self.assertRaises(ConnectionFailure):
+            await self.capture(SimpleNamespace(
+                data={"entry_id": "entry", "duration": 7}
+            ))
+        self.assertFalse(self.runtime.inspecting)
+
+    async def test_capture_service_rejects_concurrent_request(self):
+        self.runtime.inspecting = True
+        with self.assertRaisesRegex(BoundaryError, "already running"):
+            await self.capture(SimpleNamespace(
+                data={"entry_id": "entry", "duration": 7}
+            ))
+        self.captured.assert_not_awaited()
+
+    def test_capture_schema_bounds_duration(self):
+        import voluptuous as vol
+
+        schemas = {
+            call.args[1]: call.kwargs["schema"]
+            for call in self.service_registration.call_args_list
+        }
+        schema = schemas["capture_notifications"]
+        self.assertEqual(schema({"entry_id": "e"})["duration"], 20)
+        self.assertEqual(
+            schema({"entry_id": "e", "duration": "30"})["duration"], 30
+        )
+        for value in (4, 61):
+            with self.assertRaises(vol.Invalid):
+                schema({"entry_id": "e", "duration": value})
+
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -150,10 +224,38 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                     cb) or Mock()
             ),
         )
-        self.client = SimpleNamespace(services=[], disconnect=AsyncMock())
+        self.client = SimpleNamespace(
+            services=[], disconnect=AsyncMock(), start_notify=AsyncMock(),
+            stop_notify=AsyncMock(), mtu_size=185,
+        )
         self.connect = AsyncMock(return_value=self.client)
+        self.advertisement_callbacks = []
+        self.unavailable_callbacks = []
+        self.service_info = None
         self.bluetooth = SimpleNamespace(
-            async_ble_device_from_address=Mock(return_value=object())
+            async_ble_device_from_address=Mock(return_value=object()),
+            async_last_service_info=Mock(
+                side_effect=lambda hass, address, connectable: (
+                    self.service_info
+                )
+            ),
+            async_register_callback=Mock(
+                side_effect=lambda hass, cb, matcher, mode: (
+                    self.advertisement_callbacks.append(
+                        (cb, matcher, mode)) or Mock()
+                )
+            ),
+            async_track_unavailable=Mock(
+                side_effect=lambda hass, cb, address, connectable: (
+                    self.unavailable_callbacks.append(cb) or Mock()
+                )
+            ),
+            BluetoothCallbackMatcher=dict,
+            BluetoothScanningMode=SimpleNamespace(PASSIVE="passive"),
+            async_scanner_count=Mock(
+                side_effect=lambda hass, connectable: 2 if connectable else 3
+            ),
+            async_address_present=Mock(return_value=True),
         )
         self.modules = patch.dict(sys.modules, {
             "homeassistant": module("homeassistant"),
@@ -176,6 +278,12 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 HomeAssistantError=BoundaryError,
             ),
             "homeassistant.helpers": module("homeassistant.helpers"),
+            "homeassistant.loader": module(
+                "homeassistant.loader",
+                async_get_integration=AsyncMock(
+                    return_value=SimpleNamespace(version="0.4.0")
+                ),
+            ),
             "homeassistant.helpers.storage": module(
                 "homeassistant.helpers.storage",
                 Store=Mock(return_value=self.store),
@@ -360,17 +468,6 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             await api.async_inspect(self.hass, "AA:BB:CC:DD:EE:FF")
         self.client.disconnect.assert_awaited_once()
 
-    async def test_diagnostics_omit_identifying_data(self):
-        api = importlib.import_module("custom_components.bluefire.diagnostics")
-        await async_setup_entry(self.hass, self.entry)
-        self.entry.data["address"] = "AA:BB:CC:DD:EE:FF"
-        result = await api.async_get_config_entry_diagnostics(
-            self.hass, self.entry
-        )
-        self.assertEqual(
-            result, {
-                "protocol_status": "protocol_required", "gatt_services": []})
-
     async def test_custom_birth_settings_and_prefix(self):
         self.hass.config_entries.async_entries.return_value = [
             SimpleNamespace(
@@ -481,3 +578,214 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             self.store.async_save.await_args.args[0]["test-entry"]["pending"]
         )
+
+    def ble_entry(self):
+        self.entry.data["address"] = "AA:BB:CC:DD:EE:FF"
+        self.entry.unique_id = "AA:BB:CC:DD:EE:FF"
+        self.entry.options = {}
+        self.service_info = SimpleNamespace(
+            name="BlueFire LE", rssi=-71, tx_power=None, source="hci0",
+            connectable=True, time=0.0, service_uuids=["b65d50ef"],
+            manufacturer_data={65535: b"\x01\x02"},
+            service_data={"b65d50ef": b"\x03"},
+        )
+
+    def notify_client(self, notifications, *, failing=()):
+        """Deliver notifications as soon as each characteristic subscribes."""
+        def characteristic(uuid, handle, properties):
+            return SimpleNamespace(
+                uuid=uuid, handle=handle, properties=properties
+            )
+
+        self.client.services = [SimpleNamespace(
+            uuid="service", characteristics=[
+                characteristic("j1939", 12, ["notify"]),
+                characteristic("j1708", 15, ["indicate"]),
+                characteristic("write", 18, ["write"]),
+            ],
+        )]
+
+        async def start_notify(char, callback):
+            if char.uuid in failing:
+                raise BoundaryError("subscribe refused")
+            for uuid, data in notifications:
+                if uuid == char.uuid:
+                    callback(char, bytearray(data))
+
+        self.client.start_notify.side_effect = start_notify
+
+    async def test_passive_advertisements_track_rssi_without_connecting(self):
+        self.ble_entry()
+        self.service_info.time = monotonic() - 60
+        await async_setup_entry(self.hass, self.entry)
+        health = self.entry.runtime_data.health
+        self.assertEqual(health.rssi, -71)
+        self.assertGreaterEqual(
+            (datetime.now(timezone.utc) - health.last_advertisement)
+            .total_seconds(),
+            59,
+        )
+        callback, matcher, mode = self.advertisement_callbacks[0]
+        self.assertEqual(matcher, {
+            "address": "AA:BB:CC:DD:EE:FF", "connectable": False,
+        })
+        self.assertEqual(mode, "passive")
+        callback(SimpleNamespace(rssi=-60, source="proxy"), "change")
+        self.assertEqual((health.rssi, health.source), (-60, "proxy"))
+        self.unavailable_callbacks[0](SimpleNamespace())
+        self.assertFalse(health.present)
+        self.assertIsNone(health.rssi)
+        self.connect.assert_not_awaited()
+
+    async def test_mqtt_publish_success_and_failure_are_counted(self):
+        await async_setup_entry(self.hass, self.entry)
+        runtime = self.entry.runtime_data
+        published = runtime.health.counters["mqtt_published"]
+        self.assertGreater(published, 0)
+        self.mqtt.async_publish.side_effect = BoundaryError("broker down")
+        with self.assertRaises(BoundaryError):
+            await runtime.bridge.publish("topic", "payload", False)
+        self.assertEqual(runtime.health.counters["mqtt_errors"], 1)
+        self.assertEqual(
+            runtime.health.counters["mqtt_published"], published
+        )
+
+    async def test_capture_records_raw_notifications_and_failures(self):
+        api = importlib.import_module("custom_components.bluefire.bluetooth")
+        heartbeat = packet(b"\xff")
+        self.notify_client(
+            [("j1939", heartbeat[:2]), ("j1939", heartbeat[2:])],
+            failing=("j1708",),
+        )
+        result = await api.async_capture(self.hass, "AA:BB:CC:DD:EE:FF", 0)
+        self.assertEqual(
+            [item["data"] for item in result["notifications"]],
+            [heartbeat[:2], heartbeat[2:]],
+        )
+        self.assertEqual(result["subscribed"], [{
+            "service": "service", "characteristic": "j1939", "handle": 12,
+        }])
+        self.assertEqual(
+            result["subscribe_failures"][0]["error"], "subscribe refused"
+        )
+        self.assertEqual(result["mtu"], 185)
+        self.assertEqual(
+            result["services"][0]["characteristics"][0]["handle"], 12
+        )
+        self.client.stop_notify.assert_awaited_once()
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_capture_bounds_notifications_and_ignores_stop_errors(self):
+        api = importlib.import_module("custom_components.bluefire.bluetooth")
+        self.notify_client([
+            ("j1939", b"\x00"), ("j1939", b"\x00\x01"),
+            ("j1939", b"\x00\x01\x02"),
+        ])
+        self.client.stop_notify.side_effect = BoundaryError("gone")
+        with patch.object(api, "MAX_CAPTURE_NOTIFICATIONS", 2):
+            result = await api.async_capture(self.hass, "AA:BB", 0)
+        self.assertEqual(len(result["notifications"]), 2)
+        self.assertEqual(result["dropped_notifications"], 1)
+        self.assertEqual(result["received_notifications"], 3)
+        self.assertEqual(result["received_bytes"], 6)
+        self.assertIsNotNone(result["last_received"])
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_capture_disconnects_when_unsubscribe_times_out(self):
+        api = importlib.import_module("custom_components.bluefire.bluetooth")
+        self.notify_client([("j1939", b"\x00")])
+        self.client.stop_notify.side_effect = TimeoutError("cleanup timeout")
+
+        with self.assertRaisesRegex(BoundaryError, "cleanup timeout"):
+            await api.async_capture(self.hass, "AA:BB", 0)
+
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_capture_failures_are_actionable(self):
+        api = importlib.import_module("custom_components.bluefire.bluetooth")
+        self.connect.side_effect = BoundaryError("adapter busy")
+        with self.assertRaisesRegex(BoundaryError, "adapter busy"):
+            await api.async_capture(self.hass, "AA:BB", 0)
+        self.bluetooth.async_ble_device_from_address.return_value = None
+        with self.assertRaisesRegex(BoundaryError, "not visible"):
+            await api.async_capture(self.hass, "AA:BB", 0)
+
+    async def test_diagnostics_dump_state_and_capture_raw_data(self):
+        api = importlib.import_module("custom_components.bluefire.diagnostics")
+        self.ble_entry()
+        await async_setup_entry(self.hass, self.entry)
+        pgn = packet(bytes([151, 0, 0xF0, 0x04, 3, 0, 8]) + bytes(8))
+        self.notify_client([
+            ("j1939", packet(b"\xff")), ("j1939", pgn),
+            ("j1939", packet(b"\x07\x01")), ("j1708", b"\x00\x01\x00"),
+        ])
+        with patch.object(api, "CAPTURE_SECONDS", 0):
+            result = await api.async_get_config_entry_diagnostics(
+                self.hass, self.entry
+            )
+        self.assertEqual(result["entry"]["data"]["address"],
+                         "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(result["integration_version"], "0.4.0")
+        self.assertTrue(result["mqtt"]["connected"])
+        self.assertEqual(
+            result["mqtt"]["ledger"]["record"]["vehicle_id"], "coach"
+        )
+        self.assertEqual(result["bridge"]["vehicle_id"], "coach")
+        self.assertEqual(result["bluetooth"]["scanner_count"], 3)
+        advertisement = result["bluetooth"]["last_advertisement"]
+        self.assertEqual(advertisement["rssi"], -71)
+        self.assertEqual(advertisement["manufacturer_data"], {"65535": "0102"})
+        capture = result["capture"]
+        self.assertEqual(capture["status"], "completed")
+        self.assertEqual(
+            [item["hex"] for item in capture["notifications"]][:2],
+            [packet(b"\xff").hex(), pgn.hex()],
+        )
+        stream = capture["analysis"]["totals"]["stream"]
+        self.assertEqual(stream["packets"], 3)
+        self.assertEqual(stream["heartbeats"], 1)
+        self.assertEqual(stream["pgn_reports"], 1)
+        self.assertEqual(stream["unknown_commands"], 1)
+        self.assertEqual(stream["framing_errors"], 1)
+        counters = result["health"]["counters"]
+        self.assertEqual(counters["notifications"], 4)
+        self.assertEqual(counters["captures"], 1)
+        self.assertEqual(
+            result["health_before_capture"]["counters"]["captures"], 0
+        )
+        self.assertFalse(self.entry.runtime_data.inspecting)
+        self.assertNotIn("data", capture["notifications"][0])
+
+    async def test_diagnostics_report_busy_failed_and_missing_address(self):
+        api = importlib.import_module("custom_components.bluefire.diagnostics")
+        await async_setup_entry(self.hass, self.entry)
+        self.entry.options = {}
+        self.entry.unique_id = None
+        result = await api.async_get_config_entry_diagnostics(
+            self.hass, self.entry
+        )
+        self.assertIsNone(result["bluetooth"])
+        self.assertEqual(result["capture"]["status"], "skipped")
+        self.ble_entry()
+        self.service_info = None
+        self.entry.runtime_data.inspecting = True
+        result = await api.async_get_config_entry_diagnostics(
+            self.hass, self.entry
+        )
+        self.assertIn("running", result["capture"]["reason"])
+        self.assertIsNone(result["bluetooth"]["last_advertisement"])
+        self.entry.runtime_data.inspecting = False
+        self.connect.side_effect = BoundaryError("adapter busy")
+        result = await api.async_get_config_entry_diagnostics(
+            self.hass, self.entry
+        )
+        self.assertEqual(result["capture"]["status"], "failed")
+        self.assertEqual(
+            result["health"]["counters"]["connection_errors"], 1
+        )
+        self.assertFalse(self.entry.runtime_data.inspecting)
+        self.hass.data.clear()
+        result = await api.async_get_config_entry_diagnostics(
+            self.hass, self.entry
+        )
+        self.assertIsNone(result["mqtt"]["ledger"])

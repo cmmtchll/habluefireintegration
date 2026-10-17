@@ -112,6 +112,15 @@ class DiscoveryLedger:
             self._records[entry_id][key] = signals
             await self.store.async_save(self._records)
 
+    def diagnostics(self, entry_id) -> dict:
+        """Loaded ownership for one entry plus queued cleanup totals."""
+        return {
+            "record": self._records.get(entry_id),
+            "pending_removals": sum(
+                1 for record in self._records.values() if record["pending"]
+            ),
+        }
+
     async def async_queue_removal(self, entry_id):
         """Deletion must work even when entry.runtime_data no longer exists."""
         async with self._lock:
