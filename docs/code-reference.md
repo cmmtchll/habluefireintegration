@@ -427,14 +427,16 @@ These require engine MID 128 and the explicit Detroit DDEC III/IV reference prof
 
 ## MQTT mapping
 
-All measurement and diagnostic states are non-retained. Discovery and availability are retained. Each protocol has independent freshness and all discovered sensors expire after 60 seconds. The provisional modern EZ BLE receiver is enabled; adapter compatibility remains hardware-unverified.
+All measurement and diagnostic states are non-retained. Discovery and availability are retained. Each protocol has independent freshness and all discovered sensors expire after 60 seconds. The provisional modern EZ BLE receiver is enabled; adapter compatibility remains hardware-unverified. Command-level authentication/startup is not implemented.
 
 | Meaning | Topic pattern |
 | --- | --- |
 | J1939 raw frame | vehicle/{vehicle}/j1939/{source}/frame |
+| J1939 vendor PGN report | vehicle/{vehicle}/j1939/{source}/report/{pgn} |
 | J1939 measurement | vehicle/{vehicle}/j1939/{source}/spn/{spn} |
 | J1939 diagnostic report | vehicle/{vehicle}/j1939/{source}/faults/{pgn} |
 | J1587 normalized raw parameter | vehicle/{vehicle}/j1587/{mid}/report |
 | J1587 measurement | vehicle/{vehicle}/j1587/{mid}/pid/{pid} |
 | J1587 diagnostic entries | vehicle/{vehicle}/j1587/{mid}/faults/194 |
+| OBD report | vehicle/{vehicle}/obd/{source}/{mode}/{pid} |
 | Protocol availability | vehicle/{vehicle}/{j1939-or-j1587}/availability |

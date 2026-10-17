@@ -294,7 +294,9 @@ class MqttBridge:
                 "pgn": report.pgn,
                 "source_address": report.source_address,
                 "source_name": source_name(report.source_address),
-                "source_name_basis": "conventional_address_not_verified_identity",
+                "source_name_basis": (
+                    "conventional_address_not_verified_identity"
+                ),
                 "priority": report.priority,
                 "data_page": report.data_page,
                 "catalog_version": CATALOG_VERSION,
@@ -322,7 +324,10 @@ class MqttBridge:
                         await self.publish(topic, payload, True)
                         self.discovery[topic] = payload
                     await self.publish(
-                        f"{self.prefix}/{report.source_address}/spn/{signal.spn}",
+                        (
+                            f"{self.prefix}/{report.source_address}"
+                            f"/spn/{signal.spn}"
+                        ),
                         json.dumps({
                             **common,
                             **signal.metadata(),
@@ -352,7 +357,10 @@ class MqttBridge:
                         source=report.source_address,
                     )
                     await self.publish(
-                        f"{self.prefix}/{report.source_address}/faults/{report.pgn}",
+                        (
+                            f"{self.prefix}/{report.source_address}"
+                            f"/faults/{report.pgn}"
+                        ),
                         json.dumps({**common, **faults}),
                         False,
                     )
@@ -365,7 +373,7 @@ class MqttBridge:
                     self._online = True
 
     async def async_process_obd_report(self, report: ObdReport) -> None:
-        """Preserve OBD reports in their own namespace without relabeling them."""
+        """Preserve OBD reports separately without relabeling them."""
         if not isinstance(report, ObdReport):
             raise ValueError("Expected a parsed OBD report")
         await self.publish(

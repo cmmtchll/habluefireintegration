@@ -1,6 +1,7 @@
 """Exercise the provisional BLE receiver without a radio or broker."""
 
 import importlib
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -29,7 +30,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             start_notify=AsyncMock(), stop_notify=AsyncMock(),
         )
         self.connect = AsyncMock(return_value=self.client)
-        self.home_assistant_error = type("HomeAssistantError", (Exception,), {})
+        self.home_assistant_error = type(
+            "HomeAssistantError", (Exception,), {})
         self.bleak_error = type("BleakError", (Exception,), {})
         self.modules = patch.dict(sys.modules, {
             "homeassistant": module("homeassistant"),
@@ -72,30 +74,24 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decoded, ())
         decoded = self.receiver._decoder.feed(packet[6:])
         for message in decoded:
-            await self.receiver._async_process_body(
-                self.api.parse_message(message)
-            )
+            await self.receiver._async_process_body(message)
         self.bridge.async_process_pgn_report.assert_awaited_once()
         report = self.bridge.async_process_pgn_report.await_args.args[0]
         self.assertEqual(report.pgn, 61444)
         self.assertEqual(report.data, bytes.fromhex("00 00 7d 40 1f ff ff ff"))
 
-    async def test_configured_j1587_format_and_obd_reports_route_separately(self):
+    async def test_configured_j1587_format_and_obd_reports_route_separately(
+            self):
         self.receiver.j1587_extended = True
         await self.receiver._async_process_body(
-            self.api.parse_message(
-                bytes.fromhex("9a 80 be 02 34 12"),
-                j1587_extended=True,
-            )
+            bytes.fromhex("9a 80 be 02 34 12")
         )
         self.bridge.async_process_j1587.assert_awaited_once()
         self.assertEqual(
             self.bridge.async_process_j1587.await_args.args[0].pid, 190
         )
         await self.receiver._async_process_body(
-            self.api.parse_message(
-                bytes.fromhex("ae 07 e8 01 00 0c 02 1f 40")
-            )
+            bytes.fromhex("ae 07 e8 01 00 0c 02 1f 40")
         )
         self.bridge.async_process_obd_report.assert_awaited_once()
         self.assertEqual(
@@ -153,6 +149,44 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.client.start_notify.assert_awaited_once()
         self.client.stop_notify.assert_awaited_once()
 
+    async def test_session_consumes_ez_stream_and_cleans_up(self):
+        body = bytes.fromhex("97 00 f0 04 06 00 08 00 00 7d 40 1f ff ff ff")
+        characteristic = SimpleNamespace(
+            uuid=self.api.EZ_RECEIVE, properties=["notify"]
+        )
+        self.client.services = [
+            SimpleNamespace(
+                uuid=self.api.EZ_SERVICE,
+                characteristics=[characteristic],
+            )
+        ]
+        self.client.is_connected = True
+        self.bridge.async_process_pgn_report.side_effect = (
+            lambda _report: setattr(self.client, "is_connected", False)
+        )
+        self.client.start_notify.side_effect = (
+            lambda char, callback: callback(char, self.packet(body))
+        )
+        self.client.stop_notify.side_effect = self.bleak_error("stop failed")
+        self.client.disconnect.side_effect = self.bleak_error(
+            "disconnect failed"
+        )
+        with self.assertRaises(self.bleak_error):
+            await self.receiver._async_receive_session()
+        self.assertEqual(
+            self.receiver.services,
+            [{
+                "uuid": self.api.EZ_SERVICE,
+                "characteristics": [{
+                    "uuid": self.api.EZ_RECEIVE,
+                    "properties": ["notify"],
+                }],
+            }],
+        )
+        self.bridge.async_process_pgn_report.assert_awaited_once()
+        self.client.stop_notify.assert_awaited_once_with(characteristic)
+        self.client.disconnect.assert_awaited_once()
+
     async def test_no_notify_characteristic_is_rejected(self):
         self.client.services = [
             SimpleNamespace(
@@ -167,6 +201,42 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(self.home_assistant_error, "notification"):
             await self.receiver._async_receive_session()
         self.client.disconnect.assert_awaited_once()
+
+    async def test_receiver_retries_failures_with_backoff(self):
+        async def session():
+            if self.receiver._async_receive_session.await_count == 1:
+                raise self.api.ProtocolError("bad packet")
+            self.receiver.stop()
+            raise self.bleak_error("disconnected")
+
+        self.receiver._async_receive_session = AsyncMock(side_effect=session)
+        self.bridge.async_disconnected.side_effect = [
+            RuntimeError("MQTT offline"), None,
+        ]
+        with patch(
+            "custom_components.bluefire.receiver.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            await self.receiver.async_run()
+        self.assertEqual(self.receiver._async_receive_session.await_count, 2)
+        sleep.assert_awaited_once_with(self.api.RECONNECT_MIN)
+        self.bridge.async_disconnected.assert_awaited()
+
+    async def test_receiver_stops_cleanly_after_session_returns(self):
+        async def session():
+            self.receiver.stop()
+
+        self.receiver._async_receive_session = AsyncMock(side_effect=session)
+        await self.receiver.async_run()
+        self.bridge.async_disconnected.assert_awaited_once()
+
+    async def test_receiver_propagates_cancellation_after_cleanup(self):
+        self.receiver._async_receive_session = AsyncMock(
+            side_effect=asyncio.CancelledError
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await self.receiver.async_run()
+        self.bridge.async_disconnected.assert_awaited_once()
 
 
 if __name__ == "__main__":

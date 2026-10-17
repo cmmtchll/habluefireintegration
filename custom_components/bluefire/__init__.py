@@ -60,6 +60,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         runtime = entry.runtime_data
         if runtime.inspecting:
             raise ServiceValidationError("Inspection is already running")
+        if runtime.services:
+            return {
+                "status": STATUS_RECEIVER_ENABLED,
+                "services": runtime.services,
+            }
         runtime.inspecting = True
         try:
             runtime.services = await async_inspect(hass, entry.data["address"])
@@ -136,6 +141,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         j1587_extended=entry.data.get(CONF_J1587_EXTENDED),
     )
     entry.runtime_data = BlueFireRuntime(bridge, receiver=receiver)
+    entry.runtime_data.services = receiver.services
     entry.async_on_unload(receiver.stop)
     entry.async_create_task(
         hass, receiver.async_run(), "BlueFire BLE receiver"

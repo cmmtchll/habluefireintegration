@@ -15,6 +15,11 @@ from .const import (
 from .telemetry import valid_vehicle_id
 from .validation import normalize_address
 
+J1587_FORMATS = {
+    "Legacy (before 3.19)": False,
+    "Extended (3.19+)": True,
+}
+
 
 class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
     """Create a preparation-only entry without speculative BLE probes."""
@@ -130,10 +135,12 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
             errors[CONF_VEHICLE_ID] = "invalid_vehicle_id"
         if CONF_J1587_EXTENDED in user_input:
             value = user_input[CONF_J1587_EXTENDED]
-            if type(value) is not bool:
-                errors[CONF_J1587_EXTENDED] = "invalid_j1587_format"
-            else:
+            if value in J1587_FORMATS:
+                data[CONF_J1587_EXTENDED] = J1587_FORMATS[value]
+            elif type(value) is bool:
                 data[CONF_J1587_EXTENDED] = value
+            else:
+                errors[CONF_J1587_EXTENDED] = "invalid_j1587_format"
         return data, errors
 
     def _show_settings(self, step_id, defaults, errors):
@@ -152,18 +159,16 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
                 default=defaults.get(CONF_VEHICLE_ID, DEFAULT_VEHICLE_ID),
             )] = str
         if CONF_J1587_EXTENDED in defaults:
+            value = defaults[CONF_J1587_EXTENDED]
+            default_format = (
+                "Extended (3.19+)" if value else "Legacy (before 3.19)"
+            ) if type(value) is bool else value
             schema[vol.Optional(
                 CONF_J1587_EXTENDED,
-                default=defaults[CONF_J1587_EXTENDED],
-            )] = vol.In({
-                "Legacy (before 3.19)": False,
-                "Extended (3.19+)": True,
-            })
+                default=default_format,
+            )] = vol.In(J1587_FORMATS)
         else:
-            schema[vol.Optional(CONF_J1587_EXTENDED)] = vol.In({
-                "Legacy (before 3.19)": False,
-                "Extended (3.19+)": True,
-            })
+            schema[vol.Optional(CONF_J1587_EXTENDED)] = vol.In(J1587_FORMATS)
         return self.async_show_form(
             step_id=step_id,
             data_schema=vol.Schema(schema),

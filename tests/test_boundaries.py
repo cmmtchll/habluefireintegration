@@ -108,6 +108,20 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(self.runtime.inspecting)
 
+    async def test_inspection_reuses_receiver_gatt_inventory(self):
+        self.runtime.services = [{"uuid": "cached-service"}]
+        result = await self.inspect(
+            SimpleNamespace(data={"entry_id": "entry"})
+        )
+        self.assertEqual(
+            result,
+            {
+                "status": "receiver_enabled",
+                "services": [{"uuid": "cached-service"}],
+            },
+        )
+        self.inspected.assert_not_awaited()
+
     async def test_inspection_rejects_non_loaded_entry(self):
         self.entry.state = "not_loaded"
         with self.assertRaisesRegex(BoundaryError, "loaded BlueFire"):
@@ -159,6 +173,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 receiver.args = args
                 receiver.kwargs = kwargs
                 receiver.stop = Mock()
+                receiver.services = []
                 self.receiver_instances.append(receiver)
 
             async def async_run(receiver):

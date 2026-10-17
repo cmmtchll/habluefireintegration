@@ -45,6 +45,7 @@ class BlueFireReceiver:
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=128)
         self._overflow = asyncio.Event()
         self._closed = False
+        self.services: list[dict] = []
 
     async def async_run(self) -> None:
         """Keep a bounded-backoff receiver alive until config-entry unload."""
@@ -55,10 +56,14 @@ class BlueFireReceiver:
                 delay = RECONNECT_MIN
             except asyncio.CancelledError:
                 raise
-            except (BleakError, HomeAssistantError, OSError, TimeoutError) as err:
+            except (
+                BleakError, HomeAssistantError, OSError, TimeoutError
+            ) as err:
                 _LOGGER.warning("BlueFire BLE receiver unavailable: %s", err)
             except ProtocolError as err:
                 _LOGGER.warning("BlueFire receive stream rejected: %s", err)
+            except Exception:
+                _LOGGER.exception("BlueFire receiver session failed")
             finally:
                 self._decoder.reset()
                 try:
@@ -82,7 +87,8 @@ class BlueFireReceiver:
         )
         if device is None:
             raise HomeAssistantError(
-                "BlueFire adapter is not visible to a connectable Bluetooth scanner"
+                "BlueFire adapter is not visible to a connectable "
+                "Bluetooth scanner"
             )
 
         async with asyncio.timeout(30):
@@ -101,6 +107,19 @@ class BlueFireReceiver:
                     service.uuid.lower(): service
                     for service in client.services
                 }
+                self.services[:] = [
+                    {
+                        "uuid": service.uuid,
+                        "characteristics": [
+                            {
+                                "uuid": characteristic.uuid,
+                                "properties": list(characteristic.properties),
+                            }
+                            for characteristic in service.characteristics
+                        ],
+                    }
+                    for service in client.services
+                ]
                 service = services.get(EZ_SERVICE)
                 if service is None:
                     raise HomeAssistantError(
@@ -117,7 +136,8 @@ class BlueFireReceiver:
                 ]
                 if not notify_uuids:
                     raise HomeAssistantError(
-                        "BlueFire EZ service has no supported notification characteristic"
+                        "BlueFire EZ service has no supported "
+                        "notification characteristic"
                     )
 
                 self._queue = asyncio.Queue(maxsize=128)
@@ -146,7 +166,9 @@ class BlueFireReceiver:
                         for task in pending:
                             task.cancel()
                         if pending:
-                            await asyncio.gather(*pending, return_exceptions=True)
+                            await asyncio.gather(
+                                *pending, return_exceptions=True
+                            )
                         if not done:
                             continue
                         if overflow in done and overflow.result():
@@ -168,7 +190,10 @@ class BlueFireReceiver:
                 try:
                     await client.disconnect()
                 except (BleakError, OSError):
-                    _LOGGER.debug("BlueFire BLE disconnect failed", exc_info=True)
+                    _LOGGER.debug(
+                        "BlueFire BLE disconnect failed",
+                        exc_info=True,
+                    )
 
     def _notification_received(self, _characteristic, data: bytearray) -> None:
         """Queue callbacks from both EZ characteristics in arrival order."""
@@ -181,7 +206,8 @@ class BlueFireReceiver:
     async def _async_process_body(self, body: bytes) -> None:
         if body[0] == 154 and self.j1587_extended is None:
             _LOGGER.warning(
-                "Ignoring J1587 PIDData until adapter firmware format is configured"
+                "Ignoring J1587 PIDData until adapter firmware format "
+                "is configured"
             )
             return
         message = parse_message(

@@ -229,7 +229,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         )
         report = json.loads(payload)
         self.assertEqual(topic, "vehicle/coach/j1939/0/report/61444")
-        self.assertEqual(report["data"], "ffff7d401fffffffff")
+        self.assertEqual(report["data"], "ffff7d401fffffff")
         self.assertNotIn("can_id", report)
         self.assertNotIn("arbitration_id", report)
         self.assertFalse(retain)
