@@ -60,16 +60,18 @@ async def async_get_config_entry_diagnostics(hass, entry):
         }
     else:
         runtime.inspecting = True
+        paused = False
         try:
             if runtime.receiver is not None:
                 await runtime.receiver.async_pause()
+                paused = True
             result["capture"] = await async_capture_report(
                 hass, address, runtime.health, CAPTURE_SECONDS
             )
         except HomeAssistantError as err:
             result["capture"] = {"status": "failed", "error": str(err)}
         finally:
-            if runtime.receiver is not None:
+            if runtime.receiver is not None and paused:
                 runtime.receiver.async_resume()
             runtime.inspecting = False
     result["health"] = runtime.health.as_dict()

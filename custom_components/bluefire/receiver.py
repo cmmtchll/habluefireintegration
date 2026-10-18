@@ -138,9 +138,6 @@ class BlueFireReceiver:
             async with asyncio.timeout(SESSION_CLOSE_TIMEOUT):
                 await self._session_closed.wait()
         except TimeoutError as err:
-            self._paused = False
-            self._pause_event.clear()
-            self._resume_event.set()
             raise HomeAssistantError(
                 "BlueFire receiver did not release its BLE connection"
             ) from err

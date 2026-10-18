@@ -74,7 +74,7 @@ class DiscoveryLedger:
                     record.get("j1587_signals", [])
                 ),
                 "pending": record.get("pending", False),
-                "pending_offline": record.get("pending_offline", False),
+                "pending_offline": record.get("pending_offline") is True,
             }
         self._loaded = True
 
@@ -133,7 +133,7 @@ class DiscoveryLedger:
                 await self.store.async_save(self._records)
 
     async def async_queue_offline(self, entry_id):
-        """Persist offline availability until a connected broker can receive it."""
+        """Persist offline availability until the broker is connected."""
         async with self._lock:
             await self._async_load()
             if entry_id in self._records:

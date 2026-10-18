@@ -6,6 +6,7 @@ validation or inventing CAN identifiers/authentication payloads.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from time import monotonic
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from .const import (
     CONF_J1587_EXTENDED,
     DOMAIN,
+    MQTT_PUBLISH_TIMEOUT,
     STATUS_RECEIVER_ENABLED,
 )
 from .health import Health
@@ -77,9 +79,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     async def inspect_adapter(call):
         entry, runtime = loaded_runtime(call)
         runtime.inspecting = True
+        paused = False
         try:
             if runtime.receiver is not None:
                 await runtime.receiver.async_pause()
+                paused = True
             runtime.services = await async_inspect(hass, entry.data["address"])
             return {
                 "status": STATUS_RECEIVER_ENABLED,
@@ -89,22 +93,24 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             runtime.health.error("connection_errors", str(err))
             raise
         finally:
-            if runtime.receiver is not None:
+            if runtime.receiver is not None and paused:
                 runtime.receiver.async_resume()
             runtime.inspecting = False
 
     async def capture_notifications(call):
         entry, runtime = loaded_runtime(call)
         runtime.inspecting = True
+        paused = False
         try:
             if runtime.receiver is not None:
                 await runtime.receiver.async_pause()
+                paused = True
             return await async_capture_report(
                 hass, entry.data["address"], runtime.health,
                 call.data["duration"],
             )
         finally:
-            if runtime.receiver is not None:
+            if runtime.receiver is not None and paused:
                 runtime.receiver.async_resume()
             runtime.inspecting = False
 
@@ -156,7 +162,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def publish(topic: str, payload: str, retain: bool) -> None:
         try:
-            await async_publish(hass, topic, payload, retain)
+            async with asyncio.timeout(MQTT_PUBLISH_TIMEOUT):
+                await async_publish(hass, topic, payload, retain)
+        except TimeoutError as err:
+            health.error("mqtt_errors", f"{topic}: publish timed out")
+            raise HomeAssistantError(
+                f"MQTT publish timed out for {topic}"
+            ) from err
         except HomeAssistantError as err:
             health.error("mqtt_errors", f"{topic}: {err}")
             raise

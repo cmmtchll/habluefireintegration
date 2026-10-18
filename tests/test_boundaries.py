@@ -169,6 +169,17 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             await self.inspect(SimpleNamespace(data={"entry_id": "entry"}))
         self.assertFalse(self.runtime.inspecting)
 
+    async def test_failed_pause_does_not_resume_receiver(self):
+        self.receiver.async_pause.side_effect = ConnectionFailure(
+            "receiver pause timed out"
+        )
+        with self.assertRaisesRegex(
+            ConnectionFailure, "receiver pause timed out"
+        ):
+            await self.inspect(SimpleNamespace(data={"entry_id": "entry"}))
+        self.receiver.async_resume.assert_not_called()
+        self.assertFalse(self.runtime.inspecting)
+
     async def test_inspection_connection_failure_is_counted(self):
         self.inspected.side_effect = ConnectionFailure("not visible")
         with self.assertRaises(ConnectionFailure):
@@ -722,6 +733,19 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             runtime.health.counters["mqtt_published"], published
         )
+
+    async def test_mqtt_publish_timeout_is_reported(self):
+        await async_setup_entry(self.hass, self.entry)
+        runtime = self.entry.runtime_data
+
+        async def never_publish(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        self.mqtt.async_publish.side_effect = never_publish
+        with patch("custom_components.bluefire.MQTT_PUBLISH_TIMEOUT", 0.01):
+            with self.assertRaisesRegex(BoundaryError, "timed out"):
+                await runtime.bridge.publish("test/topic", "payload", False)
+        self.assertEqual(runtime.health.counters["mqtt_errors"], 1)
 
     async def test_capture_records_raw_notifications_and_failures(self):
         api = importlib.import_module("custom_components.bluefire.bluetooth")
