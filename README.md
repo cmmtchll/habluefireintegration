@@ -121,12 +121,14 @@ unload/reload keeps discovery, but marks the stream offline. Removal while the
 broker is down is recorded in HA storage and retried on reconnect while HA is
 running. If HA restarts with no BlueFire entries left, pending cleanup resumes
 the next time BlueFire is set up. Do not delete that storage before cleanup.
+If an entry unloads while MQTT is disconnected, its offline availability is also
+stored and published when the broker reconnects.
 Discovery-prefix changes similarly withdraw the previous prefix's definitions.
 Cleanup requires broker-echo confirmation of the deletion messages, not just a
 successful return from HA's publish call; unconfirmed work remains queued.
-Only source/entity ownership is persisted—never live readings or broker
-credentials. Diagnostic ownership uses negative PGNs in the existing ledger;
-measurement ownership remains the original positive SPN.
+Only discovery ownership and pending lifecycle status are persisted—never live
+readings or broker credentials. Diagnostic ownership uses negative PGNs in the
+existing ledger; measurement ownership remains the original positive SPN.
 
 ### Find and specify the Bluetooth MAC address
 

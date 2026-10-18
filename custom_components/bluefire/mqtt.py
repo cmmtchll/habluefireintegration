@@ -74,6 +74,7 @@ class DiscoveryLedger:
                     record.get("j1587_signals", [])
                 ),
                 "pending": record.get("pending", False),
+                "pending_offline": record.get("pending_offline") is True,
             }
         self._loaded = True
 
@@ -94,6 +95,7 @@ class DiscoveryLedger:
                 "signals": signals,
                 "j1587_signals": old["j1587_signals"] if old else [],
                 "pending": False,
+                "pending_offline": False,
             }
             await self.store.async_save(self._records)
             return self._records[entry_id]["signals"]
@@ -127,6 +129,45 @@ class DiscoveryLedger:
             await self._async_load()
             if entry_id in self._records:
                 self._records[entry_id]["pending"] = True
+                self._records[entry_id]["pending_offline"] = False
+                await self.store.async_save(self._records)
+
+    async def async_queue_offline(self, entry_id):
+        """Persist offline availability until the broker is connected."""
+        async with self._lock:
+            await self._async_load()
+            if entry_id in self._records:
+                self._records[entry_id]["pending_offline"] = True
+                await self.store.async_save(self._records)
+
+    async def async_clear_offline(self, entry_id):
+        """Forget deferred availability after a live publish succeeds."""
+        async with self._lock:
+            await self._async_load()
+            if (
+                entry_id in self._records
+                and self._records[entry_id]["pending_offline"]
+            ):
+                self._records[entry_id]["pending_offline"] = False
+                await self.store.async_save(self._records)
+
+    async def async_flush_offline(self, publish):
+        """Deliver and clear deferred availability, retaining failed work."""
+        async with self._lock:
+            await self._async_load()
+            for entry_id, record in tuple(self._records.items()):
+                if not record["pending_offline"]:
+                    continue
+                vehicle_id = record["vehicle_id"]
+                await publish(
+                    f"vehicle/{vehicle_id}/j1939/availability",
+                    "offline", True,
+                )
+                await publish(
+                    f"vehicle/{vehicle_id}/j1587/availability",
+                    "offline", True,
+                )
+                record["pending_offline"] = False
                 await self.store.async_save(self._records)
 
     async def async_flush_removals(self, publish):
@@ -233,6 +274,7 @@ async def async_flush_removals(hass, ledger):
                 await async_publish(hass, topic, payload, retain)
 
         try:
+            await ledger.async_flush_offline(publish)
             await ledger.async_flush_removals(publish)
         except (TimeoutError, HomeAssistantError):
             _LOGGER.warning(
