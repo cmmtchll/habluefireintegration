@@ -483,6 +483,23 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.mqtt.async_publish.reset_mock()
         self.assertTrue(await async_unload_entry(self.hass, self.entry))
         self.mqtt.async_publish.assert_not_awaited()
+        record = self.store.async_save.await_args.args[0]["test-entry"]
+        self.assertTrue(record["pending_offline"])
+        self.mqtt.is_connected.return_value = True
+        self.callbacks[0](True)
+        await asyncio.gather(*self.tasks)
+        calls = self.mqtt.async_publish.await_args_list
+        self.assertTrue(any(
+            call.args[1:3] == (
+                "vehicle/coach/j1939/availability", "offline"
+            )
+            for call in calls
+        ))
+        self.assertFalse(
+            self.store.async_save.await_args.args[0]["test-entry"][
+                "pending_offline"
+            ]
+        )
 
     async def test_inspection_metadata_only_and_disconnects(self):
         api = importlib.import_module("custom_components.bluefire.bluetooth")

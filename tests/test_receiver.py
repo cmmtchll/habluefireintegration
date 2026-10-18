@@ -161,6 +161,20 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.client.start_notify.assert_awaited_once()
         self.client.stop_notify.assert_awaited_once()
 
+    async def test_indicate_characteristics_are_supported(self):
+        service = SimpleNamespace(
+            uuid=self.api.EZ_SERVICE,
+            characteristics=[
+                SimpleNamespace(
+                    uuid=self.api.EZ_RECEIVE, properties=["indicate"]
+                ),
+            ],
+        )
+        self.client.services = [service]
+        with self.assertRaises(self.bleak_error):
+            await self.receiver._async_receive_session()
+        self.client.start_notify.assert_awaited_once()
+
     async def test_session_consumes_ez_stream_and_cleans_up(self):
         body = bytes.fromhex("97 00 f0 04 06 00 08 00 00 7d 40 1f ff ff ff")
         characteristic = SimpleNamespace(
@@ -268,6 +282,77 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.async_disconnected.assert_awaited()
         self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
         self.assertEqual(self.receiver.health.counters["connection_errors"], 1)
+
+    async def test_malformed_frame_increments_framing_error_once(self):
+        characteristic = SimpleNamespace(
+            uuid=self.api.EZ_RECEIVE, properties=["notify"]
+        )
+        self.client.services = [
+            SimpleNamespace(
+                uuid=self.api.EZ_SERVICE,
+                characteristics=[characteristic],
+            )
+        ]
+        self.client.is_connected = True
+        malformed = bytearray(self.packet(b"\xff"))
+        malformed[2] ^= 1
+        self.client.start_notify.side_effect = (
+            lambda char, callback: callback(char, malformed)
+        )
+
+        async def stop_after_failure(_delay):
+            self.receiver.stop()
+
+        with patch(
+            "custom_components.bluefire.receiver.asyncio.sleep",
+            new=AsyncMock(side_effect=stop_after_failure),
+        ):
+            await self.receiver.async_run()
+
+        self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
+
+    async def test_connected_session_is_not_limited_by_connect_timeout(self):
+        characteristic = SimpleNamespace(
+            uuid=self.api.EZ_RECEIVE, properties=["notify"]
+        )
+        self.client.services = [
+            SimpleNamespace(
+                uuid=self.api.EZ_SERVICE,
+                characteristics=[characteristic],
+            )
+        ]
+        self.client.is_connected = True
+        with patch.object(self.api, "CONNECTION_TIMEOUT", 0.01):
+            task = asyncio.create_task(self.receiver._async_receive_session())
+            await asyncio.sleep(0.05)
+            self.assertFalse(task.done())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_stop_interrupts_idle_session_and_disconnects(self):
+        ready = asyncio.Event()
+        characteristic = SimpleNamespace(
+            uuid=self.api.EZ_RECEIVE, properties=["notify"]
+        )
+        self.client.services = [
+            SimpleNamespace(
+                uuid=self.api.EZ_SERVICE,
+                characteristics=[characteristic],
+            )
+        ]
+        self.client.is_connected = True
+
+        async def start_notify(*_args):
+            ready.set()
+
+        self.client.start_notify.side_effect = start_notify
+        task = asyncio.create_task(self.receiver.async_run())
+        await asyncio.wait_for(ready.wait(), 1)
+        self.receiver.stop()
+        await asyncio.wait_for(task, 1)
+        self.client.disconnect.assert_awaited_once()
 
     async def test_receiver_stops_cleanly_after_session_returns(self):
         async def session():

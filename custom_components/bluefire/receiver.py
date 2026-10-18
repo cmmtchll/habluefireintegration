@@ -37,6 +37,10 @@ EZ_RECEIVE = "65333333-a115-11e2-9e9a-0800200ca102"
 EZ_CHARACTERISTICS = {EZ_CLIENT_WRITE, EZ_RECEIVE}
 RECONNECT_MIN = 2
 RECONNECT_MAX = 60
+CONNECTION_TIMEOUT = 30
+BLE_OPERATION_TIMEOUT = 10
+BLE_CLEANUP_TIMEOUT = 5
+SESSION_CLOSE_TIMEOUT = 20
 
 
 class BlueFireReceiver:
@@ -61,6 +65,7 @@ class BlueFireReceiver:
         self._session_closed.set()
         self._paused = False
         self._closed = False
+        self._session_task: asyncio.Task | None = None
         self.services: list[dict] = []
 
     async def async_run(self) -> None:
@@ -72,12 +77,21 @@ class BlueFireReceiver:
                 if self._closed:
                     break
             self._session_closed.clear()
+            session_task = asyncio.create_task(
+                self._async_receive_session(), name="BlueFire BLE session"
+            )
+            self._session_task = session_task
             paused_session = False
             try:
-                await self._async_receive_session()
+                await session_task
                 delay = RECONNECT_MIN
             except asyncio.CancelledError:
-                raise
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                if not (self._paused or self._closed):
+                    raise
+                paused_session = self._paused and not self._closed
             except _ReceiverPaused:
                 paused_session = True
             except (
@@ -91,6 +105,7 @@ class BlueFireReceiver:
             except Exception:
                 _LOGGER.exception("BlueFire receiver session failed")
             finally:
+                self._session_task = None
                 self._session_closed.set()
                 self._decoder.reset()
                 if not paused_session:
@@ -106,16 +121,29 @@ class BlueFireReceiver:
                 delay = min(delay * 2, RECONNECT_MAX)
 
     def stop(self) -> None:
-        """Prevent a pending retry after unload."""
+        """Stop retries and interrupt an active BLE session."""
         self._closed = True
         self._resume_event.set()
+        if self._session_task is not None:
+            self._session_task.cancel()
 
     async def async_pause(self) -> None:
         """Yield the BLE connection to a user-requested diagnostic capture."""
         self._paused = True
         self._resume_event.clear()
         self._pause_event.set()
-        await self._session_closed.wait()
+        if self._session_task is not None:
+            self._session_task.cancel()
+        try:
+            async with asyncio.timeout(SESSION_CLOSE_TIMEOUT):
+                await self._session_closed.wait()
+        except TimeoutError as err:
+            self._paused = False
+            self._pause_event.clear()
+            self._resume_event.set()
+            raise HomeAssistantError(
+                "BlueFire receiver did not release its BLE connection"
+            ) from err
 
     def async_resume(self) -> None:
         """Restart live reception after a diagnostic capture completes."""
@@ -133,7 +161,7 @@ class BlueFireReceiver:
                 "Bluetooth scanner"
             )
 
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(CONNECTION_TIMEOUT):
             client = await establish_connection(
                 BleakClientWithServiceCache,
                 device,
@@ -144,121 +172,121 @@ class BlueFireReceiver:
                     )
                 ),
             )
-            try:
-                if self._paused:
-                    raise _ReceiverPaused
-                services = {
-                    service.uuid.lower(): service
-                    for service in client.services
+        started = []
+        try:
+            if self._paused:
+                raise _ReceiverPaused
+            services = {
+                service.uuid.lower(): service
+                for service in client.services
+            }
+            self.services[:] = [
+                {
+                    "uuid": service.uuid,
+                    "characteristics": [
+                        {
+                            "uuid": characteristic.uuid,
+                            "properties": list(characteristic.properties),
+                        }
+                        for characteristic in service.characteristics
+                    ],
                 }
-                self.services[:] = [
-                    {
-                        "uuid": service.uuid,
-                        "characteristics": [
-                            {
-                                "uuid": characteristic.uuid,
-                                "properties": list(characteristic.properties),
-                            }
-                            for characteristic in service.characteristics
-                        ],
-                    }
-                    for service in client.services
-                ]
-                service = services.get(EZ_SERVICE)
-                if service is None:
-                    raise HomeAssistantError(
-                        "BlueFire EZ GATT service was not found"
-                    )
-                characteristics = {
-                    item.uuid.lower(): item
-                    for item in service.characteristics
-                }
-                notify_uuids = [
-                    uuid for uuid in sorted(EZ_CHARACTERISTICS)
-                    if uuid in characteristics
-                    and "notify" in characteristics[uuid].properties
-                ]
-                if not notify_uuids:
-                    raise HomeAssistantError(
-                        "BlueFire EZ service has no supported "
-                        "notification characteristic"
-                    )
+                for service in client.services
+            ]
+            service = services.get(EZ_SERVICE)
+            if service is None:
+                raise HomeAssistantError(
+                    "BlueFire EZ GATT service was not found"
+                )
+            characteristics = {
+                item.uuid.lower(): item
+                for item in service.characteristics
+            }
+            notify_uuids = [
+                uuid for uuid in sorted(EZ_CHARACTERISTICS)
+                if uuid in characteristics
+                and {"notify", "indicate"} & set(
+                    characteristics[uuid].properties
+                )
+            ]
+            if not notify_uuids:
+                raise HomeAssistantError(
+                    "BlueFire EZ service has no supported "
+                    "notification characteristic"
+                )
 
-                self._queue = asyncio.Queue(maxsize=128)
-                self._overflow.clear()
-                self._pause_event.clear()
-                started = []
-                for uuid in notify_uuids:
+            self._queue = asyncio.Queue(maxsize=128)
+            self._overflow.clear()
+            self._pause_event.clear()
+            for uuid in notify_uuids:
+                async with asyncio.timeout(BLE_OPERATION_TIMEOUT):
                     await client.start_notify(
                         characteristics[uuid], self._notification_received
                     )
                     started.append(characteristics[uuid])
-                _LOGGER.info(
-                    "BlueFire receiver subscribed to %d EZ characteristics",
-                    len(notify_uuids),
-                )
-                while client.is_connected and not self._closed:
-                    if self._overflow.is_set():
-                        raise BleakError("BlueFire receive queue overflow")
-                    get_chunk = asyncio.create_task(self._queue.get())
-                    overflow = asyncio.create_task(self._overflow.wait())
-                    paused = asyncio.create_task(self._pause_event.wait())
-                    try:
-                        done, pending = await asyncio.wait(
-                            (get_chunk, overflow, paused),
-                            timeout=1,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        for task in pending:
-                            task.cancel()
-                        if pending:
-                            await asyncio.gather(
-                                *pending, return_exceptions=True
-                            )
-                        if not done:
-                            continue
-                        if overflow in done and overflow.result():
-                            raise BleakError("BlueFire receive queue overflow")
-                    finally:
-                        for task in (get_chunk, overflow, paused):
-                            if not task.done():
-                                task.cancel()
-                        await asyncio.gather(
-                            get_chunk, overflow, paused,
-                            return_exceptions=True,
-                        )
-                    if paused in done and paused.result():
-                        if get_chunk not in done:
-                            raise _ReceiverPaused
-                    if get_chunk not in done:
-                        continue
-                    chunk = get_chunk.result()
-                    try:
-                        bodies = self._decoder.feed(chunk)
-                    except ProtocolError as err:
-                        self._health_error("framing_errors", str(err))
-                        raise
-                    for body in bodies:
-                        try:
-                            await self._async_process_body(body)
-                        except ProtocolError:
-                            continue
-                    if paused in done and paused.result():
-                        raise _ReceiverPaused
-                raise BleakError("BlueFire Bluetooth connection lost")
-            finally:
-                for characteristic in reversed(locals().get("started", [])):
-                    try:
-                        await client.stop_notify(characteristic)
-                    except (BleakError, OSError):
-                        pass
+            _LOGGER.info(
+                "BlueFire receiver subscribed to %d EZ characteristics",
+                len(notify_uuids),
+            )
+            while client.is_connected and not self._closed:
+                if self._overflow.is_set():
+                    raise BleakError("BlueFire receive queue overflow")
+                get_chunk = asyncio.create_task(self._queue.get())
+                overflow = asyncio.create_task(self._overflow.wait())
+                paused = asyncio.create_task(self._pause_event.wait())
                 try:
-                    await client.disconnect()
-                except (BleakError, OSError):
+                    done, pending = await asyncio.wait(
+                        (get_chunk, overflow, paused),
+                        timeout=1,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    if not done:
+                        continue
+                    if overflow in done and overflow.result():
+                        raise BleakError("BlueFire receive queue overflow")
+                finally:
+                    for task in (get_chunk, overflow, paused):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(
+                        get_chunk, overflow, paused, return_exceptions=True
+                    )
+                if paused in done and paused.result():
+                    if get_chunk not in done:
+                        raise _ReceiverPaused
+                if get_chunk not in done:
+                    continue
+                chunk = get_chunk.result()
+                bodies = self._decoder.feed(chunk)
+                for body in bodies:
+                    try:
+                        await self._async_process_body(body)
+                    except ProtocolError:
+                        continue
+                if paused in done and paused.result():
+                    raise _ReceiverPaused
+            raise BleakError("BlueFire Bluetooth connection lost")
+        finally:
+            for characteristic in reversed(started):
+                try:
+                    async with asyncio.timeout(BLE_CLEANUP_TIMEOUT):
+                        await client.stop_notify(characteristic)
+                except (BleakError, OSError, TimeoutError):
                     _LOGGER.debug(
-                        "BlueFire BLE disconnect failed",
+                        "Unable to stop BlueFire BLE notification",
                         exc_info=True,
                     )
+            try:
+                async with asyncio.timeout(BLE_CLEANUP_TIMEOUT):
+                    await client.disconnect()
+            except (BleakError, OSError, TimeoutError):
+                _LOGGER.debug(
+                    "BlueFire BLE disconnect failed", exc_info=True
+                )
 
     def _notification_received(self, _characteristic, data: bytearray) -> None:
         """Queue callbacks from both EZ characteristics in arrival order."""

@@ -21,6 +21,7 @@ def record(prefix="homeassistant", signals=None, pending=False):
         "discovery_prefix": prefix,
         "signals": [[0, 190]] if signals is None else signals,
         "pending": pending,
+        "pending_offline": False,
     }
 
 
@@ -78,7 +79,7 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(signals, [[0, 190]])
         self.assertEqual(set(self.disk["entry"]), {
             "vehicle_id", "discovery_prefix", "signals", "pending",
-            "j1587_signals",
+            "j1587_signals", "pending_offline",
         })
 
     async def test_j1587_survives_reload_prefix_change_and_entry_removal(self):
@@ -190,6 +191,25 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.publish.side_effect = None
         await self.ledger.async_flush_removals(self.publish)
         self.assertEqual(self.disk, {})
+
+    async def test_offline_state_is_persisted_and_flushed_after_restart(self):
+        await self.ledger.async_prepare("entry", "coach", "homeassistant")
+        await self.ledger.async_queue_offline("entry")
+        restored = DiscoveryLedger(self.store)
+        self.publish.side_effect = OSError("broker unavailable")
+        with self.assertRaises(OSError):
+            await restored.async_flush_offline(self.publish)
+        self.assertTrue(self.disk["entry"]["pending_offline"])
+
+        self.publish.side_effect = None
+        await DiscoveryLedger(self.store).async_flush_offline(self.publish)
+        self.assertFalse(self.disk["entry"]["pending_offline"])
+        self.publish.assert_any_await(
+            "vehicle/coach/j1939/availability", "offline", True
+        )
+        self.publish.assert_any_await(
+            "vehicle/coach/j1587/availability", "offline", True
+        )
 
     async def test_unrelated_active_record_is_not_removed(self):
         self.disk = {

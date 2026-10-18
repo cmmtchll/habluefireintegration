@@ -289,8 +289,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry, [Platform.SENSOR]
     ):
         return False
-    if mqtt.is_connected(hass):
-        await entry.runtime_data.bridge.async_disconnected()
+    from homeassistant.exceptions import HomeAssistantError
+
+    from .mqtt import async_get_ledger
+
+    ledger = await async_get_ledger(hass)
+    await ledger.async_queue_offline(entry.entry_id)
+    try:
+        if mqtt.is_connected(hass):
+            await entry.runtime_data.bridge.async_disconnected()
+            await ledger.async_clear_offline(entry.entry_id)
+    except KeyError:
+        # MQTT may have been unloaded before the BlueFire entry.
+        pass
+    except HomeAssistantError:
+        # The durable offline marker will be published on the next reconnect.
+        pass
     return True
 
 
