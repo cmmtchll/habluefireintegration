@@ -8,6 +8,7 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 
 from .const import (
     CONF_J1587_EXTENDED,
+    CONF_J1708_STARTUP,
     CONF_VEHICLE_ID,
     DEFAULT_VEHICLE_ID,
     DOMAIN,
@@ -141,6 +142,14 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
                 data[CONF_J1587_EXTENDED] = value
             else:
                 errors[CONF_J1587_EXTENDED] = "invalid_j1587_format"
+        if CONF_J1708_STARTUP in user_input:
+            value = user_input[CONF_J1708_STARTUP]
+            if type(value) is not bool:
+                errors[CONF_J1708_STARTUP] = "invalid_j1708_startup"
+            else:
+                data[CONF_J1708_STARTUP] = value
+                if value and CONF_J1587_EXTENDED not in data:
+                    errors[CONF_J1587_EXTENDED] = "required_j1587_format"
         return data, errors
 
     def _show_settings(self, step_id, defaults, errors):
@@ -169,6 +178,10 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
             )] = vol.In(J1587_FORMATS)
         else:
             schema[vol.Optional(CONF_J1587_EXTENDED)] = vol.In(J1587_FORMATS)
+        schema[vol.Optional(
+            CONF_J1708_STARTUP,
+            default=defaults.get(CONF_J1708_STARTUP, False),
+        )] = bool
         return self.async_show_form(
             step_id=step_id,
             data_schema=vol.Schema(schema),

@@ -2,9 +2,9 @@
 
 This project tracks the Home Assistant Bronze, Silver, Gold, and Platinum
 integration-quality criteria. It is not currently claiming certification at any
-tier. The integration is preparation-only: the vendor BLE protocol and live
-telemetry receiver are not implemented, so several runtime criteria remain
-unmet.
+tier. The provisional EZ receiver and opt-in unsecured J1708 startup have
+hardware-free coverage; real-adapter startup and telemetry validation remain
+outstanding, so several runtime criteria remain unmet.
 
 ## Checklist and verification
 
@@ -28,9 +28,10 @@ replace those checks or manual testing in Home Assistant.
 
 ## Current limitations
 
-- BlueFire BLE authentication, notification framing, and live reception are not
-  implemented. The checklist therefore does not claim that vehicle telemetry
-  works or that all device-related criteria are met.
+- EZ notification framing and opt-in unsecured J1708 startup are implemented.
+  Secured-adapter authentication and real-adapter startup validation remain
+  outstanding. The checklist does not claim verified vehicle telemetry or that
+  all device-related criteria are met.
 - The quality checklist is an assessment of current behavior, not a promise that
   every criterion is complete. `todo` entries are intentionally visible and
   should only change when implementation, tests, or documentation provide

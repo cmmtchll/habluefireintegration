@@ -50,6 +50,10 @@ async def async_get_config_entry_diagnostics(hass, entry):
         "gatt_services": runtime.services,
         "bluetooth": bluetooth_state(hass, address) if address else None,
         "health_before_capture": runtime.health.as_dict(),
+        "startup_before_capture": (
+            runtime.receiver.startup_diagnostics()
+            if runtime.receiver is not None else None
+        ),
     }
     if not address:
         result["capture"] = {"status": "skipped", "reason": "No address"}

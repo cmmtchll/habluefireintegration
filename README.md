@@ -9,9 +9,10 @@ No Android gateway is required or planned.
 > loaded entry connects to the documented modern EZ GATT service, subscribes to
 > its receive characteristics, decodes receive packets and routes reports into
 > MQTT. PGN reports use a separate report contract and never invent CAN IDs.
-> Command-level BlueFire authentication/startup is not implemented: static
-> observations do not provide its payloads. Do not treat this as a public
-> release or a validated adapter integration.
+> Opt-in J1708 startup negotiates firmware compatibility, uses the unsecured
+> authentication path, subscribes to passive PID reports and enables reporting.
+> Secured adapters are unsupported. Do not treat this as a public release or
+> a validated adapter integration.
 >
 > Internal receiver development is not blocked on verified traces or actual
 > hardware testing: use the documented static observations and synthetic
@@ -31,6 +32,9 @@ No Android gateway is required or planned.
   Bluetooth scanners, including compatible proxies.
 - Provisional receive-only BLE subscriptions for the documented EZ service,
   bounded reconnect/backoff, receive framing validation, and MQTT report routing.
+- Explicit opt-in unsecured EZ J1708 startup with response deadlines,
+  compatibility/authentication checks, passive PID subscriptions and report
+  flow control. Firmware 3.23.0 is the primary synthetic startup fixture.
 - Transport-independent decoding of 37 byte-aligned J1939 SPNs, including
   reserved/error/not-available handling, engineering units, and source addresses.
 - Shared, exportable namespaced dictionary for measurement labels, units,
@@ -42,7 +46,7 @@ No Android gateway is required or planned.
   with a checksummed-datagram parser and separate MQTT/MID/PID discovery.
 - Hardware-unverified offline receive framing and PGN/J1587/OBD report analysis
   based on local inspection of Android 9.7.5/11.2.3 and Windows 12.5.6 packages;
-  no adapter writes.
+  the offline analyzer performs no adapter writes.
 - MQTT publishing/discovery code, source-separated readings, raw frame output,
   retained availability, freshness watchdog, durable discovery ownership,
   broker reconnect/birth handling, and non-retained live state.
@@ -50,8 +54,8 @@ No Android gateway is required or planned.
   repeatable PEP 8 checks plus a Home Assistant quality-scale checklist audit.
 
 The live receiver is connected to BLE notifications. BlueFire notification
-payloads are not assumed to be raw CAN frames, and command-level authentication
-is not implemented because its wire payload is undocumented in the repository.
+payloads are not assumed to be raw CAN frames. Unsecured J1708 startup is
+implemented separately from incoming telemetry parsing and remains opt-in.
 The [known codes and mappings reference](docs/code-reference.md) lists the
 supported IDs, strings, descriptions, units, controller profiles and sources.
 
@@ -81,10 +85,54 @@ visible, or enter its MAC address manually.
 5. The adapter can be configured while offline. Expect the diagnostic status
    **receiver_enabled**. The live receiver attempts a connection with bounded
    backoff; MQTT availability stays offline until valid report data arrives.
-   Command-level authentication/startup is not implemented.
+   J1708 startup remains disabled unless explicitly enabled below.
 
 No broker credentials are stored by this integration; it uses HA's MQTT client.
 There are no adapter passwords or PGN transmit/reset controls.
+
+### Enable J1708 startup
+
+For an existing entry, use **Settings → Devices & services → BlueFire →
+Reconfigure**. Select **Extended (3.19+)** for adapter firmware **3.23.0** and
+enable **Enable J1708 startup (unsecured EZ adapters)**. Save to reload the entry.
+The same option is available during initial setup. Existing entries remain
+receive-only until this option is enabled; the firmware-format setting by
+itself does not enable writes.
+
+Startup waits for a heartbeat, negotiates client compatibility, checks both
+unsecured authentication responses on firmware 3.x, reads adapter variables
+and J1708 availability, signals application connection, installs passive
+subscriptions and starts reports. It monitors all 15 supported numeric PIDs
+plus diagnostic PID 194 across reported MIDs at a 1000 ms interval. Vendor
+subscription MID 0 means any MID; actual report identities remain unchanged.
+Subscriptions use monitoring, not on-request vehicle-bus retrieval. A PID that
+the ECU does not broadcast may therefore remain absent.
+
+Client packets are at most 20 bytes and use write-with-response on EZ `ca101`.
+The compatibility tuple `12.5.6` describes the inspected wire compatibility
+profile, not this integration's version; platform 0 is unspecified. Unversioned
+EZ advertisements take the firmware 3.x version-query path. A version-bearing
+4.x advertisement uses its separate startup layout. Firmware-format mismatches,
+malformed/rejected responses, unavailable J1708 or missing replies fail
+explicitly, with a 10-second deadline per exchange and normal reconnect backoff.
+Telemetry received before startup succeeds is discarded. Subscriptions and
+authentication state are rebuilt for every new connection, including after
+diagnostic inspection.
+
+Download diagnostics and inspect **`startup_before_capture`** for the stage,
+firmware, expected response command, J1708 availability, subscription count and
+last startup error. `ready` means the report-start exchange completed, not that
+the coach is sending measurements. MQTT availability still requires valid
+telemetry. Diagnostic captures themselves remain passive and temporarily
+replace the live connection, so use the pre-capture startup/health state when
+investigating the active session.
+
+No security settings, bus-ignore flags, sleep/LED variables or adapter firmware
+are changed. Secured adapters are rejected without retrying with alternate
+credentials or resetting security. **Firmware 4.2.3 is not installed by this
+integration**; no firmware update is needed to exercise the 3.23.0 path.
+Actual startup responses and measurements still require verification on the
+adapter; synthetic coverage is not a claim of hardware compatibility.
 
 ### Link to MQTT
 
@@ -442,7 +490,7 @@ other manufacturer-specific on-wire encodings remain opaque. The reference
 lookup does not invent translations or automatically select controller profiles.
 No fault clearing or diagnostic requests are transmitted.
 Live BLE reception is provisional and uses only the documented modern EZ
-service. Original BLE UUID variants and command-level authentication/startup
+service. Original BLE UUID variants and secured-adapter authentication
 are not implemented.
 
 ### SAE J1708 / J1587 support
@@ -691,8 +739,10 @@ removed after the comparison and are not dependencies of the integration.
 
 The format agreement strengthens the static evidence, **not** the claim of
 hardware compatibility. The 264-byte analysis ceiling remains a safety policy,
-not a measured firmware maximum. No additional commands, credentials, pairing,
-subscription or authentication sequence are implemented from these packages.
+not a measured firmware maximum. The initial comparison added no outgoing
+commands. The opt-in unsecured J1708 startup implementation described above
+now uses a bounded subset of the observed exchanges, without credentials,
+pairing or adapter-setting changes.
 The control and arbitration-ID messages remain opaque; interleaving an
 arbitration-ID response with PGN reports does not establish a reliable mapping.
 
@@ -703,11 +753,83 @@ telemetry, `Adapter.txt` line endings/spacing, and valid-to-invalid MQTT values
 without retaining an old value or borrowing another source's reading.
 There are still no real adapter recordings in the tests.
 
+### Heartbeat-only EZ startup investigation
+
+A user-supplied EZ diagnostic capture on 2026-10-25 established a working BLE
+connection and the expected EZ service/characteristics. Its 20-second capture
+contained 38 checksum-valid heartbeat packets, with no PGN, PID or OBD reports.
+The live receiver also counted only heartbeats before the capture. This
+validates heartbeat receive framing on that adapter, not authentication,
+vehicle-bus availability or telemetry decoding. The coach's J1708 bus is
+user-confirmed; it cannot be identified from these heartbeat packets alone.
+
+Targeted static reinspection of the previously supplied Windows 12.5.6 package
+(same SHA-256 as above) identifies the missing application-level exchanges:
+
+| Stage | Observed behavior | Evidence |
+| --- | --- | --- |
+| BLE transport | Subscribe to both EZ receive and send characteristics; write client packets to the send characteristic ending `ca101` | `CommBLE.StartNotifications`, `GetCharacteristicData`, `WaitForWrittenData` |
+| First heartbeat | Command 255 starts version negotiation once per connection, rather than being ignored indefinitely | `CommData.CheckPid` |
+| Firmware 3.x negotiation | Request command 0 (`GetVersion`), inspect the response, send platform/build-date queries and command 9 (`AppVersion`), then require a positive compatibility response | `GetAdapterVersion3`, `SendVersions3`, `SendAppVersion3` |
+| Firmware 4.x negotiation | Start with a different command 9 payload containing application major/minor/patch and platform; do not reuse the 3.x layout | `SendVersions4`, `SendAppVersion4` |
+| Authentication | 3.x sends commands 130 and 171; 4.x sends command 169. Authentication responses gate subsequent initialization | `CheckAuthentication`, `CheckPid` |
+| Connected initialization | Read firmware-specific adapter variables and bus settings, then synchronize command 8 (`AppIsConnected`) | `RetrieveData`, `SendGetVariables3`, `SendGetVariables4` |
+| J1708 subscriptions | Command 155 (`AddPID`) selects MID, PID, on-request behavior, retrieval mode and interval; the incoming measurement command is 154 (`PIDData`) | `AddPID`, `AddPIDData`, `PIDCommands` |
+| Report flow control | Page data setup can stop reports with command 153, install subscriptions, then explicitly restart reports with that command | `HomeBase.ConnectData`, `DataConnected`, `CommData.StartSendingData` |
+
+At the time of this capture, the receiver implemented only the first stage's
+subscriptions and incoming parsing. The opt-in startup implementation now
+provides the missing exchanges. Repeating a passive diagnostic capture still
+does not exercise startup; inspect the pre-capture live startup state instead.
+
+Important implementation boundaries:
+
+- **Client framing differs from receive framing.** The inspected modern EZ
+  writer uses two big-endian body-length bytes, the body, and a complemented
+  end-around-carry checksum covering both length bytes and the body. It does
+  not add the receive header's length-XOR byte or an original-LE packet
+  selector. Writes go to `ca101`, not the writable receive characteristic.
+- **Authentication is not necessarily a password prompt.** With no configured
+  username/password or device/adapter binding, the inspected 3.x path sends
+  zero-length authentication data and the 4.x path sends three zero-length
+  fields. Secured adapters use encrypted data instead. Empty fields are a
+  normal unsecured-client path, not proof that a secured adapter will accept
+  them. Never reset security or fall back after rejection.
+- **Firmware selection is separate from PID report format.** The app uses
+  version-bearing device names to select its 4.x path; an unversioned
+  `BlueFire EZ` name takes its 3.x path. That is evidence of the app's
+  selection rule, not proof of this adapter's firmware. The integration's
+  `j1587_extended` setting only selects how incoming PID reports are parsed.
+- **Subscriptions and bus enablement are distinct.** `AddPID` contains a
+  big-endian 16-bit PID even when incoming PID reports use page extensions.
+  It also distinguishes monitoring from on-request retrieval, which can
+  cause vehicle-bus requests. Read the J1708 ignore/availability state before
+  deciding whether a missing measurement means a bus, filter or ECU issue.
+  The notification-status setting is not a substitute for PID subscriptions
+  and report flow control.
+- **Do not replay the whole vendor initialization routine.** It can change
+  adapter variables, bus-ignore flags and other settings to match its UI.
+  A telemetry implementation should preserve existing settings, reject
+  incompatible/authentication failures explicitly, use bounded response
+  waits, rebuild session subscriptions on reconnect and never send fault-clear,
+  reset, firmware-flash or arbitrary vehicle-transmit commands.
+
+The next hardware gate is a firmware/security-confirmed, bidirectional startup
+trace from the implemented sequence, first obtaining a valid version response,
+then compatibility/authentication responses, and finally a narrowly scoped
+J1708 subscription such as engine MID 128 / engine-speed PID 190. Do not claim
+telemetry readiness until actual PIDData reports arrive. The passive capture
+does not contain the adapter firmware, authentication result or J1708
+availability response. The owner subsequently confirmed firmware 3.23.0;
+authentication acceptance and J1708 availability remain unverified. The
+implementation sends only the normal unsecured authentication fields and
+never includes vendor code, keys or captured security payloads.
+
 ### Offline replay and resilience checks
 
 `custom_components/bluefire/protocol.py` is an independent, receive-only
-behavioral parser with no Home Assistant, BLE or MQTT I/O. It is not imported
-by the running integration. `ReceiveDecoder` supports split headers/payloads,
+behavioral parser with no Home Assistant, BLE or MQTT I/O. Both the live
+receiver and offline analyzer use it. `ReceiveDecoder` supports split headers/payloads,
 concatenated stream messages, and explicit zero-padded notification mode.
 It rejects invalid header XORs, checksum failures, inexact inner lengths and
 over-limit packets with `ProtocolError`, clearing pending data on failure.
@@ -787,8 +909,9 @@ declaring a full public release:
 
 1. The receiver subscribes to the modern EZ receive and client-write notification
    characteristics; both are routed through one ordered stream decoder. It sends
-   no adapter writes. Authentication/startup remains unavailable because the
-   repository does not document the required command payloads.
+   no adapter writes unless J1708 startup is explicitly enabled. The unsecured
+   startup exchange and passive monitoring commands are implemented separately
+   with response deadlines and fail-closed error handling.
 2. Receive framing and report routing are exercised with synthetic fixtures.
    PGN reports do not establish original CAN identifiers: never guess one to call
    `MqttBridge.async_process_frame(Frame(can_id, data))`. Where the report format

@@ -1,7 +1,7 @@
 """Provisional BlueFire BLE receiver and MQTT integration.
 
 The receiver follows documented EZ observations without claiming hardware
-validation or inventing CAN identifiers/authentication payloads.
+validation or inventing CAN identifiers.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from .const import (
     CONF_J1587_EXTENDED,
+    CONF_J1708_STARTUP,
     DOMAIN,
     MQTT_PUBLISH_TIMEOUT,
     STATUS_RECEIVER_ENABLED,
@@ -138,7 +139,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Prepare MQTT and start the receive-only BLE task."""
+    """Prepare MQTT and start the BLE telemetry task."""
     from homeassistant.components import bluetooth, mqtt
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
     from homeassistant.core import callback
@@ -208,6 +209,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         bridge,
         health=health,
         j1587_extended=entry.data.get(CONF_J1587_EXTENDED),
+        j1708_startup=entry.data.get(CONF_J1708_STARTUP, False),
     )
     entry.runtime_data = BlueFireRuntime(
         bridge, receiver=receiver, health=health

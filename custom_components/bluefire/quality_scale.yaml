@@ -85,7 +85,7 @@ rules:
     comment: The sensor platform sets PARALLEL_UPDATES to 0 for in-memory diagnostic updates in custom_components/bluefire/sensor.py.
   reauthentication-flow:
     status: exempt
-    comment: The integration currently uses no credentials or authenticated external service.
+    comment: J1708 startup supports only unsecured adapters; it stores no credentials and rejects security failures rather than changing adapter security. See custom_components/bluefire/startup.py.
   test-coverage:
     status: done
     comment: CI measures all integration modules and enforces at least 96 percent coverage using requirements-dev.txt and .github/workflows/validate.yml.
@@ -109,13 +109,13 @@ rules:
     comment: The README has a synthetic payload example but no end-user automation examples yet.
   docs-known-limitations:
     status: done
-    comment: The provisional receiver's missing authentication/startup exchange and hardware-unverified protocol behavior are clearly listed in README.md.
+    comment: README.md documents opt-in unsecured J1708 startup, passive monitoring, secured-adapter limitations and outstanding hardware verification.
   docs-supported-devices:
     status: done
     comment: README.md explains the BlueFire adapter scope and that hardware compatibility is not yet verified.
   docs-supported-functions:
     status: done
-    comment: Implemented setup, receive-only BLE behavior, diagnostics, MQTT behavior, and protocol limitations are described in README.md.
+    comment: Implemented setup, opt-in J1708 startup, BLE reception, diagnostics, MQTT behavior and protocol limitations are described in README.md.
   docs-troubleshooting:
     status: done
     comment: README.md includes guidance for missing BLE devices, MQTT setup, adapter inspection, and offline behavior.

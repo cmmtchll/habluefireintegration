@@ -55,7 +55,8 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             inspecting=False, services=[], health=Health()
         )
         self.receiver = SimpleNamespace(
-            async_pause=AsyncMock(), async_resume=Mock()
+            async_pause=AsyncMock(), async_resume=Mock(),
+            startup_diagnostics=Mock(return_value={"stage": "disabled"}),
         )
         self.runtime.receiver = self.receiver
         self.entry = SimpleNamespace(
@@ -278,6 +279,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 receiver.services = []
                 receiver.async_pause = AsyncMock()
                 receiver.async_resume = Mock()
+                receiver.startup_diagnostics = Mock(return_value={
+                    "stage": "disabled",
+                })
                 self.receiver_instances.append(receiver)
 
             async def async_run(receiver):
@@ -419,6 +423,15 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.receiver_instances[0].kwargs["j1587_extended"], None
         )
+        self.assertFalse(
+            self.receiver_instances[0].kwargs["j1708_startup"]
+        )
+
+    async def test_setup_passes_explicit_j1708_startup_to_receiver(self):
+        self.entry.data.update(j1708_startup=True, j1587_extended=True)
+        self.assertTrue(await async_setup_entry(self.hass, self.entry))
+        self.assertTrue(self.receiver_instances[0].kwargs["j1708_startup"])
+        self.assertTrue(self.receiver_instances[0].kwargs["j1587_extended"])
 
     async def test_missing_mqtt_client_is_retryable(self):
         self.mqtt.async_wait_for_mqtt_client.return_value = False
@@ -823,6 +836,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["entry"]["data"]["address"],
                          "AA:BB:CC:DD:EE:FF")
         self.assertEqual(result["integration_version"], "0.4.0")
+        self.assertEqual(
+            result["startup_before_capture"], {"stage": "disabled"}
+        )
         self.assertTrue(result["mqtt"]["connected"])
         self.assertEqual(
             result["mqtt"]["ledger"]["record"]["vehicle_id"], "coach"
