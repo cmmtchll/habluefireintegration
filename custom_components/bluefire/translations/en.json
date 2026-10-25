@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up BlueFire",
-        "description": "Choose a nearby BLE device or enter its MAC address. BlueFire starts a receive-only connection when the entry loads.",
+        "description": "Choose a nearby BLE device or enter its MAC address. BlueFire connects when the entry loads; J1708 startup commands require explicit opt-in.",
         "menu_options": {
           "discovered": "Choose a nearby Bluetooth device",
           "manual": "Enter a MAC address manually"
@@ -23,12 +23,14 @@
           "name": "Adapter name",
           "address": "Bluetooth MAC address",
           "vehicle_id": "Vehicle MQTT identifier",
-          "j1587_extended": "J1587 adapter firmware format"
+          "j1587_extended": "J1587 adapter firmware format",
+          "j1708_startup": "Enable J1708 startup (unsecured EZ adapters)"
         },
         "data_description": {
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "vehicle_id": "1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
-          "j1587_extended": "Optional. Select only if you know the adapter firmware format. Leave blank to ignore J1587 PIDData."
+          "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; otherwise leave blank to ignore J1587 PIDData.",
+          "j1708_startup": "Send version, unsecured authentication, passive PID subscriptions and report-start commands. Does not change adapter settings, request vehicle data, reset security or upgrade firmware. Secured adapters are not supported."
         }
       },
       "reconfigure": {
@@ -37,10 +39,13 @@
         "data": {
           "name": "Adapter name",
           "address": "Bluetooth MAC address",
-          "j1587_extended": "J1587 adapter firmware format"
+          "j1587_extended": "J1587 adapter firmware format",
+          "j1708_startup": "Enable J1708 startup (unsecured EZ adapters)"
         },
         "data_description": {
-          "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted."
+          "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
+          "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; firmware 3.23.0 uses Extended (3.19+).",
+          "j1708_startup": "Opt in to unsecured authentication and passive J1708 PID monitoring. Disabled entries remain receive-only. Does not change security, bus settings or firmware."
         }
       }
     },
@@ -50,6 +55,8 @@
       "invalid_selection": "Select a device from the list.",
       "invalid_vehicle_id": "Use 1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
       "invalid_j1587_format": "Select a supported J1587 firmware format.",
+      "invalid_j1708_startup": "Enable or disable J1708 startup.",
+      "required_j1587_format": "Select the adapter firmware format before enabling J1708 startup.",
       "vehicle_id_in_use": "Another adapter already uses this vehicle MQTT identifier."
     },
     "abort": {

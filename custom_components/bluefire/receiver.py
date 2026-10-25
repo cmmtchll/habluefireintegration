@@ -1,4 +1,4 @@
-"""Provisional receive-only BlueFire EZ BLE receiver."""
+"""BlueFire EZ receiver with opt-in unsecured J1708 startup."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from .protocol import (
     ReceiveDecoder,
     parse_message,
 )
+from .startup import J1708Startup, StartupError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,13 +49,15 @@ class BlueFireReceiver:
 
     def __init__(
         self, hass, address: str, bridge, *, health=None,
-        j1587_extended=None,
+        j1587_extended=None, j1708_startup: bool = False,
     ):
         self.hass = hass
         self.address = address
         self.bridge = bridge
         self.health = health
         self.j1587_extended = j1587_extended
+        self.j1708_startup = j1708_startup
+        self._startup: J1708Startup | None = None
         self._decoder = ReceiveDecoder()
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=128)
         self._overflow = asyncio.Event()
@@ -67,6 +70,14 @@ class BlueFireReceiver:
         self._closed = False
         self._session_task: asyncio.Task | None = None
         self.services: list[dict] = []
+
+    def startup_diagnostics(self) -> dict:
+        """Expose startup progress without security data or raw payloads."""
+        if self._startup is not None:
+            return self._startup.diagnostics()
+        return {
+            "stage": "not_started" if self.j1708_startup else "disabled",
+        }
 
     async def async_run(self) -> None:
         """Keep a bounded-backoff receiver alive until config-entry unload."""
@@ -170,6 +181,7 @@ class BlueFireReceiver:
                 ),
             )
         started = []
+        startup_task: asyncio.Task | None = None
         try:
             if self._paused:
                 raise _ReceiverPaused
@@ -211,6 +223,32 @@ class BlueFireReceiver:
                     "BlueFire EZ service has no supported "
                     "notification characteristic"
                 )
+            if self.j1708_startup:
+                write_characteristic = characteristics.get(EZ_CLIENT_WRITE)
+                if (
+                    write_characteristic is None
+                    or "write" not in write_characteristic.properties
+                    or set(notify_uuids) != EZ_CHARACTERISTICS
+                ):
+                    raise HomeAssistantError(
+                        "J1708 startup requires both EZ subscriptions "
+                        "and the client write-with-response characteristic"
+                    )
+                if type(self.j1587_extended) is not bool:
+                    raise HomeAssistantError(
+                        "Select a J1587 firmware format before J1708 startup"
+                    )
+
+                async def write(packet: bytes) -> None:
+                    async with asyncio.timeout(BLE_OPERATION_TIMEOUT):
+                        await client.write_gatt_char(
+                            write_characteristic, packet, response=True
+                        )
+
+                self._startup = J1708Startup(
+                    write, getattr(device, "name", None),
+                    self.j1587_extended,
+                )
 
             self._queue = asyncio.Queue(maxsize=128)
             self._overflow.clear()
@@ -225,18 +263,32 @@ class BlueFireReceiver:
                 "BlueFire receiver subscribed to %d EZ characteristics",
                 len(notify_uuids),
             )
+            if self._startup is not None and self.j1708_startup:
+                startup_task = asyncio.create_task(
+                    self._startup.run(), name="BlueFire J1708 startup"
+                )
             while client.is_connected and not self._closed:
+                if startup_task is not None and startup_task.done():
+                    startup_task.result()
+                    startup_task = None
+                    _LOGGER.info(
+                        "BlueFire J1708 startup complete; waiting for reports"
+                    )
                 if self._overflow.is_set():
                     raise BleakError("BlueFire receive queue overflow")
                 get_chunk = asyncio.create_task(self._queue.get())
                 overflow = asyncio.create_task(self._overflow.wait())
                 paused = asyncio.create_task(self._pause_event.wait())
                 try:
+                    waiting = {get_chunk, overflow, paused}
+                    if startup_task is not None and not startup_task.done():
+                        waiting.add(startup_task)
                     done, pending = await asyncio.wait(
-                        (get_chunk, overflow, paused),
+                        waiting,
                         timeout=1,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
+                    pending.discard(startup_task)
                     for task in pending:
                         task.cancel()
                     if pending:
@@ -267,7 +319,24 @@ class BlueFireReceiver:
                 if paused in done and paused.result():
                     raise _ReceiverPaused
             raise BleakError("BlueFire Bluetooth connection lost")
+        except (StartupError, BleakError, OSError, TimeoutError) as err:
+            if self._startup is not None and (
+                isinstance(err, StartupError) or not self._startup.ready
+            ):
+                self._startup.error = str(err)
+                self._startup.stage = "failed"
+            if isinstance(err, StartupError):
+                raise HomeAssistantError(
+                    f"J1708 startup failed: {err}"
+                ) from err
+            raise
         finally:
+            if startup_task is not None:
+                startup_task.cancel()
+                await asyncio.gather(startup_task, return_exceptions=True)
+            if self._startup is not None:
+                self._startup.disconnected()
+            self._decoder.reset()
             for characteristic in reversed(started):
                 try:
                     async with asyncio.timeout(BLE_CLEANUP_TIMEOUT):
@@ -306,6 +375,15 @@ class BlueFireReceiver:
             raise
         if self.health is not None:
             self.health.count("packets")
+        if self._startup is not None:
+            if isinstance(message, AdapterMessage):
+                handled = self._startup.receive(message)
+                if handled and message.command != 255:
+                    await asyncio.sleep(0)
+                    return
+            elif not self._startup.ready:
+                self._startup.discarded_reports += 1
+                return
         if isinstance(message, PgnReport):
             if self.health is not None:
                 self.health.count("pgn_reports")

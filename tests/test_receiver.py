@@ -2,12 +2,14 @@
 
 import importlib
 import asyncio
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from custom_components.bluefire.health import Health
+from custom_components.bluefire.telemetry import MqttBridge
 
 
 def module(name, **attributes):
@@ -30,6 +32,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.client = SimpleNamespace(
             services=[], disconnect=AsyncMock(), is_connected=False,
             start_notify=AsyncMock(), stop_notify=AsyncMock(),
+            write_gatt_char=AsyncMock(),
         )
         self.connect = AsyncMock(return_value=self.client)
         self.home_assistant_error = type(
@@ -369,6 +372,255 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await self.receiver.async_run()
         self.bridge.async_disconnected.assert_awaited_once()
+
+    def configure_startup_session(self, overrides=None):
+        self.receiver.j1708_startup = True
+        self.receiver.j1587_extended = True
+        self.bluetooth.async_ble_device_from_address.return_value = (
+            SimpleNamespace(name="BlueFire EZ")
+        )
+        self.client.is_connected = True
+        self.write_characteristic = SimpleNamespace(
+            uuid=self.api.EZ_CLIENT_WRITE, properties=["write", "indicate"]
+        )
+        self.client.services = [SimpleNamespace(
+            uuid=self.api.EZ_SERVICE,
+            characteristics=[
+                self.write_characteristic,
+                SimpleNamespace(
+                    uuid=self.api.EZ_RECEIVE, properties=["notify"]
+                ),
+            ],
+        )]
+        self.startup_bodies = []
+        responses = {
+            0: bytes((3, 23, 4, 1, 0)) + bytes(16),
+            9: b"\x01", 130: b"\x01", 171: b"\x01",
+            206: bytes(15), 7: b"\x01", 8: b"",
+        }
+        responses.update(overrides or {})
+
+        async def subscribe(characteristic, callback):
+            if characteristic.uuid == self.api.EZ_RECEIVE:
+                callback(characteristic, self.packet(b"\xff"))
+                callback(
+                    characteristic,
+                    self.packet(bytes.fromhex("9a 80 be 02 a0 0f")),
+                )
+
+        async def write(characteristic, packet, *, response):
+            self.assertIs(characteristic, self.write_characteristic)
+            self.assertIs(response, True)
+            self.assertEqual(sum(packet) % 255, 0)
+            self.assertLessEqual(len(packet), 20)
+            body = packet[2:-1]
+            self.startup_bodies.append(body)
+            data = responses.get(body[0])
+            if body[0] == 153:
+                data = body[1:]
+            if data is not None:
+                reply = self.packet(bytes((body[0],)) + data)
+                if body == b"\x99\x01":
+                    reply += self.packet(
+                        bytes.fromhex("9a 80 be 02 a0 0f")
+                    )
+                self.receiver._notification_received(None, reply)
+
+        self.client.start_notify.side_effect = subscribe
+        self.client.write_gatt_char.side_effect = write
+        self.bridge.async_process_j1587.side_effect = (
+            lambda _: setattr(self.client, "is_connected", False)
+        )
+
+    async def test_live_startup_routes_only_authenticated_j1708_reports(self):
+        self.configure_startup_session()
+        for _ in range(2):
+            self.client.is_connected = True
+            with self.assertRaises(self.bleak_error):
+                await asyncio.wait_for(
+                    self.receiver._async_receive_session(), 2
+                )
+            diagnostics = self.receiver.startup_diagnostics()
+            self.assertEqual(diagnostics["stage"], "disconnected")
+            self.assertEqual(diagnostics["firmware"], [3, 23, 0])
+            self.assertEqual(diagnostics["subscriptions_sent"], 16)
+            self.assertEqual(diagnostics["discarded_reports"], 1)
+        self.assertEqual(self.bridge.async_process_j1587.await_count, 2)
+        self.assertEqual(self.startup_bodies.count(b"\x00"), 2)
+        self.assertEqual(self.startup_bodies.count(b"\x99\x01"), 2)
+        self.assertEqual(self.client.disconnect.await_count, 2)
+        self.assertEqual(self.receiver._decoder.pending_bytes, 0)
+
+    async def test_authentication_rejection_is_visible_and_never_starts_data(
+        self,
+    ):
+        self.configure_startup_session(overrides={130: b"\x00"})
+        with self.assertRaisesRegex(
+            self.home_assistant_error, "authentication_1 rejected"
+        ):
+            await asyncio.wait_for(
+                self.receiver._async_receive_session(), 2
+            )
+        self.assertEqual(
+            self.receiver.startup_diagnostics()["stage"], "failed"
+        )
+        self.assertNotIn(b"\x99\x01", self.startup_bodies)
+        self.bridge.async_process_j1587.assert_not_awaited()
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_startup_to_real_mqtt_bridge_publishes_1000_rpm(self):
+        self.configure_startup_session()
+        messages = []
+
+        async def publish(topic, payload, retain):
+            self.assertTrue(self.receiver._startup.ready)
+            messages.append((topic, payload, retain))
+            if topic == "vehicle/coach/j1587/128/pid/190":
+                self.client.is_connected = False
+
+        self.receiver.bridge = MqttBridge("coach", publish)
+        with self.assertRaises(self.bleak_error):
+            await asyncio.wait_for(
+                self.receiver._async_receive_session(), 2
+            )
+        states = [
+            (json.loads(payload), retain)
+            for topic, payload, retain in messages
+            if topic == "vehicle/coach/j1587/128/pid/190"
+        ]
+        self.assertEqual(len(states), 1)
+        state, retain = states[0]
+        self.assertEqual(state["value"], 1000)
+        self.assertEqual(state["unit"], "rpm")
+        self.assertEqual(state["datalink"], "j1708")
+        self.assertFalse(retain)
+        self.assertIn(
+            ("vehicle/coach/j1587/availability", "online", True),
+            messages,
+        )
+        self.assertFalse(any(
+            topic.startswith("vehicle/coach/j1939")
+            for topic, _, _ in messages
+        ))
+
+    async def test_startup_timeout_is_visible_and_disconnects(self):
+        self.configure_startup_session(overrides={0: None})
+        with patch(
+            "custom_components.bluefire.startup.STEP_TIMEOUT", 0.01
+        ):
+            with self.assertRaisesRegex(
+                self.home_assistant_error, "Timed out during version"
+            ):
+                await asyncio.wait_for(
+                    self.receiver._async_receive_session(), 2
+                )
+        self.client.disconnect.assert_awaited_once()
+        self.assertIn(
+            "version", self.receiver.startup_diagnostics()["error"]
+        )
+
+    async def test_live_startup_errors_reach_health_and_offline_state(self):
+        self.configure_startup_session(overrides={9: b"\x00"})
+        real_sleep = asyncio.sleep
+
+        async def sleep(delay):
+            if delay:
+                self.receiver.stop()
+            else:
+                await real_sleep(0)
+
+        with patch.object(self.api.asyncio, "sleep", new=sleep):
+            await asyncio.wait_for(self.receiver.async_run(), 2)
+        self.assertEqual(self.receiver.health.counters["connection_errors"], 1)
+        self.assertIn(
+            "compatibility rejected", self.receiver.health.last_error
+        )
+        self.bridge.async_disconnected.assert_awaited_once()
+        self.bridge.async_process_j1587.assert_not_awaited()
+
+    async def test_ready_session_keeps_listening_without_repeating_startup(
+        self,
+    ):
+        self.configure_startup_session()
+        received = asyncio.Event()
+        self.bridge.async_process_j1587.side_effect = lambda _: received.set()
+        task = asyncio.create_task(self.receiver.async_run())
+        try:
+            await asyncio.wait_for(received.wait(), 2)
+            self.receiver._notification_received(None, self.packet(b"\xff"))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertTrue(self.receiver._startup.ready)
+            self.assertEqual(self.startup_bodies.count(b"\x00"), 1)
+            self.assertFalse(task.done())
+        finally:
+            self.receiver.stop()
+            await asyncio.wait_for(task, 1)
+
+    async def test_failed_write_aborts_startup_and_disconnects(self):
+        self.configure_startup_session()
+        self.client.write_gatt_char.side_effect = self.bleak_error(
+            "write refused"
+        )
+        with self.assertRaisesRegex(self.bleak_error, "write refused"):
+            await asyncio.wait_for(
+                self.receiver._async_receive_session(), 2
+            )
+        self.client.disconnect.assert_awaited_once()
+        self.assertIsNone(self.receiver._startup._response)
+        self.assertEqual(
+            self.receiver.startup_diagnostics()["error"], "write refused"
+        )
+        self.assertEqual(
+            self.receiver.startup_diagnostics()["stage"], "failed"
+        )
+        self.bridge.async_process_j1587.assert_not_awaited()
+
+    async def test_pause_cancels_active_startup_and_resumes_a_fresh_session(
+        self,
+    ):
+        self.configure_startup_session(overrides={0: None})
+        writing = asyncio.Event()
+        write = self.client.write_gatt_char.side_effect
+
+        async def signal_write(*args, **kwargs):
+            await write(*args, **kwargs)
+            writing.set()
+
+        self.client.write_gatt_char.side_effect = signal_write
+        task = asyncio.create_task(self.receiver.async_run())
+        await asyncio.wait_for(writing.wait(), 1)
+        await self.receiver.async_pause()
+        self.client.disconnect.assert_awaited_once()
+        self.assertIsNone(self.receiver._startup._response)
+        self.bridge.async_disconnected.assert_not_awaited()
+        self.receiver.async_resume()
+        self.receiver.stop()
+        await asyncio.wait_for(task, 1)
+
+    async def test_startup_requires_format_and_both_ez_characteristics(self):
+        self.configure_startup_session()
+        self.receiver.j1587_extended = None
+        with self.assertRaisesRegex(
+            self.home_assistant_error, "Select a J1587"
+        ):
+            await self.receiver._async_receive_session()
+        self.receiver.j1587_extended = True
+        self.write_characteristic.properties = ["write-without-response"]
+        with self.assertRaisesRegex(
+            self.home_assistant_error, "requires both EZ"
+        ):
+            await self.receiver._async_receive_session()
+        self.client.write_gatt_char.assert_not_awaited()
+
+    def test_disabled_and_not_started_diagnostics(self):
+        self.assertEqual(
+            self.receiver.startup_diagnostics(), {"stage": "disabled"}
+        )
+        self.receiver.j1708_startup = True
+        self.assertEqual(
+            self.receiver.startup_diagnostics(), {"stage": "not_started"}
+        )
 
 
 if __name__ == "__main__":

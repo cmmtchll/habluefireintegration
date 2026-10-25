@@ -205,8 +205,10 @@ def render_markdown(catalog: dict) -> str:
         "and availability are retained. Each protocol has independent "
         "freshness and all discovered sensors expire after 60 seconds. "
         "The provisional modern EZ BLE receiver is enabled; adapter "
-        "compatibility remains hardware-unverified. Command-level "
-        "authentication/startup is not implemented.", "",
+        "compatibility remains hardware-unverified. Opt-in unsecured J1708 "
+        "startup negotiates firmware compatibility, authenticates, subscribes "
+        "to passive PID reports and enables report flow. Secured adapters "
+        "are unsupported.", "",
     ])
     table(
         ("Meaning", "Topic pattern"),

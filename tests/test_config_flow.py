@@ -133,7 +133,9 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
             "name": "invalid_name", "address": "invalid_address",
             "vehicle_id": "invalid_vehicle_id",
         })
-        self.assertEqual(result["data_schema"]({}), bad)
+        self.assertEqual(
+            result["data_schema"]({}), {**bad, "j1708_startup": False}
+        )
         self.flow.async_create_entry.assert_not_called()
         self.flow.async_set_unique_id.assert_not_awaited()
 
@@ -238,4 +240,37 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(defaults, {
             "name": self.data["name"], "address": self.data["address"],
             "j1587_extended": "Extended (3.19+)",
+            "j1708_startup": False,
         })
+
+    async def test_j1708_startup_is_explicit_and_requires_format(self):
+        schema = (await self.flow.async_step_manual())["data_schema"]
+        self.assertIs(schema({})["j1708_startup"], False)
+        for value in (True, False):
+            result = await self.flow.async_step_manual({
+                **self.data, "j1708_startup": value,
+                "j1587_extended": "Extended (3.19+)",
+            })
+            self.assertIs(result["data"]["j1708_startup"], value)
+        result = await self.flow.async_step_manual({
+            **self.data, "j1708_startup": True,
+        })
+        self.assertEqual(result["errors"], {
+            "j1587_extended": "required_j1587_format",
+        })
+        _, errors = self.flow._validate_input({
+            **self.data, "j1708_startup": "yes",
+        })
+        self.assertEqual(
+            errors, {"j1708_startup": "invalid_j1708_startup"}
+        )
+
+    async def test_reconfigure_can_enable_and_disable_startup(self):
+        entry = self.reconfigure_entry()
+        entry.data.update(j1708_startup=True, j1587_extended=True)
+        result = await self.flow.async_step_reconfigure()
+        self.assertTrue(result["data_schema"]({})["j1708_startup"])
+        result = await self.flow.async_step_reconfigure({
+            **self.data, "j1708_startup": False, "j1587_extended": True,
+        })
+        self.assertIs(result["data_updates"]["j1708_startup"], False)
