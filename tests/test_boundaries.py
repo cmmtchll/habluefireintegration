@@ -465,6 +465,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await async_setup_entry(self.hass, self.entry))
         self.assertTrue(self.receiver_instances[0].kwargs["j1708_startup"])
         self.assertTrue(self.receiver_instances[0].kwargs["j1587_extended"])
+        self.assertTrue(self.entry.runtime_data.bridge.j1587._j1708_polling)
+        self.assertEqual(
+            self.entry.runtime_data.bridge.j1587._availability_timeout, 180
+        )
 
     async def test_missing_mqtt_client_is_retryable(self):
         self.mqtt.async_wait_for_mqtt_client.return_value = False

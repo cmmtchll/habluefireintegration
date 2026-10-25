@@ -19,6 +19,188 @@ def module(name, **attributes):
 
 
 class ReceiverTests(unittest.IsolatedAsyncioTestCase):
+    async def run_poll_cycles(self, cycles, read, *, before_cycle=None):
+        self.configure_read()
+        clock = [0]
+        sleeps = []
+
+        async def sleep(delay):
+            sleeps.append(delay)
+            if len(sleeps) > cycles:
+                raise asyncio.CancelledError
+            clock[0] += delay
+            if before_cycle is not None:
+                before_cycle(len(sleeps))
+
+        self.receiver.async_read = AsyncMock(
+            side_effect=lambda pid: read(pid, clock)
+        )
+        with (
+            patch.object(self.api, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(self.api.asyncio, "sleep", side_effect=sleep),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.receiver._async_poll()
+        return sleeps
+
+    async def test_polling_runs_each_minute_without_read_duration_drift(self):
+        reads = []
+
+        def read(pid, clock):
+            reads.append((clock[0], pid))
+            clock[0] += 5
+
+        sleeps = await self.run_poll_cycles(3, read)
+        self.assertEqual(reads, [
+            (60, 96), (65, 194), (120, 96), (125, 194),
+            (180, 96), (185, 194),
+        ])
+        self.assertEqual(sleeps, [60, 50, 50, 50])
+
+    async def test_poll_backoff_is_per_pid_capped_and_resets_on_success(self):
+        reads = []
+
+        def read(pid, clock):
+            reads.append((clock[0], pid))
+            if pid == 96 and clock[0] < 1800:
+                raise self.home_assistant_error("No fuel report")
+
+        with self.assertLogs(
+            "custom_components.bluefire.receiver", level="WARNING",
+        ) as logs:
+            await self.run_poll_cycles(31, read)
+        self.assertEqual(
+            [time for time, pid in reads if pid == 96],
+            [60, 180, 420, 900, 1800, 1860],
+        )
+        self.assertEqual(
+            [time for time, pid in reads if pid == 194],
+            list(range(60, 1861, 60)),
+        )
+        self.assertEqual(self.receiver.health.counters["connection_errors"], 4)
+        self.assertIn("retrying in 900 seconds", logs.output[-1])
+
+    async def test_polling_skips_busy_read_and_retries_next_minute(self):
+        reads = []
+        waiter = asyncio.get_running_loop().create_future()
+
+        def before_cycle(cycle):
+            self.receiver._read_waiter = waiter if cycle == 1 else None
+
+        await self.run_poll_cycles(
+            2, lambda pid, clock: reads.append((clock[0], pid)),
+            before_cycle=before_cycle,
+        )
+        waiter.cancel()
+        self.assertEqual(reads, [(120, 96), (120, 194)])
+
+    async def test_polling_stops_if_connection_is_not_ready(self):
+        for state in ("closed", "paused", "missing", "not_ready", "reconnect"):
+            with self.subTest(state=state):
+                self.configure_read()
+                self.receiver._closed = state == "closed"
+                self.receiver._paused = state == "paused"
+                if state == "missing":
+                    self.receiver._startup = None
+                elif state == "not_ready":
+                    self.receiver._startup.ready = False
+                if state == "reconnect":
+                    self.receiver._reconnect_event.set()
+                self.receiver.async_read = AsyncMock()
+                with patch.object(self.api.asyncio, "sleep", new=AsyncMock()):
+                    await self.receiver._async_poll()
+                self.receiver.async_read.assert_not_awaited()
+
+    async def test_poll_task_starts_after_startup_and_is_cancelled_per_session(
+        self,
+    ):
+        self.configure_startup_session()
+        self.bridge.async_process_j1587.side_effect = None
+        poll_started = asyncio.Event()
+        poll_stopped = asyncio.Event()
+
+        async def poll():
+            self.assertTrue(self.receiver._startup.ready)
+            poll_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                poll_stopped.set()
+
+        self.receiver._async_poll = AsyncMock(side_effect=poll)
+        for _ in range(2):
+            self.client.is_connected = True
+            poll_started.clear()
+            poll_stopped.clear()
+            task = asyncio.create_task(self.receiver._async_receive_session())
+            await asyncio.wait_for(poll_started.wait(), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(poll_stopped.is_set())
+        self.assertEqual(self.receiver._async_poll.await_count, 2)
+        self.assertEqual(self.client.disconnect.await_count, 2)
+
+    async def test_poll_task_failure_is_not_silently_lost(self):
+        self.configure_startup_session()
+        self.bridge.async_process_j1587.side_effect = None
+        self.receiver._async_poll = AsyncMock(
+            side_effect=RuntimeError("poll worker failed")
+        )
+        with self.assertRaisesRegex(RuntimeError, "poll worker failed"):
+            await asyncio.wait_for(self.receiver._async_receive_session(), 1)
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_automatic_poll_sends_reads_and_restores_passive_wire_modes(
+        self,
+    ):
+        self.configure_startup_session()
+        self.bridge.async_process_j1587.side_effect = None
+        completed = asyncio.Event()
+        original_write = self.client.write_gatt_char.side_effect
+
+        async def write(characteristic, packet, *, response):
+            await original_write(characteristic, packet, response=response)
+            body = packet[2:-1]
+            if body == bytes.fromhex("9b 00 00 60 01 01 00 00 00"):
+                self.receiver._notification_received(
+                    None, self.packet(bytes.fromhex("9a 80 60 01 64"))
+                )
+            elif body == bytes.fromhex("9b 00 00 c2 01 01 00 00 00"):
+                self.receiver._notification_received(
+                    None, self.packet(bytes.fromhex("9a 80 c2 00"))
+                )
+            elif body == bytes.fromhex("9b 00 00 c2 00 02 03 e8 00"):
+                if any(b[4] == 1 for b in self.startup_bodies if b[0] == 155):
+                    completed.set()
+
+        self.client.write_gatt_char.side_effect = write
+        with (
+            patch.object(self.api, "J1708_POLL_INTERVAL", 0.05),
+            patch.object(self.api, "READ_WINDOW_SECONDS", 0.01),
+        ):
+            task = asyncio.create_task(self.receiver._async_receive_session())
+            try:
+                await asyncio.wait_for(completed.wait(), 1)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        self.assertEqual(self.startup_bodies[-4:], [
+            bytes.fromhex("9b 00 00 60 01 01 00 00 00"),
+            bytes.fromhex("9b 00 00 60 00 02 03 e8 00"),
+            bytes.fromhex("9b 00 00 c2 01 01 00 00 00"),
+            bytes.fromhex("9b 00 00 c2 00 02 03 e8 00"),
+        ])
+        reports = [
+            call.args[0] for call in
+            self.bridge.async_process_j1587.await_args_list
+        ]
+        self.assertTrue(any(
+            r.pid == 96 and r.data == b"\x64" for r in reports
+        ))
+        self.assertTrue(any(r.pid == 194 and r.data == b"" for r in reports))
+
     def configure_read(self):
         self.receiver.j1708_startup = True
         self.receiver.j1587_extended = True

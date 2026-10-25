@@ -30,7 +30,7 @@
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "vehicle_id": "1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
           "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; otherwise leave blank to ignore J1587 PIDData.",
-          "j1708_startup": "Send version, unsecured authentication, passive PID subscriptions and report-start commands. Does not change adapter settings, request vehicle data, reset security or upgrade firmware. Secured adapters are not supported."
+          "j1708_startup": "Send version, unsecured authentication, passive subscriptions and report-start commands, then actively request fuel level and diagnostic codes every minute. Does not change adapter settings, clear faults, reset security or upgrade firmware. Secured adapters are not supported."
         }
       },
       "reconfigure": {
@@ -45,7 +45,7 @@
         "data_description": {
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; firmware 3.23.0 uses Extended (3.19+).",
-          "j1708_startup": "Opt in to unsecured authentication and passive J1708 PID monitoring. Disabled entries remain receive-only. Does not change security, bus settings or firmware."
+          "j1708_startup": "Opt in to unsecured authentication, passive J1708 monitoring and one-minute active fuel/diagnostic reads with failure backoff. Disabled entries remain receive-only. Does not clear faults or change security, bus settings or firmware."
         }
       }
     },

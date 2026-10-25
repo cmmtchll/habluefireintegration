@@ -1,9 +1,10 @@
-"""BlueFire EZ receiver with opt-in unsecured J1708 startup."""
+"""BlueFire EZ receiver with opt-in J1708 startup and minute polling."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from time import monotonic
 
 from bleak.exc import BleakError
 from bleak_retry_connector import (
@@ -14,6 +15,7 @@ from homeassistant.components import bluetooth
 from homeassistant.exceptions import HomeAssistantError
 
 from .catalog import lookup
+from .const import J1708_POLL_INTERVAL, J1708_POLL_MAX_BACKOFF
 from .j1587 import decode_report
 from .protocol import (
     AdapterMessage,
@@ -146,6 +148,39 @@ class BlueFireReceiver:
             "stage": "not_started" if self.j1708_startup else "disabled",
         }
 
+    async def _async_poll(self) -> None:
+        """Poll each minute, backing off each silent PID independently."""
+        next_poll = monotonic() + J1708_POLL_INTERVAL
+        retry_at = {96: next_poll, 194: next_poll}
+        backoff = {pid: J1708_POLL_INTERVAL for pid in retry_at}
+        while True:
+            await asyncio.sleep(max(0, next_poll - monotonic()))
+            now = monotonic()
+            next_poll = now + J1708_POLL_INTERVAL
+            for pid in retry_at:
+                if self._closed or self._paused or (
+                    self._startup is None or not self._startup.ready
+                    or self._reconnect_event.is_set()
+                ):
+                    return
+                if self._read_waiter is not None or now < retry_at[pid]:
+                    continue
+                try:
+                    await self.async_read(pid)
+                except HomeAssistantError as err:
+                    backoff[pid] = min(
+                        backoff[pid] * 2, J1708_POLL_MAX_BACKOFF
+                    )
+                    self._health_error("connection_errors", str(err))
+                    _LOGGER.warning(
+                        "BlueFire periodic PID %d read failed; "
+                        "retrying in %d seconds: %s",
+                        pid, backoff[pid], err,
+                    )
+                else:
+                    backoff[pid] = J1708_POLL_INTERVAL
+                retry_at[pid] = now + backoff[pid]
+
     async def async_run(self) -> None:
         """Keep a bounded-backoff receiver alive until config-entry unload."""
         delay = RECONNECT_MIN
@@ -249,6 +284,7 @@ class BlueFireReceiver:
             )
         started = []
         startup_task: asyncio.Task | None = None
+        poll_task: asyncio.Task | None = None
         try:
             if self._paused:
                 raise _ReceiverPaused
@@ -342,6 +378,12 @@ class BlueFireReceiver:
                     _LOGGER.info(
                         "BlueFire J1708 startup complete; waiting for reports"
                     )
+                    poll_task = asyncio.create_task(
+                        self._async_poll(), name="BlueFire J1708 polling"
+                    )
+                if poll_task is not None and poll_task.done():
+                    poll_task.result()
+                    raise BleakError("BlueFire J1708 polling stopped")
                 if self._overflow.is_set():
                     raise BleakError("BlueFire receive queue overflow")
                 if self._reconnect_event.is_set():
@@ -354,12 +396,15 @@ class BlueFireReceiver:
                     waiting = {get_chunk, overflow, paused, reconnect}
                     if startup_task is not None and not startup_task.done():
                         waiting.add(startup_task)
+                    if poll_task is not None:
+                        waiting.add(poll_task)
                     done, pending = await asyncio.wait(
                         waiting,
                         timeout=1,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     pending.discard(startup_task)
+                    pending.discard(poll_task)
                     for task in pending:
                         task.cancel()
                     if pending:
@@ -412,6 +457,9 @@ class BlueFireReceiver:
                 await asyncio.gather(startup_task, return_exceptions=True)
             if self._startup is not None:
                 self._startup.disconnected()
+            if poll_task is not None:
+                poll_task.cancel()
+                await asyncio.gather(poll_task, return_exceptions=True)
             if self._read_waiter is not None and not self._read_waiter.done():
                 self._read_waiter.set_exception(HomeAssistantError(
                     "BlueFire disconnected during J1708 read"

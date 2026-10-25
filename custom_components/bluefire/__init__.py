@@ -226,6 +226,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         save_discovery=save_discovery,
         known_j1587=await ledger.async_get_j1587(entry.entry_id),
         save_j1587=save_j1587,
+        j1708_polling=entry.data.get(CONF_J1708_STARTUP, False),
     )
     receiver = BlueFireReceiver(
         hass,

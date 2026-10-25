@@ -3,8 +3,8 @@ rules:
     status: done
     comment: Inspection, notification capture and explicit on-demand J1708 fuel/fault read actions are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
   appropriate-polling:
-    status: exempt
-    comment: The integration does not poll the adapter; its timer only expires stale MQTT availability, and diagnostic sensors in custom_components/bluefire/sensor.py read in-memory counters every 15 seconds.
+    status: done
+    comment: Opt-in J1708 startup enables sequential one-minute fuel/fault polling in custom_components/bluefire/receiver.py with per-PID backoff capped at 15 minutes, busy-read exclusion and session-bound cancellation. Polled sensors expire at 180 seconds; other sensors retain 60-second expiry. Diagnostic sensors read in-memory counters every 15 seconds.
   brands:
     status: done
     comment: The integration provides a local HACS brand icon at custom_components/bluefire/brand/icon.png.
