@@ -605,6 +605,126 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receiver.health.counters["heartbeats"], 1)
         self.assertEqual(self.receiver.health.counters["unknown_commands"], 1)
 
+    async def test_malformed_j1587_values_are_counted_before_side_effects(
+        self,
+    ):
+        cases = (
+            ("9a 88 c2 01 00", "Truncated J1587 diagnostic entry"),
+            ("9a 00 5c 01 00", "Expected a J1587 MID"),
+            ("9a 80 c2 02 64 a3", "Missing J1587 diagnostic occurrence"),
+            ("9a 80 5c 02 00 00", "fixed-width PID"),
+            ("9a 80 f5 03 00 00 00", "value length does not match PID"),
+        )
+        for index, (body, error) in enumerate(cases, 1):
+            with self.subTest(body=body):
+                self.receiver.j1587_extended = True
+                with (
+                    self.assertLogs(self.module_name, "WARNING") as logs,
+                    self.assertRaisesRegex(self.api.ProtocolError, error),
+                ):
+                    await self.receiver._async_process_body(
+                        bytes.fromhex(body)
+                    )
+                self.assertIn(error, logs.output[0])
+                self.assertEqual(
+                    self.receiver.health.counters["parse_errors"], index
+                )
+                self.assertEqual(self.receiver.health.counters["packets"], 0)
+                self.assertEqual(
+                    self.receiver.health.counters["j1587_reports"], 0
+                )
+                self.assertIsNone(self.receiver.health.last_data)
+                self.assertFalse(self.receiver._session_healthy)
+                self.bridge.async_process_j1587.assert_not_awaited()
+
+    async def test_valid_j1587_does_not_mask_bridge_failures(self):
+        self.receiver.j1587_extended = True
+        self.bridge.async_process_j1587.side_effect = ValueError(
+            "publisher failure"
+        )
+        with self.assertRaisesRegex(ValueError, "publisher failure"):
+            await self.receiver._async_process_body(
+                bytes.fromhex("9a 80 5c 01 00")
+            )
+        self.assertEqual(self.receiver.health.counters["parse_errors"], 0)
+
+    async def test_bad_j1587_reports_keep_live_session_and_read_open(self):
+        self.configure_startup_session(report_on_start=False)
+        messages = []
+        received = asyncio.Event()
+
+        async def publish(topic, payload, retain):
+            messages.append((topic, payload, retain))
+            if topic == "vehicle/coach/j1587/136/faults/194":
+                received.set()
+
+        self.receiver.bridge = MqttBridge("coach", publish)
+        with (
+            self.assertLogs(self.module_name, level="WARNING") as logs,
+            patch.object(self.api, "READ_WINDOW_SECONDS", 0.1),
+        ):
+            task = asyncio.create_task(self.receiver.async_run())
+            read = None
+            try:
+                async with asyncio.timeout(1):
+                    while not (
+                        self.receiver._startup and self.receiver._startup.ready
+                    ):
+                        await asyncio.sleep(0)
+                read = asyncio.create_task(self.receiver.async_read(194))
+                async with asyncio.timeout(1):
+                    while self.receiver._read_waiter is None:
+                        await asyncio.sleep(0)
+                bad = (
+                    bytes.fromhex("0005059a88c2010019")
+                    + bytes.fromhex("0005059a005c010008")
+                )
+                self.receiver._notification_received(None, bad)
+                async with asyncio.timeout(1):
+                    while self.receiver.health.counters["parse_errors"] < 2:
+                        await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertFalse(read.done())
+                self.assertEqual(self.receiver._read_reports, {})
+                self.assertIsNone(self.receiver.health.last_data)
+                self.assertEqual(messages, [])
+                self.receiver._notification_received(
+                    None,
+                    self.packet(bytes.fromhex("9a 80 5c 01 00"))
+                    + bad
+                    + self.packet(bytes.fromhex("9a 88 c2 02 64 23")),
+                )
+                await asyncio.wait_for(received.wait(), 1)
+                result = await asyncio.wait_for(read, 1)
+                self.assertEqual(result["reports"][0]["mid"], 136)
+                self.assertEqual(
+                    result["reports"][0]["diagnostics"]["fault_count"], 1
+                )
+                self.assertFalse(task.done())
+                self.assertTrue(self.receiver._startup.ready)
+                self.client.disconnect.assert_not_awaited()
+                self.assertEqual(self.connect.await_count, 1)
+                self.assertEqual(
+                    self.receiver.health.counters["connection_errors"], 0
+                )
+                self.assertEqual(
+                    self.receiver.health.counters["j1587_reports"], 2
+                )
+                self.assertEqual(
+                    self.receiver.health.counters["parse_errors"], 4
+                )
+                self.assertEqual(
+                    len([topic for topic, _, _ in messages
+                         if topic.endswith("/faults/194")]), 1
+                )
+            finally:
+                if read is not None and not read.done():
+                    read.cancel()
+                    await asyncio.gather(read, return_exceptions=True)
+                self.receiver.stop()
+                await asyncio.wait_for(task, 1)
+        self.assertEqual(len(logs.output), 4)
+
     async def test_notification_callback_overflow_signals_reconnect(self):
         self.receiver._queue = __import__("asyncio").Queue(maxsize=1)
         self.receiver._queue.put_nowait(b"pending")
@@ -1035,6 +1155,36 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(self.receiver._receive_is_recent())
         with patch.object(self.api, "monotonic", return_value=30):
             self.assertFalse(self.receiver._receive_is_recent())
+
+    async def test_connection_timeout_has_a_reason_and_retains_retries(self):
+        async def connect(*_args, **_kwargs):
+            await asyncio.Future()
+
+        self.connect.side_effect = connect
+        with (
+            patch.object(self.api, "CONNECTION_TIMEOUT", 0.01),
+            patch.object(
+                self.api.asyncio, "sleep", new=AsyncMock(
+                    side_effect=lambda _: self.receiver.stop()
+                ),
+            ) as sleep,
+            self.assertLogs(self.module_name, level="WARNING") as logs,
+        ):
+            await asyncio.wait_for(self.receiver.async_run(), 1)
+        history = self.receiver.connection_diagnostics()["connection_history"]
+        reason = (
+            "BlueFire Bluetooth connection timed out (limit: 0.01 seconds)"
+        )
+        self.assertEqual(history[0]["reason"], reason)
+        self.assertEqual(history[0]["context"]["exception_message"], reason)
+        self.assertEqual(
+            history[0]["context"]["exception_type"], "TimeoutError"
+        )
+        self.assertEqual(history[0]["retry_delay_s"], self.api.RECONNECT_MIN)
+        self.assertEqual(self.receiver.health.counters["connection_errors"], 1)
+        self.assertIn(reason, logs.output[0])
+        sleep.assert_awaited_once_with(self.api.RECONNECT_MIN)
+        self.client.start_notify.assert_not_awaited()
 
     async def test_connected_session_is_not_limited_by_connect_timeout(self):
         characteristic = SimpleNamespace(

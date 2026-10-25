@@ -166,6 +166,12 @@ explicit subscription/authentication rejection, queue overflow and actual BLE
 loss remain fail-closed. Offline capture analysis remains strict, so it still
 shows the original corruption rather than hiding it behind live recovery.
 
+Checksum-valid J1587 reports are also validated before publishing or updating
+telemetry health. Invalid MIDs, incorrect value widths and truncated PID 194
+fault entries are logged and counted as parse errors; only the bad report is
+discarded, without disconnecting or treating it as an empty fault list. Valid
+reports in the same notification continue to be processed.
+
 The vendor's general guide describes heartbeat-based connection checks, but
 static inspection of Android 11.2.3 places its outgoing command-255 timer in
 the Bluetooth Classic `CommBaseBT2` path, not the EZ BLE path. Windows 12.5.6
@@ -185,6 +191,8 @@ not that the coach is sending measurements. MQTT availability still requires val
 telemetry. **`receiver_before_capture`** and **`receiver`** include live connection
 state, retry delay, last notification time and the latest 20 connection events
 with UTC timestamps and failure reasons.
+Connection establishment has a 30-second deadline; a timeout is reported
+explicitly in the failure reason and retried with the normal backoff.
 
 Both receiver snapshots also include **`connection_history`**, an in-memory
 ring of the last **10 connection attempts**, including the current attempt.

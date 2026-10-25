@@ -558,17 +558,23 @@ class BlueFireReceiver:
                 "Bluetooth scanner"
             )
 
-        async with asyncio.timeout(CONNECTION_TIMEOUT):
-            client = await establish_connection(
-                BleakClientWithServiceCache,
-                device,
-                "BlueFire receiver",
-                ble_device_callback=lambda: (
-                    bluetooth.async_ble_device_from_address(
-                        self.hass, self.address, connectable=True
-                    )
-                ),
-            )
+        try:
+            async with asyncio.timeout(CONNECTION_TIMEOUT):
+                client = await establish_connection(
+                    BleakClientWithServiceCache,
+                    device,
+                    "BlueFire receiver",
+                    ble_device_callback=lambda: (
+                        bluetooth.async_ble_device_from_address(
+                            self.hass, self.address, connectable=True
+                        )
+                    ),
+                )
+        except TimeoutError as err:
+            raise TimeoutError(
+                "BlueFire Bluetooth connection timed out "
+                f"(limit: {CONNECTION_TIMEOUT} seconds)"
+            ) from err
         started = []
         startup_task: asyncio.Task | None = None
         poll_task: asyncio.Task | None = None
@@ -861,9 +867,12 @@ class BlueFireReceiver:
             message = parse_message(
                 body, j1587_extended=self.j1587_extended
             )
-        except ProtocolError as err:
+            if isinstance(message, J1587Report):
+                decoded = decode_report(message)
+        except ValueError as err:
             self._health_error("parse_errors", str(err))
-            raise
+            _LOGGER.warning("BlueFire report rejected: %s", err)
+            raise ProtocolError(str(err)) from err
         if self.health is not None:
             self.health.count("packets")
         if self._startup is not None:
@@ -898,7 +907,7 @@ class BlueFireReceiver:
                 and not self._read_waiter.done()
                 and message.pid == self._read_pid
             ):
-                self._read_reports[message.mid] = decode_report(message)
+                self._read_reports[message.mid] = decoded
         elif isinstance(message, ObdReport):
             self._session_healthy = True
             if self.health is not None:
