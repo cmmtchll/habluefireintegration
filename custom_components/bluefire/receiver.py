@@ -15,7 +15,9 @@ from homeassistant.components import bluetooth
 from homeassistant.exceptions import HomeAssistantError
 
 from .catalog import lookup
-from .const import J1708_POLL_INTERVAL, J1708_POLL_MAX_BACKOFF
+from .const import (
+    J1708_POLL_INTERVAL, J1708_POLL_MAX_BACKOFF, J1708_READ_ACTIONS,
+)
 from .j1587 import decode_report
 from .protocol import (
     AdapterMessage,
@@ -90,9 +92,9 @@ class BlueFireReceiver:
             raise HomeAssistantError(
                 "Enable J1708 startup and wait for a ready BLE connection"
             )
-        if type(pid) is not int or pid not in (96, 194):
+        if type(pid) is not int or pid not in J1708_READ_ACTIONS.values():
             raise HomeAssistantError(
-                "Only fuel and diagnostic reads are allowed"
+                "Only supported J1708 sensor reads are allowed"
             )
         if self._read_waiter is not None:
             raise HomeAssistantError("A J1708 read is already running")
@@ -151,7 +153,7 @@ class BlueFireReceiver:
     async def _async_poll(self) -> None:
         """Poll each minute, backing off each silent PID independently."""
         next_poll = monotonic() + J1708_POLL_INTERVAL
-        retry_at = {96: next_poll, 194: next_poll}
+        retry_at = {pid: next_poll for pid in J1708_READ_ACTIONS.values()}
         backoff = {pid: J1708_POLL_INTERVAL for pid in retry_at}
         while True:
             await asyncio.sleep(max(0, next_poll - monotonic()))
@@ -180,6 +182,9 @@ class BlueFireReceiver:
                 else:
                     backoff[pid] = J1708_POLL_INTERVAL
                 retry_at[pid] = now + backoff[pid]
+            finished = monotonic()
+            if finished >= next_poll:
+                next_poll = finished + J1708_POLL_INTERVAL
 
     async def async_run(self) -> None:
         """Keep a bounded-backoff receiver alive until config-entry unload."""

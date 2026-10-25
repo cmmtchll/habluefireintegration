@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 import logging
 import re
 
+from .const import J1708_READ_ACTIONS
 from .j1587 import ENTITIES
 from .protocol import AdapterMessage, receive_checksum
 
@@ -88,12 +89,12 @@ class J1708Startup:
             self.stage = "disconnected"
 
     async def async_read(self, pid: int, *, restore: bool = False) -> None:
-        """Request only fuel/fault data; never expose arbitrary bus writes."""
+        """Request allowlisted readings, never arbitrary bus writes."""
         if not self.ready:
             raise StartupError("J1708 startup is not ready")
-        if type(pid) is not int or pid not in (96, 194):
+        if type(pid) is not int or pid not in J1708_READ_ACTIONS.values():
             raise StartupError(
-                "Only fuel level and diagnostic reads are allowed"
+                "Only supported J1708 sensor reads are allowed"
             )
         await self._write(pid_subscription(pid, on_request=not restore))
 

@@ -10,6 +10,13 @@ TELEMETRY_TIMEOUT = 60
 J1708_POLL_INTERVAL = 60
 J1708_POLL_MAX_BACKOFF = 900
 J1708_POLL_TIMEOUT = 180
+J1708_READ_ACTIONS = {
+    "read_fuel_level": 96,
+    "read_diagnostic_codes": 194,
+    "read_odometer": 245,
+    "read_engine_hours": 247,
+    "read_total_fuel_used": 250,
+}
 CAPTURE_SECONDS = 20
 MIN_CAPTURE_SECONDS = 5
 MAX_CAPTURE_SECONDS = 60

@@ -49,7 +49,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(StartupError, "not ready"):
             await startup.async_read(96)
         await startup.run()
-        for pid in (96, 194):
+        for pid in (96, 194, 245, 247, 250):
             await startup.async_read(pid)
             self.assertEqual(
                 self.sent[-1],
@@ -63,7 +63,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                 + b"\x00\x02\x03\xe8\x00",
             )
         for pid in (195, True, "96"):
-            with self.assertRaisesRegex(StartupError, "Only fuel"):
+            with self.assertRaisesRegex(StartupError, "Only supported J1708"):
                 await startup.async_read(pid)
         self.assertTrue(startup.ready)
 

@@ -1,10 +1,10 @@
 rules:
   action-setup:
     status: done
-    comment: Inspection, notification capture and explicit on-demand J1708 fuel/fault read actions are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
+    comment: Inspection, notification capture and explicit J1708 fuel/fault/distance/hours/total-fuel read actions are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
   appropriate-polling:
     status: done
-    comment: Opt-in J1708 startup enables sequential one-minute fuel/fault polling in custom_components/bluefire/receiver.py with per-PID backoff capped at 15 minutes, busy-read exclusion and session-bound cancellation. Polled sensors expire at 180 seconds; other sensors retain 60-second expiry. Diagnostic sensors read in-memory counters every 15 seconds.
+    comment: Opt-in J1708 startup enables sequential one-minute polling of PIDs 96, 194, 245, 247 and 250 in custom_components/bluefire/receiver.py with per-PID backoff capped at 15 minutes, busy-read exclusion, no catch-up bursts and session-bound cancellation. Polled sensors expire at 180 seconds; other sensors retain 60-second expiry. Diagnostic sensors read in-memory counters every 15 seconds.
   brands:
     status: done
     comment: The integration provides a local HACS brand icon at custom_components/bluefire/brand/icon.png.
@@ -22,7 +22,7 @@ rules:
     comment: Runtime dependencies and Home Assistant integrations are declared in custom_components/bluefire/manifest.json.
   docs-actions:
     status: done
-    comment: Adapter inspection, notification capture and on-demand fuel/fault read actions and their limits are documented in README.md.
+    comment: Adapter inspection, notification capture and all five J1708 manual-read actions and their limits are documented in README.md.
   docs-triggers:
     status: exempt
     comment: BlueFire provides no integration-specific triggers to document.

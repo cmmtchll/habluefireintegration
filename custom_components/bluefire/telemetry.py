@@ -14,7 +14,9 @@ import re
 from time import monotonic
 
 from .catalog import CATALOG_VERSION, lookup, source_name
-from .const import J1708_POLL_TIMEOUT, TELEMETRY_TIMEOUT
+from .const import (
+    J1708_POLL_TIMEOUT, J1708_READ_ACTIONS, TELEMETRY_TIMEOUT,
+)
 from .faults import DIAGNOSTICS, Diagnostic, decode_diagnostics
 from .j1587 import (
     ENTITIES as J1587_ENTITIES,
@@ -248,7 +250,7 @@ class MqttBridge:
             "expire_after": (
                 J1708_POLL_TIMEOUT
                 if self.protocol == "j1587" and self._j1708_polling
-                and signal.spn in (96, 194)
+                and signal.spn in J1708_READ_ACTIONS.values()
                 else TELEMETRY_TIMEOUT
             ),
             "device": {

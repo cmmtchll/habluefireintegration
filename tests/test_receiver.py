@@ -52,10 +52,27 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
 
         sleeps = await self.run_poll_cycles(3, read)
         self.assertEqual(reads, [
-            (60, 96), (65, 194), (120, 96), (125, 194),
-            (180, 96), (185, 194),
+            (60, 96), (65, 194), (70, 245), (75, 247), (80, 250),
+            (120, 96), (125, 194), (130, 245), (135, 247), (140, 250),
+            (180, 96), (185, 194), (190, 245), (195, 247), (200, 250),
         ])
-        self.assertEqual(sleeps, [60, 50, 50, 50])
+        self.assertEqual(sleeps, [60, 35, 35, 35])
+
+    async def test_slow_poll_round_does_not_burst_to_catch_up(self):
+        reads = []
+
+        def read(pid, clock):
+            reads.append((clock[0], pid))
+            clock[0] += 20
+
+        sleeps = await self.run_poll_cycles(2, read)
+        self.assertEqual(sleeps, [60, 60, 60])
+        self.assertEqual(reads[:5], [
+            (60, 96), (80, 194), (100, 245), (120, 247), (140, 250),
+        ])
+        self.assertEqual(reads[5:], [
+            (220, 96), (240, 194), (260, 245), (280, 247), (300, 250),
+        ])
 
     async def test_poll_backoff_is_per_pid_capped_and_resets_on_success(self):
         reads = []
@@ -73,10 +90,11 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             [time for time, pid in reads if pid == 96],
             [60, 180, 420, 900, 1800, 1860],
         )
-        self.assertEqual(
-            [time for time, pid in reads if pid == 194],
-            list(range(60, 1861, 60)),
-        )
+        for successful_pid in (194, 245, 247, 250):
+            self.assertEqual(
+                [time for time, pid in reads if pid == successful_pid],
+                list(range(60, 1861, 60)),
+            )
         self.assertEqual(self.receiver.health.counters["connection_errors"], 4)
         self.assertIn("retrying in 900 seconds", logs.output[-1])
 
@@ -92,7 +110,9 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             before_cycle=before_cycle,
         )
         waiter.cancel()
-        self.assertEqual(reads, [(120, 96), (120, 194)])
+        self.assertEqual(reads, [
+            (120, 96), (120, 194), (120, 245), (120, 247), (120, 250),
+        ])
 
     async def test_polling_stops_if_connection_is_not_ready(self):
         for state in ("closed", "paused", "missing", "not_ready", "reconnect"):
@@ -158,19 +178,23 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.async_process_j1587.side_effect = None
         completed = asyncio.Event()
         original_write = self.client.write_gatt_char.side_effect
+        report_bodies = {
+            96: bytes.fromhex("9a 80 60 01 64"),
+            194: bytes.fromhex("9a 80 c2 00"),
+            245: bytes.fromhex("9a 80 f5 04 64 00 00 00"),
+            247: bytes.fromhex("9a 80 f7 04 64 00 00 00"),
+            250: bytes.fromhex("9a 80 fa 04 64 00 00 00"),
+        }
 
         async def write(characteristic, packet, *, response):
             await original_write(characteristic, packet, response=response)
             body = packet[2:-1]
-            if body == bytes.fromhex("9b 00 00 60 01 01 00 00 00"):
+            if body[0] == 155 and body[4] == 1:
+                pid = int.from_bytes(body[2:4], "big")
                 self.receiver._notification_received(
-                    None, self.packet(bytes.fromhex("9a 80 60 01 64"))
+                    None, self.packet(report_bodies[pid])
                 )
-            elif body == bytes.fromhex("9b 00 00 c2 01 01 00 00 00"):
-                self.receiver._notification_received(
-                    None, self.packet(bytes.fromhex("9a 80 c2 00"))
-                )
-            elif body == bytes.fromhex("9b 00 00 c2 00 02 03 e8 00"):
+            elif body == bytes.fromhex("9b 00 00 fa 00 02 03 e8 00"):
                 if any(b[4] == 1 for b in self.startup_bodies if b[0] == 155):
                     completed.set()
 
@@ -186,11 +210,12 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await task
-        self.assertEqual(self.startup_bodies[-4:], [
-            bytes.fromhex("9b 00 00 60 01 01 00 00 00"),
-            bytes.fromhex("9b 00 00 60 00 02 03 e8 00"),
-            bytes.fromhex("9b 00 00 c2 01 01 00 00 00"),
-            bytes.fromhex("9b 00 00 c2 00 02 03 e8 00"),
+        self.assertEqual(self.startup_bodies[-10:], [
+            b"\x9b\x00" + pid.to_bytes(2, "big") + mode
+            for pid in (96, 194, 245, 247, 250)
+            for mode in (
+                b"\x01\x01\x00\x00\x00", b"\x00\x02\x03\xe8\x00",
+            )
         ])
         reports = [
             call.args[0] for call in
@@ -200,6 +225,11 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             r.pid == 96 and r.data == b"\x64" for r in reports
         ))
         self.assertTrue(any(r.pid == 194 and r.data == b"" for r in reports))
+        for pid in (245, 247, 250):
+            self.assertTrue(any(
+                r.pid == pid and r.data == bytes.fromhex("64 00 00 00")
+                for r in reports
+            ))
 
     def configure_read(self):
         self.receiver.j1708_startup = True
@@ -268,9 +298,53 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             194, restore=True
         )
 
+    async def test_counter_reads_reuse_mqtt_identities_units_and_nulls(self):
+        self.configure_read()
+        published = []
+
+        async def publish(topic, payload, retain):
+            if payload not in ("online", "offline"):
+                published.append((topic, json.loads(payload)))
+
+        self.receiver.bridge = MqttBridge(
+            "coach", publish, j1708_polling=True
+        )
+        for pid, unit, value in (
+            (245, "km", 16.09344), (247, "h", 5), (250, "L", 47.317647),
+        ):
+            for data, expected in (
+                (bytes.fromhex("64 00 00 00"), value), (b"\xff" * 4, None),
+            ):
+                self.read_started.clear()
+                task = asyncio.create_task(self.receiver.async_read(pid))
+                await self.read_started.wait()
+                await self.receiver._async_process_body(
+                    bytes((154, 128, pid, 4)) + data
+                )
+                result = await task
+                self.assertEqual(result["pid"], pid)
+                self.assertEqual(
+                    result["reports"][0]["signals"][0]["value"], expected
+                )
+                states = [
+                    payload for topic, payload in published
+                    if topic == f"vehicle/coach/j1587/128/pid/{pid}"
+                ]
+                self.assertEqual(states[-1]["value"], expected)
+                self.assertEqual(states[-1]["unit"], unit)
+            config, = [
+                payload for topic, payload in published
+                if topic == (
+                    "homeassistant/sensor/"
+                    f"bluefire_coach_j1587_128_{pid}/config"
+                )
+            ]
+            self.assertEqual(config["state_class"], "total_increasing")
+            self.assertEqual(config["expire_after"], 180)
+
     async def test_read_timeout_is_not_an_empty_or_cached_fault_list(self):
         self.configure_read()
-        for pid in (96, 194):
+        for pid in (96, 194, 245, 247, 250):
             with self.assertRaisesRegex(
                 self.home_assistant_error, "No J1708 PID",
             ):
@@ -295,7 +369,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.receiver._startup.ready = True
         for pid in (195, True, "96"):
             with self.assertRaisesRegex(
-                self.home_assistant_error, "Only fuel",
+                self.home_assistant_error, "Only supported J1708",
             ):
                 await self.receiver.async_read(pid)
         self.receiver._startup.async_read.assert_not_awaited()

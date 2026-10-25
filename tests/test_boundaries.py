@@ -127,6 +127,8 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
     async def test_vehicle_read_actions_delegate_and_release_busy_flag(self):
         for service, pid in (
             ("read_fuel_level", 96), ("read_diagnostic_codes", 194),
+            ("read_odometer", 245), ("read_engine_hours", 247),
+            ("read_total_fuel_used", 250),
         ):
             result = await self.services[service](SimpleNamespace(
                 service=service, data={"entry_id": "entry"},
@@ -136,6 +138,41 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.runtime.inspecting)
         self.receiver.async_pause.assert_not_awaited()
         self.receiver.async_resume.assert_not_called()
+
+    def test_read_action_metadata_matches_registered_actions(self):
+        import json
+        from pathlib import Path
+
+        import yaml
+
+        from custom_components.bluefire.const import J1708_READ_ACTIONS
+
+        self.assertEqual(J1708_READ_ACTIONS, {
+            "read_fuel_level": 96, "read_diagnostic_codes": 194,
+            "read_odometer": 245, "read_engine_hours": 247,
+            "read_total_fuel_used": 250,
+        })
+        folder = (
+            Path(__file__).resolve().parents[1]
+            / "custom_components" / "bluefire"
+        )
+        definitions = yaml.safe_load(
+            (folder / "services.yaml").read_text(encoding="utf-8")
+        )
+        strings = json.loads(
+            (folder / "strings.json").read_text(encoding="utf-8")
+        )
+        english = json.loads(
+            (folder / "translations" / "en.json").read_text(encoding="utf-8")
+        )
+        for action in J1708_READ_ACTIONS:
+            self.assertIn(action, self.services)
+            self.assertTrue(
+                definitions[action]["fields"]["entry_id"]["required"]
+            )
+            self.assertEqual(
+                strings["services"][action], english["services"][action]
+            )
 
     async def test_vehicle_reads_surface_errors_and_reject_busy_entries(self):
         action = self.services["read_fuel_level"]

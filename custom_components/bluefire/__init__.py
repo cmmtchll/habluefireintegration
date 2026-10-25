@@ -16,6 +16,7 @@ from .const import (
     CONF_J1587_EXTENDED,
     CONF_J1708_STARTUP,
     DOMAIN,
+    J1708_READ_ACTIONS,
     MQTT_PUBLISH_TIMEOUT,
     STATUS_RECEIVER_ENABLED,
 )
@@ -124,7 +125,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         runtime.inspecting = True
         try:
             return await runtime.receiver.async_read(
-                96 if call.service == "read_fuel_level" else 194
+                J1708_READ_ACTIONS[call.service]
             )
         except HomeAssistantError as err:
             runtime.health.error("connection_errors", str(err))
@@ -132,7 +133,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         finally:
             runtime.inspecting = False
 
-    for service in ("read_fuel_level", "read_diagnostic_codes"):
+    for service in J1708_READ_ACTIONS:
         hass.services.async_register(
             DOMAIN, service, read_vehicle,
             schema=vol.Schema({vol.Required("entry_id"): cv.string}),

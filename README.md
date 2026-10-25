@@ -44,8 +44,9 @@ No Android gateway is required or planned.
   discovery. Offline analysis also accepts already-reassembled diagnostic reports.
 - J1708/J1587 decoding of 31 numeric PIDs and PID 194 diagnostic entries,
   with a checksummed-datagram parser and separate MQTT/MID/PID discovery.
-- One-minute J1708 fuel-level and diagnostic-code polling after opt-in startup,
-  plus on-demand refresh actions, without clearing faults.
+- One-minute J1708 fuel-level, diagnostic-code, odometer, engine-hours and
+  total-fuel-used polling after opt-in startup, plus manual refresh actions,
+  without clearing faults.
 - Hardware-unverified offline receive framing and PGN/J1587/OBD report analysis
   based on local inspection of Android 9.7.5/11.2.3 and Windows 12.5.6 packages;
   the offline analyzer performs no adapter writes.
@@ -108,9 +109,9 @@ subscriptions and starts reports. It monitors all 31 supported numeric PIDs
 plus diagnostic PID 194 across reported MIDs at a 1000 ms interval. Vendor
 subscription MID 0 means any MID; actual report identities remain unchanged.
 These baseline subscriptions use passive monitoring. After startup is ready,
-fuel PID 96 and diagnostic PID 194 also receive automatic one-minute active
-read requests as described below. Other PIDs that the ECU does not broadcast
-may remain absent.
+fuel PID 96, diagnostic PID 194, distance PID 245, engine hours PID 247 and
+total fuel used PID 250 also receive automatic one-minute active read requests
+as described below. Other PIDs that the ECU does not broadcast may remain absent.
 
 There are 32 passive PID subscriptions in total, all using wildcard MID 0.
 Compared with the original 16 subscriptions, the expanded set adds throttle
@@ -245,14 +246,15 @@ If MQTT is not configured, configure its broker first; BlueFire setup will retry
 once HA's MQTT client becomes available. Installing BlueFire does not create a
 broker or establish hardware compatibility.
 
-### Fuel level and diagnostic codes: one-minute polling and manual reads
+### One-minute polling and manual reads
 
 With **Enable J1708 startup (unsecured EZ adapters)** enabled and live startup
-at **ready**, the receiver automatically requests fuel level and diagnostic
-codes once per minute. The first poll is one minute after startup completes.
-Fuel and fault requests run sequentially, each collecting reports for five
-seconds before restoring passive monitoring. Collection time does not shift
-the minute cadence.
+at **ready**, the receiver automatically requests the five readings below once
+per minute. The first poll is one minute after startup completes. Requests run
+sequentially, each collecting reports for five seconds before restoring passive
+monitoring. Normal collection time does not shift the minute cadence. If a slow
+round exceeds a minute, the next round waits another minute instead of sending
+catch-up bursts.
 
 Failed requests back off independently per PID: 2, 4, 8, then at most 15 minutes
 between attempts. A successful request restores that PID's one-minute cadence.
@@ -263,13 +265,16 @@ the live session and cancels polling; reconnect starts a new session and schedul
 Entry unload/shutdown cancels polling as well. Startup-disabled entries remain
 receive-only and do not start a polling task.
 
-For an immediate refresh, run either action in **Developer tools → Actions**,
+For an immediate refresh, run any action below in **Developer tools → Actions**,
 selecting the BlueFire config entry:
 
 | Action | Request | Result |
 | --- | --- | --- |
 | `bluefire.read_fuel_level` | J1587 PID 96 | Fuel level in percent per responding MID |
 | `bluefire.read_diagnostic_codes` | J1587 PID 194 | Reported active/inactive faults per responding MID |
+| `bluefire.read_odometer` | J1587 PID 245 | Total vehicle distance in km per responding MID |
+| `bluefire.read_engine_hours` | J1587 PID 247 | Total engine hours in h per responding MID |
+| `bluefire.read_total_fuel_used` | J1587 PID 250 | Total fuel used in L per responding MID, not fuel remaining |
 
 These explicit actions send a one-shot vehicle-bus read request, collect reports
 for five seconds and restore the normal passive subscription, using the same
@@ -279,10 +284,10 @@ forces a BLE reconnect before accepting another read.
 
 Matching reports update the existing MQTT fuel/diagnostic sensors and are also
 returned in the action response: `pid` plus `reports`, sorted by `mid`. Each
-fuel report contains `signals` with a percent `value`; each diagnostic report
+numeric report contains `signals` with a `value` and unit; each diagnostic report
 contains `diagnostics`, including the fault list, active flags, PID/SID, FMI,
 occurrence counts when supplied and available descriptions. Multiple reports
-from one MID keep its latest report. An all-ones fuel value stays null.
+from one MID keep its latest report. An all-ones numeric value stays null.
 There is no tank-capacity configuration or litres/gallons-remaining calculation.
 
 No response is an error, **not zero fuel or no faults**. Only an actual empty
@@ -302,19 +307,26 @@ Restoration uses the existing `OnRequest=0`, `OnInterval=2`, 1000 ms monitor.
 No vendor binaries or implementation are distributed. Active reads still
 require hardware confirmation; synthetic tests are not vehicle commissioning.
 
-With polling enabled, J1587 fuel and fault sensors expire after **180 seconds**
-without their own reports, and J1587 protocol availability uses the same grace
-period. Other J1587 sensors and all J1939 sensors retain their 60-second expiry.
-Disconnect still withdraws availability immediately; the longer expiry does not
-replay cached values or claim the controller responded to a failed poll.
+With polling enabled, all five polled J1587 sensor types expire after
+**180 seconds** without their own reports, and J1587 protocol availability uses
+the same grace period. Other J1587 sensors and all J1939 sensors retain their
+60-second expiry. Existing MQTT identities and numeric decoding are reused:
+distance, hours and total fuel remain `total_increasing` counters in km, h and L.
+Disconnect still withdraws availability immediately; the longer expiry does
+not replay cached values or claim the controller responded to a failed poll.
 
 There is no universal list of request-only measurements: broadcast behavior is
 controller-specific. The inspected vendor client has a J1708 odometer-request
 setting (PID 245), so distance is a candidate if absent from passive reports.
 Engine hours (PID 247) and total fuel used (PID 250) are also supported decoders
-whose availability needs checking on the actual controller, not assuming they
-require requests. This implementation polls only PIDs 96 and 194; it does not
-actively retrieve VINs, proprietary values or J1939 diagnostic reports.
+included in the poll list, not confirmed request-only parameters on this ECU.
+**This is a selected five-PID poll list, not a complete inventory of requestable
+or request-only parameters.** The integration decodes 31 numeric J1587 PIDs plus
+diagnostic PID 194, but decoder support does not establish whether this vehicle
+broadcasts or answers requests for each parameter. Unsupported PIDs remain
+raw-only. This implementation does not actively retrieve VINs, proprietary
+values or J1939 diagnostic reports. Hardware responses are still needed to
+establish the controller-specific list.
 
 ### Adapter inspection
 
@@ -477,7 +489,7 @@ Null/global source addresses 254/255 do not create transmitter entities.
 - A watchdog checks every 15 seconds and withdraws device availability after
   60 seconds without a frame (at the next check). Each MQTT sensor independently
   expires 60 seconds after its last update, even if another SPN keeps arriving.
-  With J1708 polling enabled, J1587 protocol availability and fuel/fault entity
+  With J1708 polling enabled, J1587 protocol availability and polled entity
   expiry instead use 180 seconds, as described in the polling section above.
   Device availability alone does not establish measurement freshness.
 - The integration uses HA's shared MQTT client and **cannot set a per-device
@@ -816,7 +828,7 @@ Compare these candidate UUIDs with the explicit `bluefire.inspect_adapter`
 inventory when available. They may guide internal listener development, but are
 not proof of hardware compatibility. Device names and manufacturer ID `FFFF`
 alone are not reliable identity checks. Keep reception limited to telemetry.
-Only the allowlisted J1708 fuel/fault reads above (automatic or manual) request
+Only the allowlisted J1708 sensor reads above (automatic or manual) request
 vehicle data;
 vehicle-control and fault-clearing commands remain unsupported.
 
@@ -940,7 +952,7 @@ Important implementation boundaries:
   incompatible/authentication failures explicitly, use bounded response
   waits, rebuild session subscriptions on reconnect and never send fault-clear,
   reset, firmware-flash or arbitrary vehicle-transmit commands. Explicit
-  on-demand reads above add only the allowlisted fuel/fault retrieval mode.
+  active reads above add only the allowlisted sensor retrieval mode.
 
 The next hardware gate is a firmware/security-confirmed, bidirectional startup
 trace from the implemented sequence, first obtaining a valid version response,
