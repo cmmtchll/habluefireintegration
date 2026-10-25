@@ -1,7 +1,7 @@
 rules:
   action-setup:
     status: done
-    comment: The read-only inspection and notification-capture services are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
+    comment: Inspection, notification capture and explicit on-demand J1708 fuel/fault read actions are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
   appropriate-polling:
     status: exempt
     comment: The integration does not poll the adapter; its timer only expires stale MQTT availability, and diagnostic sensors in custom_components/bluefire/sensor.py read in-memory counters every 15 seconds.
@@ -22,7 +22,7 @@ rules:
     comment: Runtime dependencies and Home Assistant integrations are declared in custom_components/bluefire/manifest.json.
   docs-actions:
     status: done
-    comment: The read-only adapter inspection action and its limits are documented in README.md.
+    comment: Adapter inspection, notification capture and on-demand fuel/fault read actions and their limits are documented in README.md.
   docs-triggers:
     status: exempt
     comment: BlueFire provides no integration-specific triggers to document.

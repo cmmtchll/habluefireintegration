@@ -19,6 +19,162 @@ def module(name, **attributes):
 
 
 class ReceiverTests(unittest.IsolatedAsyncioTestCase):
+    def configure_read(self):
+        self.receiver.j1708_startup = True
+        self.receiver.j1587_extended = True
+        self.read_started = asyncio.Event()
+
+        async def read(pid, *, restore=False):
+            if not restore:
+                self.read_started.set()
+
+        self.receiver._startup = SimpleNamespace(
+            ready=True, async_read=AsyncMock(side_effect=read),
+            disconnected=Mock(),
+        )
+        timer = patch.object(self.api, "READ_WINDOW_SECONDS", 0.02)
+        timer.start()
+        self.addCleanup(timer.stop)
+
+    async def test_fuel_read_collects_sources_and_updates_existing_mqtt(self):
+        self.configure_read()
+        published = []
+
+        async def publish(topic, payload, retain):
+            if payload not in ("online", "offline"):
+                published.append((topic, json.loads(payload)))
+
+        self.receiver.bridge = MqttBridge("coach", publish)
+        task = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        for body in (
+            "9a 80 60 01 64", "9a 82 60 01 96",
+            "9a 80 60 01 78", "9a 83 60 01 ff",
+            "9a 80 be 02 34 12",
+        ):
+            await self.receiver._async_process_body(bytes.fromhex(body))
+        result = await task
+        self.assertEqual(result["pid"], 96)
+        self.assertEqual(
+            [(r["mid"], r["signals"][0]["value"])
+             for r in result["reports"]],
+            [(128, 60), (130, 75), (131, None)],
+        )
+        self.assertTrue(any(
+            topic.endswith("/128/pid/96") and data["value"] == 60
+            for topic, data in published
+        ))
+        self.receiver._startup.async_read.assert_awaited_with(96, restore=True)
+        self.assertIsNone(self.receiver._read_waiter)
+
+    async def test_diagnostic_read_distinguishes_faults_and_empty_report(self):
+        self.configure_read()
+        task = asyncio.create_task(self.receiver.async_read(194))
+        await self.read_started.wait()
+        await self.receiver._async_process_body(
+            bytes.fromhex("9a 80 c2 02 64 23")
+        )
+        await self.receiver._async_process_body(
+            bytes.fromhex("9a 82 c2 00")
+        )
+        result = await task
+        engine, transmission = result["reports"]
+        self.assertEqual(engine["diagnostics"]["faults"][0]["code"], 100)
+        self.assertEqual(transmission["diagnostics"]["faults"], [])
+        self.assertEqual(self.bridge.async_process_j1587.await_count, 2)
+        self.receiver._startup.async_read.assert_awaited_with(
+            194, restore=True
+        )
+
+    async def test_read_timeout_is_not_an_empty_or_cached_fault_list(self):
+        self.configure_read()
+        for pid in (96, 194):
+            with self.assertRaisesRegex(
+                self.home_assistant_error, "No J1708 PID",
+            ):
+                await self.receiver.async_read(pid)
+            self.receiver._startup.async_read.assert_awaited_with(
+                pid, restore=True
+            )
+            self.assertIsNone(self.receiver._read_waiter)
+
+    async def test_reads_require_ready_enabled_session_and_allowed_pid(self):
+        with self.assertRaisesRegex(self.home_assistant_error, "Enable J1708"):
+            await self.receiver.async_read(96)
+        self.configure_read()
+        for attribute in ("_closed", "_paused"):
+            setattr(self.receiver, attribute, True)
+            with self.assertRaises(self.home_assistant_error):
+                await self.receiver.async_read(96)
+            setattr(self.receiver, attribute, False)
+        self.receiver._startup.ready = False
+        with self.assertRaises(self.home_assistant_error):
+            await self.receiver.async_read(96)
+        self.receiver._startup.ready = True
+        for pid in (195, True, "96"):
+            with self.assertRaisesRegex(
+                self.home_assistant_error, "Only fuel",
+            ):
+                await self.receiver.async_read(pid)
+        self.receiver._startup.async_read.assert_not_awaited()
+
+    async def test_concurrent_read_rejected_and_cancellation_restores(self):
+        self.configure_read()
+        task = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        with self.assertRaisesRegex(self.home_assistant_error, "already"):
+            await self.receiver.async_read(194)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.receiver._startup.async_read.assert_awaited_with(96, restore=True)
+        self.assertIsNone(self.receiver._read_waiter)
+
+    async def test_read_write_and_restore_failures_are_explicit(self):
+        self.configure_read()
+        self.receiver._startup.async_read.side_effect = [
+            self.bleak_error("write failed"), None,
+        ]
+        with self.assertRaisesRegex(self.home_assistant_error, "write failed"):
+            await self.receiver.async_read(96)
+        self.receiver._startup.async_read.side_effect = [
+            None, self.bleak_error("restore failed"),
+        ]
+        with self.assertRaisesRegex(
+            self.home_assistant_error, "Unable to restore passive",
+        ):
+            await self.receiver.async_read(96)
+        self.assertTrue(self.receiver._reconnect_event.is_set())
+        self.assertIsNone(self.receiver._read_waiter)
+        with self.assertRaisesRegex(self.home_assistant_error, "Enable J1708"):
+            await self.receiver.async_read(96)
+
+    async def test_disconnect_aborts_read_without_old_session_writer(self):
+        self.configure_read()
+        task = asyncio.create_task(self.receiver.async_read(194))
+        await self.read_started.wait()
+        self.receiver._startup.ready = False
+        # Exercise the real session-finally disconnect path.
+        self.client.services = []
+        with self.assertRaises(self.home_assistant_error):
+            await self.receiver._async_receive_session()
+        with self.assertRaisesRegex(self.home_assistant_error, "disconnected"):
+            await task
+        self.receiver._startup.async_read.assert_awaited_once_with(194)
+        self.assertIsNone(self.receiver._read_waiter)
+
+    async def test_restore_failure_wakes_live_session_for_reconnection(self):
+        self.configure_startup_session()
+        ready = asyncio.Event()
+        self.bridge.async_process_j1587.side_effect = lambda _: ready.set()
+        task = asyncio.create_task(self.receiver._async_receive_session())
+        await asyncio.wait_for(ready.wait(), 1)
+        self.receiver._reconnect_event.set()
+        with self.assertRaisesRegex(self.bleak_error, "restore failed"):
+            await asyncio.wait_for(task, 1)
+        self.assertFalse(self.receiver._startup.ready)
+        self.client.disconnect.assert_awaited_once()
+
     def setUp(self):
         self.bridge = SimpleNamespace(
             async_disconnected=AsyncMock(),

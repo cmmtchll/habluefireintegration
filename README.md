@@ -44,6 +44,8 @@ No Android gateway is required or planned.
   discovery. Offline analysis also accepts already-reassembled diagnostic reports.
 - J1708/J1587 decoding of 31 numeric PIDs and PID 194 diagnostic entries,
   with a checksummed-datagram parser and separate MQTT/MID/PID discovery.
+- Explicit on-demand J1708 fuel-level and diagnostic-code read actions,
+  updating the existing MQTT sensors without clearing faults.
 - Hardware-unverified offline receive framing and PGN/J1587/OBD report analysis
   based on local inspection of Android 9.7.5/11.2.3 and Windows 12.5.6 packages;
   the offline analyzer performs no adapter writes.
@@ -241,7 +243,50 @@ If MQTT is not configured, configure its broker first; BlueFire setup will retry
 once HA's MQTT client becomes available. Installing BlueFire does not create a
 broker or establish hardware compatibility.
 
-### When you can power the adapter
+### On-demand fuel level and diagnostic codes
+
+With **Enable J1708 startup (unsecured EZ adapters)** enabled and live startup
+at **ready**, run either action in **Developer tools → Actions**, selecting
+the BlueFire config entry:
+
+| Action | Request | Result |
+| --- | --- | --- |
+| `bluefire.read_fuel_level` | J1587 PID 96 | Fuel level in percent per responding MID |
+| `bluefire.read_diagnostic_codes` | J1587 PID 194 | Reported active/inactive faults per responding MID |
+
+These explicit actions send a one-shot vehicle-bus read request, collect reports
+for five seconds and restore the normal passive subscription. They do not run
+automatically at startup or repeat requests on an interval. Inspection, capture
+and other reads cannot run concurrently with a read. Disconnects and write
+failures surface as action errors; failed restoration forces a BLE reconnect
+before accepting another read.
+
+Matching reports update the existing MQTT fuel/diagnostic sensors and are also
+returned in the action response: `pid` plus `reports`, sorted by `mid`. Each
+fuel report contains `signals` with a percent `value`; each diagnostic report
+contains `diagnostics`, including the fault list, active flags, PID/SID, FMI,
+occurrence counts when supplied and available descriptions. Multiple reports
+from one MID keep its latest report. An all-ones fuel value stays null.
+There is no tank-capacity configuration or litres/gallons-remaining calculation.
+
+No response is an error, **not zero fuel or no faults**. Only an actual empty
+PID 194 report represents an empty fault list for that controller. Not all
+controllers respond; these actions do not prove vehicle-wide absence of faults.
+PIDData has no request transaction identifier: reports observed during the
+window can include concurrent broadcasts, not only replies caused by the read.
+Requests are J1708-only; existing passive J1939 fuel and fault decoding is
+unchanged. No fault clearing, adapter settings, security changes or arbitrary
+vehicle-control commands are exposed.
+
+The wire layout was verified by local static inspection of the supplied
+Windows 12.5.6 package (SHA-256 in the protocol investigation below):
+`CommData.AddPID` writes command 155, wildcard MID 0, a big-endian 16-bit PID,
+`OnRequest=1`, `RequestTypes.OnceOnly=1`, zero interval and a trailing zero.
+Restoration uses the existing `OnRequest=0`, `OnInterval=2`, 1000 ms monitor.
+No vendor binaries or implementation are distributed. Active reads still
+require hardware confirmation; synthetic tests are not vehicle commissioning.
+
+### Adapter inspection
 
 Stop other applications using the adapter. In **Developer tools → Actions**, run
 `bluefire.inspect_adapter`, selecting the BlueFire config entry. The response
@@ -519,7 +564,9 @@ These are controller reports, not a diagnosis or a vehicle safety signal.
 J1587 PID 194 entries are decoded as described below; Allison selector-code and
 other manufacturer-specific on-wire encodings remain opaque. The reference
 lookup does not invent translations or automatically select controller profiles.
-No fault clearing or diagnostic requests are transmitted.
+Passive fault reception never transmits fault clearing or diagnostic requests.
+The explicit `bluefire.read_diagnostic_codes` action described above can
+request J1708 PID 194; it never clears faults.
 Live BLE reception is provisional and uses only the documented modern EZ
 service. Original BLE UUID variants and secured-adapter authentication
 are not implemented.
@@ -549,7 +596,8 @@ same datagram. Broker delivery itself is not transactional.
 Datagram boundaries must be supplied by the driver/capture. There is no
 checksum-scanning resynchronization or serial idle-time inference, and no
 support for larger stationary messages, PID 192 multisection assembly,
-transmission/arbitration, diagnostic requests or clearing. Non-J1587 J1708
+transmission/arbitration or clearing. Diagnostic requests are restricted to the
+explicit J1708 read action above. Non-J1587 J1708
 MIDs below 128 remain opaque in offline analysis; the MQTT telemetry sink
 rejects them rather than inventing PID meanings.
 
@@ -733,8 +781,9 @@ The original BLE UUID candidates observed in `CommBaseBLE` are:
 Compare these candidate UUIDs with the explicit `bluefire.inspect_adapter`
 inventory when available. They may guide internal listener development, but are
 not proof of hardware compatibility. Device names and manufacturer ID `FFFF`
-alone are not reliable identity checks. Keep reception limited to telemetry;
-do not send vehicle-control or diagnostic commands.
+alone are not reliable identity checks. Keep reception limited to telemetry.
+Only the explicit, allowlisted J1708 actions above request vehicle data;
+vehicle-control and fault-clearing commands remain unsupported.
 
 **Important contract boundary:** a PGN report is not necessarily an original
 eight-byte CAN frame. It has no explicit full arbitration ID, can contain
@@ -855,7 +904,8 @@ Important implementation boundaries:
   A telemetry implementation should preserve existing settings, reject
   incompatible/authentication failures explicitly, use bounded response
   waits, rebuild session subscriptions on reconnect and never send fault-clear,
-  reset, firmware-flash or arbitrary vehicle-transmit commands.
+  reset, firmware-flash or arbitrary vehicle-transmit commands. Explicit
+  on-demand reads above add only the allowlisted fuel/fault retrieval mode.
 
 The next hardware gate is a firmware/security-confirmed, bidirectional startup
 trace from the implemented sequence, first obtaining a valid version response,

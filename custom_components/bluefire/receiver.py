@@ -14,6 +14,7 @@ from homeassistant.components import bluetooth
 from homeassistant.exceptions import HomeAssistantError
 
 from .catalog import lookup
+from .j1587 import decode_report
 from .protocol import (
     AdapterMessage,
     J1587Report,
@@ -42,6 +43,7 @@ CONNECTION_TIMEOUT = 30
 BLE_OPERATION_TIMEOUT = 10
 BLE_CLEANUP_TIMEOUT = 5
 SESSION_CLOSE_TIMEOUT = 20
+READ_WINDOW_SECONDS = 5
 
 
 class BlueFireReceiver:
@@ -61,6 +63,7 @@ class BlueFireReceiver:
         self._decoder = ReceiveDecoder()
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=128)
         self._overflow = asyncio.Event()
+        self._reconnect_event = asyncio.Event()
         self._pause_event = asyncio.Event()
         self._resume_event = asyncio.Event()
         self._resume_event.set()
@@ -69,7 +72,71 @@ class BlueFireReceiver:
         self._paused = False
         self._closed = False
         self._session_task: asyncio.Task | None = None
+        self._read_waiter: asyncio.Future[None] | None = None
+        self._read_pid: int | None = None
+        self._read_reports: dict[int, dict] = {}
         self.services: list[dict] = []
+
+    async def async_read(self, pid: int) -> dict:
+        """Collect fresh reports during a bounded, explicit J1708 request."""
+        startup = self._startup
+        if (
+            not self.j1708_startup or startup is None or not startup.ready
+            or self._closed or self._paused or self._overflow.is_set()
+            or self._reconnect_event.is_set()
+        ):
+            raise HomeAssistantError(
+                "Enable J1708 startup and wait for a ready BLE connection"
+            )
+        if type(pid) is not int or pid not in (96, 194):
+            raise HomeAssistantError(
+                "Only fuel and diagnostic reads are allowed"
+            )
+        if self._read_waiter is not None:
+            raise HomeAssistantError("A J1708 read is already running")
+        waiter: asyncio.Future[None] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._read_waiter = waiter
+        self._read_pid = pid
+        self._read_reports = {}
+        try:
+            await startup.async_read(pid)
+            try:
+                async with asyncio.timeout(READ_WINDOW_SECONDS):
+                    await asyncio.shield(waiter)
+            except TimeoutError:
+                if not self._read_reports:
+                    raise HomeAssistantError(
+                        f"No J1708 PID {pid} report received "
+                        "during read window"
+                    ) from None
+            return {
+                "pid": pid,
+                "reports": [
+                    {"mid": mid, **report}
+                    for mid, report in sorted(self._read_reports.items())
+                ],
+            }
+        except (StartupError, BleakError, OSError, TimeoutError) as err:
+            raise HomeAssistantError(f"J1708 read failed: {err}") from err
+        finally:
+            waiter.cancel()
+            if waiter.done() and not waiter.cancelled():
+                waiter.exception()
+            try:
+                if startup.ready and not self._closed and not self._paused:
+                    await startup.async_read(pid, restore=True)
+            except (StartupError, BleakError, OSError, TimeoutError) as err:
+                self._health_error("connection_errors", str(err))
+                self._reconnect_event.set()
+                raise HomeAssistantError(
+                    f"Unable to restore passive J1708 monitoring: {err}"
+                ) from err
+            finally:
+                self._read_waiter = None
+                self._read_pid = None
+                self._read_reports = {}
 
     def startup_diagnostics(self) -> dict:
         """Expose startup progress without security data or raw payloads."""
@@ -252,6 +319,7 @@ class BlueFireReceiver:
 
             self._queue = asyncio.Queue(maxsize=128)
             self._overflow.clear()
+            self._reconnect_event.clear()
             self._pause_event.clear()
             for uuid in notify_uuids:
                 async with asyncio.timeout(BLE_OPERATION_TIMEOUT):
@@ -276,11 +344,14 @@ class BlueFireReceiver:
                     )
                 if self._overflow.is_set():
                     raise BleakError("BlueFire receive queue overflow")
+                if self._reconnect_event.is_set():
+                    raise BleakError("Passive J1708 monitoring restore failed")
                 get_chunk = asyncio.create_task(self._queue.get())
                 overflow = asyncio.create_task(self._overflow.wait())
                 paused = asyncio.create_task(self._pause_event.wait())
+                reconnect = asyncio.create_task(self._reconnect_event.wait())
                 try:
-                    waiting = {get_chunk, overflow, paused}
+                    waiting = {get_chunk, overflow, paused, reconnect}
                     if startup_task is not None and not startup_task.done():
                         waiting.add(startup_task)
                     done, pending = await asyncio.wait(
@@ -297,12 +368,17 @@ class BlueFireReceiver:
                         continue
                     if overflow in done and overflow.result():
                         raise BleakError("BlueFire receive queue overflow")
+                    if reconnect in done and reconnect.result():
+                        raise BleakError(
+                            "Passive J1708 monitoring restore failed"
+                        )
                 finally:
-                    for task in (get_chunk, overflow, paused):
+                    for task in (get_chunk, overflow, paused, reconnect):
                         if not task.done():
                             task.cancel()
                     await asyncio.gather(
-                        get_chunk, overflow, paused, return_exceptions=True
+                        get_chunk, overflow, paused, reconnect,
+                        return_exceptions=True,
                     )
                 if paused in done and paused.result():
                     if get_chunk not in done:
@@ -336,6 +412,10 @@ class BlueFireReceiver:
                 await asyncio.gather(startup_task, return_exceptions=True)
             if self._startup is not None:
                 self._startup.disconnected()
+            if self._read_waiter is not None and not self._read_waiter.done():
+                self._read_waiter.set_exception(HomeAssistantError(
+                    "BlueFire disconnected during J1708 read"
+                ))
             self._decoder.reset()
             for characteristic in reversed(started):
                 try:
@@ -396,6 +476,12 @@ class BlueFireReceiver:
                 self.health.count("j1587_reports")
                 self.health.data_seen()
             await self.bridge.async_process_j1587(message)
+            if (
+                self._read_waiter is not None
+                and not self._read_waiter.done()
+                and message.pid == self._read_pid
+            ):
+                self._read_reports[message.mid] = decode_report(message)
         elif isinstance(message, ObdReport):
             if self.health is not None:
                 self.health.count("obd_reports")

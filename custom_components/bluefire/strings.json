@@ -66,6 +66,26 @@
     }
   },
   "services": {
+    "read_fuel_level": {
+      "name": "Read fuel level",
+      "description": "Send a one-shot J1708 fuel-level request and collect reports for five seconds. Updates MQTT fuel sensors and returns percent readings per responding controller. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter to request fuel level from."
+        }
+      }
+    },
+    "read_diagnostic_codes": {
+      "name": "Read diagnostic codes",
+      "description": "Send a one-shot J1708 PID 194 request and collect reported active/inactive faults for five seconds. Updates MQTT diagnostic sensors and returns codes per responding controller. Requires ready, opt-in J1708 startup. Never clears faults; no response is not a clean bill of health.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter to request diagnostic codes from."
+        }
+      }
+    },
     "inspect_adapter": {
       "name": "Inspect adapter",
       "description": "Connect once and return GATT service/characteristic UUIDs and properties. Does not read telemetry, authenticate, or write BlueFire commands.",

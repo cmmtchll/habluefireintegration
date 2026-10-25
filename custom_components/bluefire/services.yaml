@@ -1,3 +1,17 @@
+read_fuel_level:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
+read_diagnostic_codes:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
 inspect_adapter:
   fields:
     entry_id:

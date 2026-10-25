@@ -1,4 +1,4 @@
-"""Guarded, unsecured EZ startup for passive J1708 PID monitoring."""
+"""Guarded EZ startup, passive monitoring and allowlisted J1708 reads."""
 
 from __future__ import annotations
 
@@ -28,6 +28,18 @@ def client_packet(body: bytes) -> bytes:
         raise StartupError("Expected a client body of 1..17 bytes")
     packet = len(body).to_bytes(2, "big") + body
     return packet + bytes((receive_checksum(packet),))
+
+
+def pid_subscription(pid: int, *, on_request: bool = False) -> bytes:
+    """Wildcard MID; one-shot ECU retrieval or the normal passive monitor."""
+    if type(pid) is not int or pid not in {p.pid for p in ENTITIES}:
+        raise StartupError("Unsupported J1708 PID")
+    return client_packet(
+        b"\x9b\x00" + pid.to_bytes(2, "big")
+        + bytes((int(on_request), 1 if on_request else 2))
+        + (0 if on_request else REPORT_INTERVAL_MS).to_bytes(2, "big")
+        + b"\x00"
+    )
 
 
 class J1708Startup:
@@ -74,6 +86,16 @@ class J1708Startup:
     def disconnected(self) -> None:
         if self.stage != "failed":
             self.stage = "disconnected"
+
+    async def async_read(self, pid: int, *, restore: bool = False) -> None:
+        """Request only fuel/fault data; never expose arbitrary bus writes."""
+        if not self.ready:
+            raise StartupError("J1708 startup is not ready")
+        if type(pid) is not int or pid not in (96, 194):
+            raise StartupError(
+                "Only fuel level and diagnostic reads are allowed"
+            )
+        await self._write(pid_subscription(pid, on_request=not restore))
 
     def receive(self, message: AdapterMessage) -> bool:
         """Correlate controls without interpreting heartbeats as telemetry."""
@@ -191,12 +213,7 @@ class J1708Startup:
             self.stage = "subscribing"
             for parameter in ENTITIES:
                 # Vendor MID 0 is a wildcard, not the source of reports.
-                body = (
-                    b"\x9b\x00" + parameter.pid.to_bytes(2, "big")
-                    + b"\x00\x02"
-                    + REPORT_INTERVAL_MS.to_bytes(2, "big") + b"\x00"
-                )
-                await self._write(client_packet(body))
+                await self._write(pid_subscription(parameter.pid))
                 self.subscriptions_sent += 1
             await self._ack("start_reports", b"\x99\x01")
             self.stage = "ready"

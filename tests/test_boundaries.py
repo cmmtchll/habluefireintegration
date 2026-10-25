@@ -56,6 +56,7 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.receiver = SimpleNamespace(
             async_pause=AsyncMock(), async_resume=Mock(),
+            async_read=AsyncMock(return_value={"pid": 96, "reports": []}),
             startup_diagnostics=Mock(return_value={"stage": "disabled"}),
         )
         self.runtime.receiver = self.receiver
@@ -122,6 +123,38 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         await async_setup(self.hass, {})
         self.inspect = self.services["inspect_adapter"]
         self.capture = self.services["capture_notifications"]
+
+    async def test_vehicle_read_actions_delegate_and_release_busy_flag(self):
+        for service, pid in (
+            ("read_fuel_level", 96), ("read_diagnostic_codes", 194),
+        ):
+            result = await self.services[service](SimpleNamespace(
+                service=service, data={"entry_id": "entry"},
+            ))
+            self.receiver.async_read.assert_awaited_with(pid)
+            self.assertEqual(result, {"pid": 96, "reports": []})
+            self.assertFalse(self.runtime.inspecting)
+        self.receiver.async_pause.assert_not_awaited()
+        self.receiver.async_resume.assert_not_called()
+
+    async def test_vehicle_reads_surface_errors_and_reject_busy_entries(self):
+        action = self.services["read_fuel_level"]
+        call = SimpleNamespace(
+            service="read_fuel_level", data={"entry_id": "entry"},
+        )
+        self.runtime.inspecting = True
+        with self.assertRaisesRegex(BoundaryError, "already running"):
+            await action(call)
+        self.runtime.inspecting = False
+        self.runtime.receiver = None
+        with self.assertRaisesRegex(BoundaryError, "not running"):
+            await action(call)
+        self.runtime.receiver = self.receiver
+        self.receiver.async_read.side_effect = ConnectionFailure("no reports")
+        with self.assertRaisesRegex(ConnectionFailure, "no reports"):
+            await action(call)
+        self.assertFalse(self.runtime.inspecting)
+        self.assertEqual(self.runtime.health.counters["connection_errors"], 1)
 
     async def test_inspection_returns_metadata_and_clears_busy_flag(self):
         result = await self.inspect(

@@ -47,7 +47,7 @@ def CONFIG_SCHEMA(config: dict) -> dict:
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Register an explicit, read-only GATT inspection action."""
+    """Register inspection, capture and explicit J1708 read actions."""
     import voluptuous as vol
 
     from homeassistant.config_entries import ConfigEntryState
@@ -74,7 +74,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 "Select a loaded BlueFire config entry"
             )
         if entry.runtime_data.inspecting:
-            raise ServiceValidationError("Inspection is already running")
+            raise ServiceValidationError(
+                "Another BlueFire action is already running"
+            )
         return entry, entry.runtime_data
 
     async def inspect_adapter(call):
@@ -114,6 +116,28 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             if runtime.receiver is not None and paused:
                 runtime.receiver.async_resume()
             runtime.inspecting = False
+
+    async def read_vehicle(call):
+        _, runtime = loaded_runtime(call)
+        if runtime.receiver is None:
+            raise ServiceValidationError("BlueFire receiver is not running")
+        runtime.inspecting = True
+        try:
+            return await runtime.receiver.async_read(
+                96 if call.service == "read_fuel_level" else 194
+            )
+        except HomeAssistantError as err:
+            runtime.health.error("connection_errors", str(err))
+            raise
+        finally:
+            runtime.inspecting = False
+
+    for service in ("read_fuel_level", "read_diagnostic_codes"):
+        hass.services.async_register(
+            DOMAIN, service, read_vehicle,
+            schema=vol.Schema({vol.Required("entry_id"): cv.string}),
+            supports_response=SupportsResponse.ONLY,
+        )
 
     hass.services.async_register(
         DOMAIN,
