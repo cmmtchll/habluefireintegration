@@ -213,7 +213,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
             ),
-            patch.object(self.api, "READ_WINDOW_SECONDS", 0.02),
+            patch.object(self.api, "READ_WINDOW_SECONDS", 0.2),
         ):
             task = asyncio.create_task(self.receiver.async_run())
             try:
@@ -222,7 +222,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(active_writes, 1)
                 self.assertIsNotNone(self.receiver._read_waiter)
                 self.assertFalse(any(
-                    body[0] == 155 and body[4] == 1
+                    body[:4] == b"\x9b\x00\x00\x60" and body[4] == 1
                     for body in self.startup_bodies
                 ))
                 release_probe.set()
@@ -258,9 +258,10 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             body = packet[2:-1]
             if body[0] == 155 and body[4] == 1:
                 pid = int.from_bytes(body[2:4], "big")
-                self.receiver._notification_received(
-                    None, self.packet(report_bodies[pid])
-                )
+                if pid in report_bodies:
+                    self.receiver._notification_received(
+                        None, self.packet(report_bodies[pid])
+                    )
             elif body == bytes.fromhex("9b 00 00 fa 00 02 03 e8 00"):
                 if any(b[4] == 1 for b in self.startup_bodies if b[0] == 155):
                     completed.set()
@@ -1316,11 +1317,16 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             diagnostics = self.receiver.startup_diagnostics()
             self.assertEqual(diagnostics["stage"], "disconnected")
             self.assertEqual(diagnostics["firmware"], [3, 23, 0])
-            self.assertEqual(diagnostics["subscriptions_sent"], 32)
+            self.assertEqual(diagnostics["subscriptions_sent"], 35)
             self.assertEqual(diagnostics["discarded_reports"], 1)
         self.assertEqual(self.bridge.async_process_j1587.await_count, 2)
         self.assertEqual(self.startup_bodies.count(b"\x00"), 2)
         self.assertEqual(self.startup_bodies.count(b"\x99\x01"), 2)
+        for pid in (234, 237, 243):
+            self.assertEqual(self.startup_bodies.count(
+                b"\x9b\x00" + pid.to_bytes(2, "big")
+                + b"\x01\x01\x00\x00\x00"
+            ), 2)
         self.assertEqual(self.client.disconnect.await_count, 2)
         self.assertEqual(self.receiver._decoder.pending_bytes, 0)
 
@@ -1347,6 +1353,85 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             self.receiver.startup_diagnostics()["j1708_available"]
         )
+
+    async def test_startup_identification_replies_reach_mqtt_and_diagnostics(
+        self,
+    ):
+        for extended in (False, True):
+            with self.subTest(extended=extended):
+                self.configure_startup_session(
+                    overrides={
+                        0: bytes((3, 23 if extended else 18, 4, 1, 0))
+                        + bytes(16),
+                    },
+                    report_on_start=False,
+                )
+                self.receiver.j1587_extended = extended
+                write = self.client.write_gatt_char.side_effect
+                fixtures = {
+                    234: (128, b"EXAMPLE ECU SOFTWARE REV A"),
+                    237: (128, b"EXAMPLE VIN"),
+                    243: (130, b"EXAMPLE TRANSMISSION*MODEL*SERIAL*"),
+                }
+                messages = {}
+                received = asyncio.Event()
+
+                async def identify(characteristic, packet, *, response):
+                    await write(characteristic, packet, response=response)
+                    body = packet[2:-1]
+                    if body[0] != 155 or body[4] != 1:
+                        return
+                    pid = int.from_bytes(body[2:4], "big")
+                    if pid not in fixtures:
+                        return
+                    mid, text = fixtures[pid]
+                    pid_bytes = (
+                        bytes((pid,)) if extended else pid.to_bytes(2, "big")
+                    )
+                    reply = self.packet(
+                        bytes((154, mid)) + pid_bytes
+                        + bytes((len(text),)) + text
+                    )
+                    for offset in range(0, len(reply), 20):
+                        self.receiver._notification_received(
+                            None, reply[offset:offset + 20]
+                        )
+
+                async def publish(topic, payload, retain):
+                    messages[topic] = (payload, retain)
+                    if topic == "vehicle/coach/j1587/130/pid/243":
+                        received.set()
+
+                self.client.write_gatt_char.side_effect = identify
+                self.receiver.bridge = MqttBridge("coach", publish)
+                task = asyncio.create_task(
+                    self.receiver._async_receive_session()
+                )
+                try:
+                    await asyncio.wait_for(received.wait(), 2)
+                    self.assertTrue(self.receiver._startup.ready)
+                    self.assertEqual(
+                        self.receiver.startup_diagnostics()[
+                            "identification_requests_sent"], 3
+                    )
+                    for pid, (mid, text) in fixtures.items():
+                        payload, retain = messages[
+                            f"vehicle/coach/j1587/{mid}/pid/{pid}"
+                        ]
+                        self.assertFalse(retain)
+                        state = json.loads(payload)
+                        self.assertEqual(state["value"], text.decode("ascii"))
+                        self.assertEqual(state["identity_basis"],
+                                         "controller_reported")
+                    identity = self.receiver.bridge.diagnostics()["j1587"][
+                        "controller_identification"
+                    ]
+                    self.assertEqual(identity["130"]["243"]["value"],
+                                     fixtures[243][1].decode("ascii"))
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
 
     async def test_initially_unavailable_bus_still_publishes_real_mqtt_state(
         self,
@@ -1392,7 +1477,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         ))
         diagnostics = self.receiver.startup_diagnostics()
         self.assertIsNone(diagnostics["error"])
-        self.assertEqual(diagnostics["subscriptions_sent"], 32)
+        self.assertEqual(diagnostics["subscriptions_sent"], 35)
         self.assertEqual(self.receiver.health.counters["connection_errors"], 0)
 
     async def test_expanded_subscription_publishes_transmission_temperature(
@@ -1426,7 +1511,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(config["device_class"], "temperature")
         self.assertEqual(config["unit_of_measurement"], "°C")
-        self.assertEqual(self.receiver._startup.subscriptions_sent, 32)
+        self.assertEqual(self.receiver._startup.subscriptions_sent, 35)
         self.assertEqual(self.receiver._startup.discarded_reports, 1)
 
     async def test_unavailable_status_without_telemetry_never_publishes_online(

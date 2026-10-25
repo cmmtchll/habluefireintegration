@@ -113,7 +113,8 @@ fuel PID 96, diagnostic PID 194, distance PID 245, engine hours PID 247 and
 total fuel used PID 250 also receive automatic one-minute active read requests
 as described below. Other PIDs that the ECU does not broadcast may remain absent.
 
-There are 32 passive PID subscriptions in total, all using wildcard MID 0.
+There are 35 passive PID subscriptions in total, all using wildcard MID 0:
+31 measurements, diagnostic PID 194 and identification PIDs 234, 237 and 243.
 Compared with the original 16 subscriptions, the expanded set adds throttle
 position, fuel/crankcase/intake/barometric/coolant pressures, coolant level,
 three brake pressures, retarder temperature, ambient/intake/exhaust temperatures,
@@ -136,6 +137,50 @@ authenticated passive initialization continues, matching the vendor client.
 Telemetry received before startup succeeds is discarded. Subscriptions and
 authentication state are rebuilt for every new connection, including after
 diagnostic inspection.
+
+Once authenticated report setup completes, startup also sends **one active
+read each** for software identification (PID 234), vehicle identification
+(PID 237) and component identification (PID 243). These use the existing
+wildcard-MID `AddPID` one-shot retrieval mechanism, so engine, transmission
+and other responding controllers remain separate. The three reads run once
+per connection, including reconnect after inspection; they are not added to
+the minute-by-minute sensor polling loop. Receive-only mode sends no reads.
+Missing identification responses do not block telemetry or cause retries;
+BLE write failures and adapter rejections still fail explicitly.
+
+Identification responses create diagnostic text sensors and publish to
+`vehicle/{vehicle}/j1587/{mid}/pid/{234|237|243}`. They also appear under
+`bridge.j1587.controller_identification` in downloaded diagnostics;
+startup diagnostics record `identification_requests_sent`. Printable ASCII
+is exposed verbatim apart from surrounding spaces, including any field
+separators. Empty, blank or all-ones values have `decode_status: unavailable`;
+other encodings have `decode_status: unsupported_encoding` and a null value.
+Raw hexadecimal bytes are preserved in both cases. No manufacturer/model
+field splitting, DDEC/WTEC generation inference or automatic fault-profile
+selection is performed. `identity_basis: controller_reported` describes
+the text's provenance; source-role labels remain conventional hints.
+
+The integration's own BlueFire device also gets native diagnostic text
+sensors, separate from the MQTT-discovered vehicle sensors. They are created
+only for received identification reports, with stable config-entry/MID/PID
+identities and attributes containing provenance, raw bytes and decode status.
+Updates use the shared decoded data before MQTT publication, so no MQTT
+subscription or successful publish is required to update a native sensor.
+MQTT reconnect does not clear these native values. BLE disconnect clears
+the session snapshot and makes existing native identification sensors
+unavailable until new responses arrive; reconnect reuses the same entities.
+The BlueFire device's manufacturer/model metadata is not replaced by engine
+or transmission identification.
+
+Identification states are non-retained and are not replayed on MQTT birth.
+Unlike measurements, these static text sensors have no short expiry timer;
+they use J1587 availability. The diagnostic snapshot is cleared on disconnect.
+An ECU that does not support these PIDs creates no identification sensors.
+Long identities requiring J1587 PID 192 multisection assembly remain
+unsupported unless the adapter delivers a complete normalized identification
+report. These additions have synthetic wire coverage, not vehicle-hardware
+validation. Identification text may include VINs and component serial numbers;
+review diagnostics and MQTT captures before sharing.
 
 After successful opt-in startup, a read-only **Get J1708 availability**
 (command 7) request is sent every 10 seconds. This is an experimental

@@ -1,4 +1,4 @@
-"""Expose preparation status and receive-quality diagnostics.
+"""Expose status, receive quality and controller identification diagnostics.
 
 No engine measurements are manufactured here; vehicle telemetry uses MQTT.
 """
@@ -18,6 +18,7 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 
 from .const import DOMAIN, STATUS_RECEIVER_ENABLED
 from .health import Health
+from .telemetry import J1587MqttBridge
 
 # Counters are in-memory; polling them is cheap and avoids a state write for
 # every notification. Captures, errors and presence changes push immediately.
@@ -26,7 +27,7 @@ PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    """Add one honest diagnostic entity; telemetry will use MQTT discovery."""
+    """Add adapter diagnostics and discover controller identification."""
     # Preserve existing entities/devices when correcting a manually entered
     # MAC.
     unique_id = f"{entry.entry_id}_protocol_status"
@@ -57,6 +58,23 @@ async def async_setup_entry(hass, entry, async_add_entities):
         HealthSensor(entry, health, description)
         for description in HEALTH_SENSORS
     ])
+    bridge = entry.runtime_data.bridge.j1587
+    known: set[tuple[int, int]] = set()
+
+    def discover_identification() -> None:
+        sensors = []
+        for report in bridge.identification_reports:
+            key = (report["mid"], report["pid"])
+            if key not in known:
+                known.add(key)
+                sensors.append(IdentificationSensor(entry, bridge, report))
+        if sensors:
+            async_add_entities(sensors)
+
+    entry.async_on_unload(
+        bridge.add_identification_listener(discover_identification)
+    )
+    discover_identification()
 
 
 class ProtocolStatusSensor(SensorEntity):
@@ -245,3 +263,53 @@ class HealthSensor(SensorEntity):
         self.async_on_remove(
             self._health.add_listener(self.async_write_ha_state)
         )
+
+
+class IdentificationSensor(SensorEntity):
+    """One controller-reported identity, independent of MQTT delivery."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+
+    def __init__(self, entry, bridge: J1587MqttBridge, report: dict):
+        self._bridge = bridge
+        self._mid = report["mid"]
+        self._pid = report["pid"]
+        self._report: dict | None = report
+        label = report["source_name"]
+        if label == "Unidentified controller":
+            label = "Controller"
+        self._attr_name = f"{label} ({self._mid}): {report['name']}"
+        self._attr_unique_id = (
+            f"{entry.entry_id}_j1587_{self._mid}_{self._pid}_identification"
+        )
+        self._attr_device_info = _device_info(entry)
+
+    @property
+    def available(self) -> bool:
+        return self._report is not None
+
+    @property
+    def native_value(self) -> str | None:
+        return self._report["value"] if self._report is not None else None
+
+    @property
+    def extra_state_attributes(self):
+        return (
+            {
+                key: value for key, value in self._report.items()
+                if key != "value"
+            }
+            if self._report is not None else None
+        )
+
+    def _update(self) -> None:
+        self._report = self._bridge.identification_report(self._mid, self._pid)
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            self._bridge.add_identification_listener(self._update)
+        )
+        self._update()

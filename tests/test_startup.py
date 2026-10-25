@@ -4,7 +4,9 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from custom_components.bluefire.j1587 import ENTITIES
+from custom_components.bluefire.j1587 import (
+    ENTITIES, IDENTIFICATION_PARAMETERS,
+)
 from custom_components.bluefire.protocol import AdapterMessage
 from custom_components.bluefire.startup import (
     CLIENT_COMPATIBILITY,
@@ -119,7 +121,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                 b"\x08", b"\x99\x00",
             ],
         )
-        subscriptions = self.sent[9:-1]
+        subscriptions = self.sent[9:9 + len(ENTITIES)]
         self.assertEqual(len(subscriptions), len(ENTITIES))
         for body, parameter in zip(subscriptions, ENTITIES):
             self.assertEqual(
@@ -127,11 +129,16 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                 b"\x9b\x00" + parameter.pid.to_bytes(2, "big")
                 + b"\x00\x02\x03\xe8\x00",
             )
-        self.assertEqual(self.sent[-1], b"\x99\x01")
+        self.assertEqual(self.sent[9 + len(ENTITIES)], b"\x99\x01")
+        self.assertEqual(self.sent[-3:], [
+            b"\x9b\x00" + pid.to_bytes(2, "big") + b"\x01\x01\x00\x00\x00"
+            for pid in (234, 237, 243)
+        ])
         self.assertEqual(startup.diagnostics(), {
             "stage": "ready", "profile": 3, "firmware": [3, 23, 0],
             "expected_command": None, "j1708_available": True,
             "subscriptions_sent": len(ENTITIES), "discarded_reports": 0,
+            "identification_requests_sent": 3,
             "error": None,
             "keepalive": {
                 "interval_s": 10, "requests": 0, "responses": 0,
@@ -182,8 +189,52 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(startup.error)
                 self.assertEqual(startup.subscriptions_sent, len(ENTITIES))
                 self.assertIn(b"\x08", self.sent)
-                self.assertEqual(self.sent[-1], b"\x99\x01")
+                self.assertIn(b"\x99\x01", self.sent)
                 self.assertIn("waiting for telemetry", logs.output[0])
+
+    async def test_identification_is_once_per_session_and_does_not_wait(self):
+        for extended, minor in ((False, 18), (True, 23)):
+            with self.subTest(extended=extended):
+                startup = self.make_startup(
+                    extended=extended,
+                    overrides={0: version_response(minor=minor)},
+                )
+                original = startup._write
+                identification = {
+                    pid_subscription(parameter.pid, on_request=True)
+                    for parameter in IDENTIFICATION_PARAMETERS
+                }
+
+                async def write(packet):
+                    if packet in identification:
+                        self.assertTrue(startup.ready)
+                    await original(packet)
+
+                startup._write = write
+                await asyncio.wait_for(startup.run(), 1)
+                self.assertTrue(startup.ready)
+                self.assertEqual(startup.identification_requests_sent, 3)
+                for packet in identification:
+                    self.assertEqual(self.sent.count(packet[2:-1]), 1)
+                with self.assertRaisesRegex(StartupError, "Only supported"):
+                    await startup.async_read(243)
+
+    async def test_identification_write_failure_is_explicit(self):
+        startup = self.make_startup()
+        original = startup._write
+
+        async def write(packet):
+            if packet == pid_subscription(237, on_request=True):
+                raise StartupError("Identification write failed")
+            await original(packet)
+
+        startup._write = write
+        with self.assertRaisesRegex(
+            StartupError, "Identification write failed"
+        ):
+            await startup.run()
+        self.assertFalse(startup.ready)
+        self.assertEqual(startup.identification_requests_sent, 1)
 
     async def test_rejections_and_malformed_responses_fail_closed(self):
         cases = (

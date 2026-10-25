@@ -21,6 +21,7 @@ from .faults import DIAGNOSTICS, Diagnostic, decode_diagnostics
 from .j1587 import (
     ENTITIES as J1587_ENTITIES,
     DiagnosticParameter,
+    IdentificationParameter,
     Parameter,
     decode_report,
     parse_j1708_message,
@@ -139,6 +140,8 @@ class MqttBridge:
         self._clock = clock
         self._last_frame: float | None = None
         self._online = False
+        self._identification: dict[int, dict[int, dict]] = {}
+        self._identification_listeners: list[Callable[[], None]] = []
         self._j1708_polling = j1708_polling
         self._availability_timeout = (
             J1708_POLL_TIMEOUT
@@ -164,6 +167,28 @@ class MqttBridge:
     def availability_topic(self) -> str:
         return f"{self.prefix}/availability"
 
+    @property
+    def identification_reports(self) -> list[dict]:
+        """Snapshot decoded identification without an MQTT round trip."""
+        return [
+            dict(value) for parameters in self._identification.values()
+            for value in parameters.values()
+        ]
+
+    def identification_report(self, mid: int, pid: int) -> dict | None:
+        report = self._identification.get(mid, {}).get(pid)
+        return dict(report) if report is not None else None
+
+    def add_identification_listener(
+        self, listener: Callable[[], None],
+    ) -> Callable[[], None]:
+        self._identification_listeners.append(listener)
+        return lambda: self._identification_listeners.remove(listener)
+
+    def _identification_changed(self) -> None:
+        for listener in tuple(self._identification_listeners):
+            listener()
+
     def diagnostics(self) -> dict:
         """Snapshot bridge state for user-requested diagnostics."""
         result = {
@@ -185,15 +210,29 @@ class MqttBridge:
         }
         if self.j1587 is not None:
             result["j1587"] = self.j1587.diagnostics()
+        if self.protocol == "j1587":
+            result["controller_identification"] = {
+                str(mid): {
+                    str(pid): dict(value) for pid, value in parameters.items()
+                }
+                for mid, parameters in self._identification.items()
+            }
         return result
 
-    async def async_disconnected(self) -> None:
+    async def async_disconnected(
+        self, *, clear_identification: bool = True,
+    ) -> None:
         """Invalidate freshness and withdraw retained online state."""
         if self.j1587 is not None:
-            await self.j1587.async_disconnected()
+            await self.j1587.async_disconnected(
+                clear_identification=clear_identification
+            )
         async with self._frame_lock:
             self._last_frame = None
             self._online = False
+            if clear_identification:
+                self._identification.clear()
+                self._identification_changed()
             await self.publish(self.availability_topic, "offline", True)
 
     async def async_check_stale(self) -> None:
@@ -251,7 +290,10 @@ class MqttBridge:
 
     def _discovery_message(
         self, source: int,
-        signal: Signal | Diagnostic | Parameter | DiagnosticParameter,
+        signal: (
+            Signal | Diagnostic | Parameter | DiagnosticParameter
+            | IdentificationParameter
+        ),
     ) -> tuple[str, str]:
         """Build discovery from trusted definitions, not stored payloads."""
         unique_id = f"bluefire_{self.vehicle_id}_{source}_{signal.spn}"
@@ -307,6 +349,10 @@ class MqttBridge:
             config["value_template"] = "{{ value_json.summary }}"
             config["entity_category"] = "diagnostic"
             config["json_attributes_topic"] = config["state_topic"]
+        elif isinstance(signal, IdentificationParameter):
+            config["entity_category"] = "diagnostic"
+            config["json_attributes_topic"] = config["state_topic"]
+            del config["expire_after"]
         else:
             config["unit_of_measurement"] = signal.unit
             config["suggested_display_precision"] = (
@@ -601,6 +647,12 @@ class J1587MqttBridge(MqttBridge):
                 "catalog_version": CATALOG_VERSION,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
+            identification = decoded.get("identification")
+            if identification is not None:
+                self._identification.setdefault(report.mid, {})[
+                    report.pid
+                ] = {**common, **identification}
+                self._identification_changed()
             await self.publish(
                 f"{self.prefix}/{report.mid}/report",
                 json.dumps({
@@ -621,6 +673,7 @@ class J1587MqttBridge(MqttBridge):
                 diagnostic = decoded.get("diagnostics")
                 state = (
                     diagnostic if diagnostic is not None
+                    else identification if identification is not None
                     else decoded["signals"][0]
                 )
                 kind = "faults" if diagnostic is not None else "pid"
