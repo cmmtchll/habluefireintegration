@@ -8,13 +8,13 @@ Generated from the shared code dictionary. Do not edit tables by hand; update th
 python .\scripts\catalog_bluefire.py --markdown --output .\docs\code-reference.md
 ```
 
-Catalog version: **2**. Curated, incomplete; unknown codes are not inferred.
+Catalog version: **3**. Curated, incomplete; unknown codes are not inferred.
 
-Vehicle context: **2003-era Detroit Diesel, 500 HP, Allison B500**. Year, horsepower and transmission model do not identify the ECM/controller generation or calibration. Profiles below are reference-only and never selected automatically.
+Vehicle context: official labels and Prevost documentation identify **Detroit Diesel Series 60, 12.7 L, 500 HP, DDEC IV**. The coach build sheet specifies **Allison HD4000MH R**, not the B500 listed in the generic coach specification. Transmission control generation is not established. Engine interpretation requires explicit entry configuration; no profile is inferred from reported text.
 
 J1939 SPNs, J1587 PIDs/SIDs, OBD mode/PIDs, Detroit flash codes and Allison main/subcodes are separate namespaces. A number alone is not enough to identify its meaning. Unknown codes retain their IDs and an explicit unmapped label; no meaning is guessed.
 
-Source-address and MID labels are conventional roles, not verified ECU identities. These are independently worded factual summaries, not a complete service manual or a repair/safety assessment.
+Source-address and MID labels are conventional roles unless engine MID 128 uses the configured official-label DDEC IV profile. Other controller identities are not inferred. These are independently worded factual summaries, not a complete service manual or a repair/safety assessment.
 
 ## J1939 decoded measurements
 
@@ -70,8 +70,12 @@ Native units include mph, psi, degrees Fahrenheit and US gallons. Conversions us
 
 | PID | Label | Value bytes | Signed | Output unit | Resolution | Offset | HA state class | Description |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 26 | Fan speed percentage | 1 | False | % | 0.5 | 0 | measurement | Fan speed percentage, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
 | 51 | Throttle position | 1 | False | % | 0.4 | 0 | measurement | Throttle position, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
+| 68 | Engine torque factor | 1 | False | % | 0.5 | 0 | measurement | Engine torque factor, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
+| 74 | Maximum road speed | 1 | False | km/h | 0.804672 | 0 | measurement | Maximum road speed, converted from J1587 units to km/h. An all-ones unavailable value is reported as null. |
 | 84 | Vehicle speed | 1 | False | km/h | 0.804672 | 0 | measurement | Vehicle speed, converted from J1587 units to km/h. An all-ones unavailable value is reported as null. |
+| 86 | Cruise set speed | 1 | False | km/h | 0.804672 | 0 | measurement | Cruise set speed, converted from J1587 units to km/h. An all-ones unavailable value is reported as null. |
 | 91 | Accelerator pedal position | 1 | False | % | 0.4 | 0 | measurement | Accelerator pedal position, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
 | 92 | Engine load | 1 | False | % | 0.5 | 0 | measurement | Engine load, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
 | 94 | Fuel delivery pressure | 1 | False | kPa | 3.447378646584 | 0 | measurement | Fuel delivery pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
@@ -88,6 +92,7 @@ Native units include mph, psi, degrees Fahrenheit and US gallons. Conversions us
 | 117 | Primary brake air pressure | 1 | False | kPa | 4.1368543759008 | 0 | measurement | Primary brake air pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
 | 118 | Secondary brake air pressure | 1 | False | kPa | 4.1368543759008 | 0 | measurement | Secondary brake air pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
 | 120 | Retarder oil temperature | 1 | False | °C | 1.1111111111111112 | -17.77777777777778 | measurement | Retarder oil temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 122 | Retarder torque percentage | 1 | False | % | 0.5 | 0 | measurement | Retarder torque percentage, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
 | 168 | Electrical system voltage | 2 | False | V | 0.05 | 0 | measurement | Electrical system voltage, converted from J1587 units to V. An all-ones unavailable value is reported as null. |
 | 171 | Ambient air temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Ambient air temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
 | 172 | Engine air intake temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Engine air intake temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
@@ -95,14 +100,33 @@ Native units include mph, psi, degrees Fahrenheit and US gallons. Conversions us
 | 175 | Engine oil temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Engine oil temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
 | 177 | Transmission oil temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Transmission oil temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
 | 183 | Fuel rate | 2 | False | L/h | 0.059147059125 | 0 | measurement | Fuel rate, converted from J1587 units to L/h. An all-ones unavailable value is reported as null. |
+| 184 | Instantaneous fuel economy | 2 | False | km/L | 0.0016607176071495 | 0 | measurement | Instantaneous fuel economy, converted from J1587 units to km/L. An all-ones unavailable value is reported as null. |
+| 185 | Average fuel economy | 2 | False | km/L | 0.0016607176071495 | 0 | measurement | Average fuel economy, converted from J1587 units to km/L. An all-ones unavailable value is reported as null. |
 | 190 | Engine speed | 2 | False | rpm | 0.25 | 0 | measurement | Engine speed, converted from J1587 units to rpm. An all-ones unavailable value is reported as null. |
 | 235 | Engine idle hours | 4 | False | h | 0.05 | 0 | total_increasing | Engine idle hours, converted from J1587 units to h. An all-ones unavailable value is reported as null. |
 | 236 | Engine idle fuel used | 4 | False | L | 0.473176473 | 0 | total_increasing | Engine idle fuel used, converted from J1587 units to L. An all-ones unavailable value is reported as null. |
 | 245 | Total vehicle distance | 4 | False | km | 0.1609344 | 0 | total_increasing | Total vehicle distance, converted from J1587 units to km. An all-ones unavailable value is reported as null. |
 | 247 | Total engine hours | 4 | False | h | 0.05 | 0 | total_increasing | Total engine hours, converted from J1587 units to h. An all-ones unavailable value is reported as null. |
 | 250 | Total fuel used | 4 | False | L | 0.473176473 | 0 | total_increasing | Total fuel used, converted from J1587 units to L. An all-ones unavailable value is reported as null. |
+| 439 | Extended intake manifold pressure | 2 | False | kPa | 0.125 | 0 | measurement | Extended intake manifold pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
 
 J1587 provenance: Local Windows BlueFire 12.5.6 J1708 parameter scaling cross-check, including unsigned quarter-degree Fahrenheit temperatures and signed crankcase pressure; independent native-unit conversions. Datalink/diagnostic structure: https://github.com/ainfosec/pretty_j1587
+
+## J1587 status and read-only request support
+
+Switch and cruise values are one-byte bitfields; gear values are two printable ASCII characters. These are unitless sensors, not commands or numeric quantities. All-ones is unavailable; unsupported gear encodings retain raw bytes and a null value. Cruise status includes enabled/set/coast/resume/accelerate/brake/clutch/active attributes.
+
+| PID | Label | Value bytes | Encoding |
+| --- | --- | --- | --- |
+| 40 | Retarder switch | 1 | switch |
+| 70 | Parking brake status | 1 | switch |
+| 85 | Cruise control status | 1 | cruise |
+| 162 | Transmission selected gear | 2 | gear |
+| 163 | Transmission current gear | 2 | gear |
+
+The `bluefire.read_parameter` action accepts only these PIDs: 26, 40, 51, 68, 70, 74, 84, 85, 86, 91, 92, 94, 96, 100, 101, 102, 105, 108, 109, 110, 111, 116, 117, 118, 120, 122, 162, 163, 168, 171, 172, 173, 174, 175, 177, 183, 184, 185, 190, 194, 234, 235, 236, 237, 243, 245, 247, 250, 439.
+
+Requests collect for five seconds and optionally target MID 128–255 (zero/omitted means wildcard). PID 174 fuel temperature is raw-only: Prevost documents the installed sensor, but the inspected vendor decoder does not establish its scale. The automatic poll set remains 96, 194, 245, 247 and 250; additional reads are manual only. No fault clearing, programming, arbitrary requests or actuator tests are exposed.
 
 ## Standard code labels
 
@@ -221,18 +245,32 @@ For J1587 PID lookups, units mean preferred display units only; an actual conver
 
 | Code / ID | Label string | Unit | Description | Reference |
 | --- | --- | --- | --- | --- |
+| 26 | Fan speed percentage | % | Fan speed percentage | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 40 | Retarder switch | - | Retarder switch | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 51 | Throttle position | % | Throttle position | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 68 | Engine torque factor | % | Engine torque factor | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 70 | Parking brake status | - | Parking brake status | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 73 | External pump pressure | - | External pump pressure | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405602.html |
+| 74 | Maximum road speed | km/h | Maximum road speed | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 81 | Exhaust back pressure | - | Exhaust back pressure | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404d02.html |
 | 84 | Vehicle speed | km/h | Vehicle speed | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 85 | Cruise control status | - | Cruise control status | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 86 | Cruise set speed | km/h | Cruise set speed | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 91 | Accelerator pedal position | % | Accelerator pedal position | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 92 | Engine load | % | Engine load | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 93 | Actual engine torque | % | Actual engine torque | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 94 | Fuel delivery pressure | kPa | Fuel delivery pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 95 | Fuel inlet restriction | - | Fuel inlet restriction | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402502.html |
 | 96 | Fuel level | % | Fuel level | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 98 | Engine oil level | - | Engine oil level | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405102.html |
+| 99 | Oil filter restriction | - | Oil filter restriction | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404202.html |
 | 100 | Engine oil pressure | kPa | Engine oil pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 101 | Crankcase pressure | kPa | Crankcase pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 102 | Intake manifold pressure | kPa | Intake manifold pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 103 | Turbocharger speed | - | Turbocharger speed | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404002.html |
 | 105 | Intake manifold temperature | °C | Intake manifold temperature | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 106 | Air inlet pressure | - | Air inlet pressure | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402f02.html |
+| 107 | Air filter restriction | - | Air filter restriction | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404102.html |
 | 108 | Barometric pressure | kPa | Barometric pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 109 | Coolant pressure | kPa | Coolant pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 110 | Coolant temperature | °C | Coolant temperature | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
@@ -241,6 +279,10 @@ For J1587 PID lookups, units mean preferred display units only; an actual conver
 | 117 | Primary brake air pressure | kPa | Primary brake air pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 118 | Secondary brake air pressure | kPa | Secondary brake air pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 120 | Retarder oil temperature | °C | Retarder oil temperature | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 121 | Engine retarder status | - | Engine retarder status | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 122 | Retarder torque percentage | % | Retarder torque percentage | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 154 | Legacy EGR temperature | - | Legacy EGR temperature | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403002.html |
+| 155 | Legacy EGR differential pressure | - | Legacy EGR differential pressure | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403002.html |
 | 162 | Transmission selected gear | - | Transmission selected gear | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 163 | Transmission current gear | - | Transmission current gear | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 168 | Electrical system voltage | V | Electrical system voltage | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
@@ -251,13 +293,15 @@ For J1587 PID lookups, units mean preferred display units only; an actual conver
 | 175 | Engine oil temperature | °C | Engine oil temperature | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 177 | Transmission oil temperature | °C | Transmission oil temperature | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 183 | Fuel rate | L/h | Fuel rate | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
-| 184 | Instantaneous fuel economy | - | Instantaneous fuel economy | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
-| 185 | Average fuel economy | - | Average fuel economy | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 184 | Instantaneous fuel economy | km/L | Instantaneous fuel economy | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 185 | Average fuel economy | km/L | Average fuel economy | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 187 | Variable speed governor input | - | Variable speed governor input | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400b02.html |
 | 190 | Engine speed | rpm | Engine speed | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 192 | Multisection parameter | - | Multisection parameter | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 194 | Diagnostic trouble codes | - | Diagnostic trouble codes | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 195 | Diagnostic clearing request | - | Diagnostic clearing request | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 196 | Diagnostic clearing response | - | Diagnostic clearing response | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 222 | Anti-theft status | - | Anti-theft status | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404d02.html |
 | 234 | Software identification | - | Software identification | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 235 | Engine idle hours | h | Engine idle hours | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 236 | Engine idle fuel used | L | Engine idle fuel used | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
@@ -266,6 +310,14 @@ For J1587 PID lookups, units mean preferred display units only; an actual conver
 | 245 | Total vehicle distance | km | Total vehicle distance | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 247 | Total engine hours | h | Total engine hours | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 250 | Total fuel used | L | Total fuel used | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
+| 251 | Clock module | - | Clock module | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404d02.html |
+| 252 | Clock module extension | - | Clock module extension | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404d02.html |
+| 351 | Turbo compressor inlet temperature | - | Turbo compressor inlet temperature | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401d02.html |
+| 354 | Relative humidity | - | Relative humidity | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401102.html |
+| 404 | Turbo compressor outlet temperature | - | Turbo compressor outlet temperature | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401d02.html |
+| 411 | EGR differential pressure | - | EGR differential pressure | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403002.html |
+| 412 | EGR temperature | - | EGR temperature | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403002.html |
+| 439 | Extended intake manifold pressure | kPa | Extended intake manifold pressure | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 
 ### FMI
 
@@ -370,25 +422,78 @@ Codes are matched only inside the specified profile/namespace. PID/SID equivalen
 
 ### Detroit Diesel DDEC III/IV (`detroit_ddec_iii_iv`)
 
-Reference for a 2003-era 500 HP Detroit Diesel only if its ECM is confirmed as DDEC III/IV. Horsepower does not identify an ECM.
+DDEC III/IV single-ECM reference (6SE497). The coach's official labels and Prevost PA1163 identify its 500 HP Series 60 and DDEC IV; select the confirmed engine profile in configuration. Other installations remain standard J1587 unless selected.
 
-Curated flash codes and J1587 PID/SID/FMI equivalents, including a six-cylinder injector reference subset.
+All 66 flash-code sections indexed by the referenced 6SE497 edition, with independently summarized labels and verified equivalents. Conflicting/ambiguous crosswalks are withheld, not guessed. Gas, EGR, ESS, Optimized Idle and optional sensor references do not establish installed equipment or calibration.
 
-| Namespace | Code | Label / description | J1587 equivalents (code / FMI) | Reference |
-| --- | --- | --- | --- | --- |
-| detroit_flash | 13 | Coolant level sensor circuit low | PID 111 / 4, PID 111 / 6 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400d02.html |
-| detroit_flash | 14 | Coolant or oil temperature sensor circuit high | PID 110 / 3, PID 175 / 3 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400e02.html |
-| detroit_flash | 15 | Coolant or oil temperature sensor circuit low | PID 110 / 4, PID 175 / 4 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400f02.html |
-| detroit_flash | 16 | Coolant level sensor circuit high | PID 111 / 3, PID 111 / 5 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401002.html |
-| detroit_flash | 21 | Throttle position sensor circuit high | PID 91 / 3 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401502.html |
-| detroit_flash | 22 | Throttle position sensor circuit low | PID 91 / 4 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401602.html |
-| detroit_flash | 23 | Fuel temperature sensor circuit high | PID 174 / 3 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401702.html |
-| detroit_flash | 24 | Fuel temperature sensor circuit low | PID 174 / 4 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401802.html |
-| detroit_flash | 43 | Coolant level below normal | PID 111 / 1 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402b02.html |
-| detroit_flash | 44 | Coolant or engine oil temperature above normal | PID 110 / 0, PID 175 / 0 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402c02.html |
-| detroit_flash | 45 | Engine oil pressure below normal | PID 100 / 1 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402d02.html |
-| detroit_flash | 53 | Engine controller nonvolatile memory error | SID 253 / 12, SID 253 / 2 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403502.html |
-| detroit_flash | 61 | Injector response too slow | SID 1 / 0, SID 2 / 0, SID 3 / 0, SID 4 / 0, SID 5 / 0, SID 6 / 0 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403d02.html |
+| Namespace | Code | Label / description | J1587 equivalents (code / FMI) | Applicability / exceptions | Reference |
+| --- | --- | --- | --- | --- | --- |
+| detroit_flash | 11 | Variable speed governor input voltage low | PID 187 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400b02.html |
+| detroit_flash | 12 | Variable speed governor input voltage high | PID 187 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400c02.html |
+| detroit_flash | 13 | Coolant level sensor circuit low | PID 111 / 4, PID 111 / 6 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400d02.html |
+| detroit_flash | 14 | Coolant or oil temperature sensor circuit high | PID 110 / 3, PID 175 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400e02.html |
+| detroit_flash | 15 | Coolant or oil temperature sensor circuit low | PID 110 / 4, PID 175 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/400f02.html |
+| detroit_flash | 16 | Coolant level sensor circuit high | PID 111 / 3, PID 111 / 5 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401002.html |
+| detroit_flash | 17 | Throttle plate or humidity input voltage high | PID 51 / 3, PID 354 / 3 | Application-dependent sensors | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401102.html |
+| detroit_flash | 18 | Throttle plate or humidity input voltage low | PID 51 / 4, PID 354 / 4 | Application-dependent sensors | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401202.html |
+| detroit_flash | 21 | Throttle position sensor circuit high | PID 91 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401502.html |
+| detroit_flash | 22 | Throttle position sensor circuit low | PID 91 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401602.html |
+| detroit_flash | 23 | Fuel temperature sensor circuit high | PID 174 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401702.html |
+| detroit_flash | 24 | Fuel temperature sensor circuit low | PID 174 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401802.html |
+| detroit_flash | 26 | Auxiliary engine shutdown input active | SID 25 / 11, SID 61 / 11 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401a02.html |
+| detroit_flash | 27 | Air inlet temperature input voltage high | PID 172 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401b02.html |
+| detroit_flash | 28 | Air inlet temperature input voltage low | PID 172 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401c02.html |
+| detroit_flash | 29 | Turbo compressor temperature input voltage low | PID 351 / 4, PID 404 / 4 | Optional turbo/EGR sensors | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401d02.html |
+| detroit_flash | 31 | Engine brake output circuit fault | SID 51 / 3, SID 51 / 4, SID 52 / 3, SID 52 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401f02.html |
+| detroit_flash | 32 | Stop or check engine lamp circuit fault | SID 238 / 3, SID 238 / 4, SID 239 / 3, SID 239 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402002.html |
+| detroit_flash | 33 | Boost pressure input voltage high | PID 102 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402102.html |
+| detroit_flash | 34 | Boost pressure input voltage low | PID 102 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402202.html |
+| detroit_flash | 35 | Oil pressure input voltage high | PID 100 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402302.html |
+| detroit_flash | 36 | Oil pressure input voltage low | PID 100 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402402.html |
+| detroit_flash | 37 | Fuel pressure or restriction input voltage high | PID 94 / 3, PID 95 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402502.html |
+| detroit_flash | 38 | Fuel pressure or restriction input voltage low | PID 94 / 4, PID 95 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402602.html |
+| detroit_flash | 39 | EGR valve or variable-nozzle turbo response fault | SID 146 / 2, SID 146 / 12, SID 146 / 7, SID 152 / 7, SID 147 / 2, SID 147 / 12, SID 147 / 14, SID 147 / 11, SID 147 / 7, SID 153 / 7 | EGR/VNT applications only; not assumed installed | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402702.html |
+| detroit_flash | 41 | Missing timing reference or extra synchronous pulses | SID 21 / 0 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402902.html |
+| detroit_flash | 42 | Missing synchronous reference or extra timing pulses | SID 21 / 1 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402a02.html |
+| detroit_flash | 43 | Coolant level below normal | PID 111 / 1 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402b02.html |
+| detroit_flash | 44 | Coolant or engine oil temperature above normal | PID 110 / 0, PID 175 / 0 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402c02.html |
+| detroit_flash | 45 | Engine oil pressure below normal | PID 100 / 1 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402d02.html |
+| detroit_flash | 46 | ECM battery supply voltage low | PID 168 / 1 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402e02.html |
+| detroit_flash | 47 | Fuel, boost or gas-engine inlet pressure above range | PID 94 / 0, PID 102 / 0, PID 106 / 0 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402f02.html |
+| detroit_flash | 48 | Fuel pressure or optional inlet/EGR data below range | PID 94 / 1, PID 106 / 1, PID 412 / 1, PID 154 / 1, PID 411 / 1, PID 155 / 1, PID 351 / 1, PID 404 / 1 | EGR PID numbering depends on ECM software | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403002.html |
+| detroit_flash | 49 | Turbo compressor temperature above range or derate | PID 351 / 0, PID 404 / 0, PID 404 / 14 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403102.html |
+| detroit_flash | 51 | Turbo compressor temperature input voltage high | PID 351 / 3, PID 404 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403302.html |
+| detroit_flash | 52 | ECM analog-to-digital conversion fault | SID 254 / 12 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403402.html |
+| detroit_flash | 53 | Engine controller nonvolatile memory error | SID 253 / 12, SID 253 / 2 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403502.html |
+| detroit_flash | 54 | Vehicle speed signal fault | PID 84 / 12 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403602.html |
+| detroit_flash | 55 | J1939 link or other-controller communication fault | SID 231 / 12, SID 216 / 14 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403702.html |
+| detroit_flash | 56 | J1587 diagnostic data link fault | SID 250 / 12 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403802.html |
+| detroit_flash | 57 | J1922 data link fault | SID 249 / 12 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403902.html |
+| detroit_flash | 58 | Engine torque overload | PID 92 / 0 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403a02.html |
+| detroit_flash | 61 | Injector response too slow | SID 1 / 0, SID 2 / 0, SID 3 / 0, SID 4 / 0, SID 5 / 0, SID 6 / 0 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403d02.html |
+| detroit_flash | 62 | Auxiliary output open or short to supply | SID 26 / 3, SID 26 / 4, SID 40 / 3, SID 40 / 4, SID 53 / 3, SID 53 / 4, SID 54 / 3, SID 54 / 4, SID 55 / 3, SID 55 / 4, SID 56 / 3, SID 56 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403e02.html |
+| detroit_flash | 63 | PWM output open or short to supply | SID 57 / 3, SID 57 / 4, SID 58 / 3, SID 58 / 4, SID 59 / 3, SID 59 / 4, SID 60 / 3, SID 60 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403f02.html |
+| detroit_flash | 64 | Turbo speed excessive or speed sensor failure | PID 103 / 0, PID 103 / 8 | Turbo speed sensor required | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404002.html |
+| detroit_flash | 65 | Air filter sensor or gas-engine throttle response fault | PID 107 / 3, PID 107 / 4, PID 51 / 0, PID 51 / 1, PID 51 / 7 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404102.html |
+| detroit_flash | 66 | Oil filter sensor or gas-engine knock sensor fault | PID 99 / 3, PID 99 / 4, SID 76 / 0, SID 76 / 7, SID 76 / 3, SID 76 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404202.html |
+| detroit_flash | 67 | Coolant pressure or gas-engine inlet pressure circuit fault | PID 109 / 3, PID 109 / 4, PID 106 / 3, PID 106 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404302.html |
+| detroit_flash | 68 | Throttle idle-validation circuit fault | SID 230 / 5, SID 230 / 6 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404402.html |
+| detroit_flash | 71 | Injector response too fast | SID 1 / 1, SID 2 / 1, SID 3 / 1, SID 4 / 1, SID 5 / 1, SID 6 / 1 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404702.html |
+| detroit_flash | 72 | Vehicle overspeed | PID 84 / 0, PID 84 / 11 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404802.html |
+| detroit_flash | 73 | Air restriction, ESS shift input or gas valve fault | SID 227 / 2, SID 227 / 3, SID 227 / 4, SID 226 / 11, SID 151 / 14, SID 77 / 0, SID 77 / 1, SID 77 / 3, SID 77 / 4 | ESS/gas options are not assumed. Air restriction 107/0 is omitted: 6SE497 says SID, 7SA743 Appendix A says PID. | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404902.html |
+| detroit_flash | 74 | Optimized Idle interlock or oil filter restriction fault | - | Equivalence withheld: 6SE497 reports PID 70/4 and an Optimized Idle interlock; 7SA743 reports PID 99/0. Select the applicable calibration/service reference. | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404a02.html |
+| detroit_flash | 75 | ECM battery supply voltage high | PID 168 / 0 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404b02.html |
+| detroit_flash | 76 | Engine overspeed with engine brake | PID 121 / 0 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404c02.html |
+| detroit_flash | 77 | Application-specific range, clock or anti-theft fault | PID 73 / 1, PID 81 / 0, PID 81 / 1, PID 81 / 12, PID 81 / 3, PID 81 / 4, PID 95 / 1, PID 99 / 1, PID 100 / 0, PID 102 / 1, PID 105 / 1, PID 107 / 1, PID 108 / 0, PID 108 / 1, PID 109 / 0, PID 110 / 1, PID 111 / 0, PID 171 / 0, PID 171 / 1, PID 172 / 1, PID 175 / 1, PID 222 / 14, PID 251 / 10, PID 251 / 13, PID 252 / 10, PID 252 / 13, PID 354 / 0, PID 354 / 1 | Many entries are not on-highway Series 60 features. PID 174/0 and 174/1 withheld: the guide assigns both fuel temperature and temporary TCO meanings. | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404d02.html |
+| detroit_flash | 78 | Cruise or adaptive-cruise system fault | PID 86 / 14 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404e02.html |
+| detroit_flash | 81 | Oil level or exhaust/EGR sensor input voltage high | PID 98 / 3, PID 173 / 3 | EGR equivalents withheld because the source editions disagree on PID/SID namespace and legacy numbering. | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405102.html |
+| detroit_flash | 82 | Oil level or exhaust/EGR sensor input voltage low | PID 98 / 4, PID 173 / 4 | EGR crosswalk withheld; see flash 81 notes | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405202.html |
+| detroit_flash | 83 | Exhaust temperature, pump pressure or EGR value high | PID 173 / 0, PID 73 / 0 | EGR crosswalk withheld; see flash 81 notes | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405302.html |
+| detroit_flash | 84 | Engine oil level low | PID 98 / 1 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405402.html |
+| detroit_flash | 85 | Engine overspeed | PID 190 / 0 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405502.html |
+| detroit_flash | 86 | External pump pressure input voltage high | PID 73 / 3 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405602.html |
+| detroit_flash | 87 | External pump pressure input voltage low | PID 73 / 4 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405702.html |
+| detroit_flash | 89 | Fuel restriction or maintenance coolant-level fault | PID 95 / 0, PID 111 / 12 | - | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/405902.html |
 
 ### Allison B500 with WTEC III controls (`allison_wtec_iii`)
 
@@ -396,29 +501,29 @@ B500 only when WTEC III controls are confirmed. Not WTEC II or Allison 4th/5th-g
 
 Curated two-part selector codes, not all calibrations.
 
-| Namespace | Code | Label / description | J1587 equivalents (code / FMI) | Reference |
-| --- | --- | --- | --- | --- |
-| allison_wtec | 13-12 | Transmission controller supply voltage low | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 13-13 | Transmission controller supply voltage moderately low | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 13-23 | Transmission controller supply voltage high | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 14-12 | Transmission oil level sensor signal low | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 14-23 | Transmission oil level sensor signal high | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 21-12 | Transmission throttle position signal low | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 21-23 | Transmission throttle position signal high | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 22-14 | Transmission engine speed sensor fault | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 22-15 | Transmission turbine speed sensor fault | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 22-16 | Transmission output speed sensor fault | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 23-12 | Primary transmission selector fault | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 23-13 | Primary transmission selector mode fault | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 23-14 | Secondary transmission selector fault | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 23-15 | Secondary transmission selector mode fault | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 23-16 | Transmission selector display connection fault | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 24-12 | Transmission sump fluid temperature below range | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 24-23 | Transmission sump fluid temperature above range | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 26-00 | Transmission cannot detect throttle data source | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 26-11 | Transmission cannot detect engine coolant data source | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 33-12 | Transmission sump temperature sensor signal low | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
-| allison_wtec | 33-23 | Transmission sump temperature sensor signal high | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| Namespace | Code | Label / description | J1587 equivalents (code / FMI) | Applicability / exceptions | Reference |
+| --- | --- | --- | --- | --- | --- |
+| allison_wtec | 13-12 | Transmission controller supply voltage low | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 13-13 | Transmission controller supply voltage moderately low | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 13-23 | Transmission controller supply voltage high | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 14-12 | Transmission oil level sensor signal low | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 14-23 | Transmission oil level sensor signal high | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 21-12 | Transmission throttle position signal low | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 21-23 | Transmission throttle position signal high | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 22-14 | Transmission engine speed sensor fault | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 22-15 | Transmission turbine speed sensor fault | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 22-16 | Transmission output speed sensor fault | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 23-12 | Primary transmission selector fault | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 23-13 | Primary transmission selector mode fault | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 23-14 | Secondary transmission selector fault | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 23-15 | Secondary transmission selector mode fault | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 23-16 | Transmission selector display connection fault | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 24-12 | Transmission sump fluid temperature below range | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 24-23 | Transmission sump fluid temperature above range | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 26-00 | Transmission cannot detect throttle data source | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 26-11 | Transmission cannot detect engine coolant data source | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 33-12 | Transmission sump temperature sensor signal low | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
+| allison_wtec | 33-23 | Transmission sump temperature sensor signal high | - | - | https://assets.wellertruck.com/reference-materials/troubleshooting-manuals/wteclllshiftselectormanual.pdf |
 
 ## Controller-scoped SID labels
 
@@ -432,7 +537,39 @@ These require engine MID 128 and the explicit Detroit DDEC III/IV reference prof
 | detroit_ddec_iii_iv | 128 | 4 | Engine injector 4 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403d01.html |
 | detroit_ddec_iii_iv | 128 | 5 | Engine injector 5 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403d01.html |
 | detroit_ddec_iii_iv | 128 | 6 | Engine injector 6 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403d01.html |
+| detroit_ddec_iii_iv | 128 | 21 | Engine timing and synchronous reference sensors | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402902.html |
+| detroit_ddec_iii_iv | 128 | 25 | Auxiliary shutdown input 1 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401a02.html |
+| detroit_ddec_iii_iv | 128 | 26 | Auxiliary output 1 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403e02.html |
+| detroit_ddec_iii_iv | 128 | 40 | Auxiliary output 2 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403e02.html |
+| detroit_ddec_iii_iv | 128 | 51 | Engine brake output 1 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401f02.html |
+| detroit_ddec_iii_iv | 128 | 52 | Engine brake output 2 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401f02.html |
+| detroit_ddec_iii_iv | 128 | 53 | Auxiliary output 5 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403e02.html |
+| detroit_ddec_iii_iv | 128 | 54 | Auxiliary output 6 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403e02.html |
+| detroit_ddec_iii_iv | 128 | 55 | Auxiliary output 7 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403e02.html |
+| detroit_ddec_iii_iv | 128 | 56 | Auxiliary output 8 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403e02.html |
+| detroit_ddec_iii_iv | 128 | 57 | PWM output 1 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403f02.html |
+| detroit_ddec_iii_iv | 128 | 58 | PWM output 2 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403f02.html |
+| detroit_ddec_iii_iv | 128 | 59 | PWM output 3 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403f02.html |
+| detroit_ddec_iii_iv | 128 | 60 | PWM output 4 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403f02.html |
+| detroit_ddec_iii_iv | 128 | 61 | Auxiliary shutdown input 2 | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/401a02.html |
+| detroit_ddec_iii_iv | 128 | 76 | Gas-engine knock sensor | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404202.html |
+| detroit_ddec_iii_iv | 128 | 77 | Gas metering valve | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404902.html |
+| detroit_ddec_iii_iv | 128 | 146 | EGR valve | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402702.html |
+| detroit_ddec_iii_iv | 128 | 147 | Variable-nozzle turbo vanes | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402702.html |
+| detroit_ddec_iii_iv | 128 | 151 | ESS transmission gear state | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404902.html |
+| detroit_ddec_iii_iv | 128 | 152 | Legacy EGR valve response | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402702.html |
+| detroit_ddec_iii_iv | 128 | 153 | Legacy turbo vane response | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402702.html |
+| detroit_ddec_iii_iv | 128 | 216 | Other-controller communications | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403702.html |
+| detroit_ddec_iii_iv | 128 | 226 | ESS neutral switch | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404902.html |
+| detroit_ddec_iii_iv | 128 | 227 | ESS shift knob | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404902.html |
+| detroit_ddec_iii_iv | 128 | 230 | Throttle idle-validation switch | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/404402.html |
+| detroit_ddec_iii_iv | 128 | 231 | J1939 data link | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403702.html |
+| detroit_ddec_iii_iv | 128 | 238 | Stop engine lamp circuit | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402002.html |
+| detroit_ddec_iii_iv | 128 | 239 | Check engine lamp circuit | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/402002.html |
+| detroit_ddec_iii_iv | 128 | 249 | J1922 data link | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403902.html |
+| detroit_ddec_iii_iv | 128 | 250 | J1587 data link | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403802.html |
 | detroit_ddec_iii_iv | 128 | 253 | Engine controller nonvolatile memory | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403501.html |
+| detroit_ddec_iii_iv | 128 | 254 | ECM analog-to-digital converter | https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/403402.html |
 
 ## Diagnostic framing and output strings
 

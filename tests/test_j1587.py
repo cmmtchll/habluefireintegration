@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock
 
 from custom_components.bluefire.catalog import export_catalog
 from custom_components.bluefire.j1587 import (
-    IDENTIFICATION_PARAMETERS, PARAMETERS,
+    IDENTIFICATION_PARAMETERS, PARAMETERS, READABLE_PIDS, STATUS_PARAMETERS,
     decode_faults, decode_report, parse_j1708_message,
 )
 from custom_components.bluefire.protocol import J1587Report, ProtocolError
@@ -75,6 +75,11 @@ class ParameterTests(unittest.TestCase):
 
     def test_independent_scaling_and_canonical_units(self):
         fixtures = (
+            (26, 100, 50, "%"), (68, 100, 50, "%"),
+            (74, 100, 80.4672, "km/h"), (86, 100, 80.4672, "km/h"),
+            (122, 100, 50, "%"),
+            (184, 256, 0.425144, "km/L"), (185, 256, 0.425144, "km/L"),
+            (439, 800, 100, "kPa"),
             (51, 125, 50, "%"),
             (84, 100, 80.4672, "km/h"),
             (91, 125, 50, "%"), (92, 100, 50, "%"),
@@ -98,7 +103,7 @@ class ParameterTests(unittest.TestCase):
         )
         self.assertEqual({p.pid for p in PARAMETERS},
                          {pid for pid, *_ in fixtures})
-        self.assertEqual(len(PARAMETERS), 31)
+        self.assertEqual(len(PARAMETERS), 39)
         for pid, raw, expected, unit in fixtures:
             definition = next(p for p in PARAMETERS if p.pid == pid)
             result = decode_report(J1587Report(
@@ -134,8 +139,8 @@ class ParameterTests(unittest.TestCase):
         self.assertEqual(coolant.decode(b"\x00"), -17.777778)
 
     def test_unknown_pids_do_not_acquire_j1939_meanings(self):
-        for pid in (1, 15, 174, 439, 1023):
-            data = b"\x01\x00" if pid in (174, 439) else b"\x01"
+        for pid in (1, 15, 174, 1023):
+            data = b"\x01\x00" if pid == 174 else b"\x01"
             result = decode_report(J1587Report(130, pid, data))
             self.assertFalse(result["value_decoded"])
             self.assertEqual(result["signals"], [])
@@ -164,6 +169,41 @@ class ParameterTests(unittest.TestCase):
             if p["pid"] == 101
         )
         self.assertTrue(exported["signed"])
+
+    def test_status_encodings_have_no_numeric_units_or_guessed_gears(self):
+        for pid, data, value in (
+            (40, b"\x01", "On"), (40, b"\x02", "Off"),
+            (70, b"\x00", "Off"), (70, b"\x81", "On"),
+            (85, b"\x81", "Active"), (85, b"\x00", "Inactive"),
+            (162, b" N", "N"), (163, b" 6", "6"),
+        ):
+            result = decode_report(J1587Report(130, pid, data))
+            self.assertTrue(result["value_decoded"])
+            signal, = result["signals"]
+            self.assertEqual(signal["value"], value)
+            self.assertNotIn("unit", signal)
+            if pid == 85:
+                self.assertEqual(len(signal["switches"]), 8)
+                self.assertEqual(
+                    signal["switches"]["active"], value == "Active",
+                )
+        for parameter in STATUS_PARAMETERS:
+            signal, = decode_report(J1587Report(
+                128, parameter.pid, b"\xff" * parameter.length,
+            ))["signals"]
+            self.assertIsNone(signal["value"])
+            for data in (bytes(parameter.length + 1), bytearray(1)):
+                with self.assertRaises(ValueError):
+                    parameter.decode(data)
+        for data, status in (
+            (b"\x00\x01", "unsupported_encoding"), (b"  ", "unavailable"),
+        ):
+            result = decode_report(J1587Report(130, 163, data))
+            self.assertFalse(result["value_decoded"])
+            self.assertEqual(result["signals"][0]["decode_status"], status)
+        self.assertIn(174, READABLE_PIDS)
+        self.assertTrue({195, 196, 192, 254}.isdisjoint(READABLE_PIDS))
+        self.assertEqual(len(READABLE_PIDS), len(set(READABLE_PIDS)))
 
 
 class J1708DatagramTests(unittest.TestCase):
@@ -310,6 +350,100 @@ class ReplayTests(unittest.TestCase):
 
 
 class PublishingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selected_engine_identity_fault_catalog_and_stable_ownership(
+        self,
+    ):
+        for profile in ("generic", "detroit_series_60_ddec_iv"):
+            self.publish.reset_mock()
+            bridge = MqttBridge(
+                "coach", self.publish, engine_profile=profile,
+                known_j1587=[[128, 168]],
+            )
+            await bridge.async_rediscover()
+            await bridge.async_process_j1587(
+                J1587Report(128, 194, bytes.fromhex("a8 21 fa 3c")),
+            )
+            await bridge.async_process_j1587(
+                J1587Report(130, 194, bytes.fromhex("a8 21")),
+            )
+            configs = [
+                json.loads(payload) for topic, payload, _ in self.messages()
+                if topic.endswith("/config") and payload
+            ]
+            self.assertTrue(any(
+                c["unique_id"] == "bluefire_coach_j1587_128_168"
+                for c in configs
+            ))
+            states = {
+                topic: json.loads(payload)
+                for topic, payload, _ in self.messages()
+                if "/faults/" in topic
+            }
+            engine = states["vehicle/coach/j1587/128/faults/194"]
+            transmission = states["vehicle/coach/j1587/130/faults/194"]
+            self.assertEqual(
+                transmission["faults"][0]["manufacturer_matches"], [],
+            )
+            self.assertIsNone(transmission["faults"][0]["profile"])
+            self.assertEqual(transmission["source_name"], "Transmission")
+            if profile == "generic":
+                self.assertEqual(engine["source_name"], "Engine")
+                self.assertEqual(engine["faults"][0]["manufacturer_matches"],
+                                 [])
+            else:
+                self.assertIn("DDEC IV", engine["source_name"])
+                self.assertEqual(
+                    engine["source_name_basis"],
+                    "configured_official_equipment_labels",
+                )
+                self.assertEqual(
+                    [f["manufacturer_matches"][0]["code"]
+                     for f in engine["faults"]], ["46", "56"],
+                )
+                self.assertEqual(
+                    bridge.diagnostics()["j1587"]["engine_profile"], profile,
+                )
+        with self.assertRaisesRegex(ValueError, "engine profile"):
+            MqttBridge("coach", self.publish, engine_profile="guess")
+
+    async def test_status_discovery_restores_and_removes_with_existing_ledger(
+        self,
+    ):
+        for parameter in STATUS_PARAMETERS:
+            data = b" N" if parameter.kind == "gear" else b"\x81"
+            await self.bridge.async_process_j1587(
+                J1587Report(130, parameter.pid, data),
+            )
+        configs = [
+            json.loads(payload) for topic, payload, _ in self.messages()
+            if topic.endswith("/config")
+        ]
+        for config in configs:
+            self.assertNotIn("unit_of_measurement", config)
+            self.assertNotIn("state_class", config)
+        known = self.save.await_args.args[0]
+        self.assertEqual(known, [[130, p.pid] for p in STATUS_PARAMETERS])
+        restored = MqttBridge(
+            "coach", self.publish, known_j1587=known, j1708_polling=True,
+        )
+        self.publish.reset_mock()
+        await restored.async_rediscover()
+        self.assertFalse(any(
+            "/pid/" in topic for topic, _, _ in self.messages()
+        ))
+        restored_configs = [
+            json.loads(payload) for topic, payload, _ in self.messages()
+            if topic.startswith("homeassistant/sensor/")
+        ]
+        self.assertEqual(len(restored_configs), 5)
+        self.assertTrue(all(c["expire_after"] == 60 for c in restored_configs))
+        self.publish.reset_mock()
+        await restored.async_remove_discovery()
+        self.assertEqual(sum(
+            payload == "" and topic.startswith("homeassistant/sensor/")
+            for topic, payload, _ in self.messages()
+        ), 5)
+
     async def test_identification_mid_isolation_and_removal(self):
         for mid, pid, data in (
             (128, 243, b"EXAMPLE ENGINE*MODEL*SERIAL*"),
@@ -637,7 +771,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_parameters_raw_only_and_invalid_inputs_atomic(self):
         await self.bridge.async_process_j1587(
-            J1587Report(130, 439, b"\x01\x00")
+            J1587Report(130, 174, b"\x01\x00")
         )
         self.assertEqual(len(self.messages()), 2)
         self.assertTrue(self.messages()[0][0].endswith("/report"))

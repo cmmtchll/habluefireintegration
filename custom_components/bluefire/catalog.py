@@ -9,7 +9,7 @@ import re
 
 from .signals import SIGNALS
 
-CATALOG_VERSION = 2
+CATALOG_VERSION = 3
 REFERENCES = {
     "bluefire": (
         "Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; "
@@ -36,6 +36,14 @@ REFERENCES = {
     "ddec": (
         "https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/"
     ),
+    "ddec_appendix": (
+        "https://manualmachine.com/detroitdiesel/ddeciv/24330624-user-manual/"
+    ),
+    "prevost": (
+        "https://github.com/cmmtchll/LibertyH3-45ElegantLady2003RV/blob/main/"
+        "manuals/extracted/master-set/"
+        "manuals-maintenance-manual-pa1163-2003.md"
+    ),
     "j1587": (
         "Local Windows BlueFire 12.5.6 J1708 parameter scaling cross-check, "
         "including unsigned quarter-degree Fahrenheit temperatures and "
@@ -48,12 +56,17 @@ PROFILES = {
     "detroit_ddec_iii_iv": {
         "name": "Detroit Diesel DDEC III/IV",
         "applicability": (
-            "Reference for a 2003-era 500 HP Detroit Diesel only if its ECM "
-            "is confirmed as DDEC III/IV. Horsepower does not identify an ECM."
+            "DDEC III/IV single-ECM reference (6SE497). The coach's official "
+            "labels and Prevost PA1163 identify its 500 HP Series 60 and "
+            "DDEC IV; select the confirmed engine profile in configuration. "
+            "Other installations remain standard J1587 unless selected."
         ),
         "coverage": (
-            "Curated flash codes and J1587 PID/SID/FMI equivalents, "
-            "including a six-cylinder injector reference subset."
+            "All 66 flash-code sections indexed by the referenced 6SE497 "
+            "edition, with independently summarized labels and verified "
+            "equivalents. Conflicting/ambiguous crosswalks are withheld, "
+            "not guessed. Gas, EGR, ESS, Optimized Idle and optional sensor "
+            "references do not establish installed equipment or calibration."
         ),
         "reference": REFERENCES["ddec"],
     },
@@ -104,29 +117,54 @@ MIDS = {
     146: "Climate control", 171: "Driver information", 249: "Body controller",
 }
 PIDS = {
+    26: "Fan speed percentage", 40: "Retarder switch",
+    68: "Engine torque factor", 73: "External pump pressure",
+    74: "Maximum road speed", 81: "Exhaust back pressure",
     51: "Throttle position", 70: "Parking brake status",
-    84: "Vehicle speed", 91: "Accelerator pedal position",
+    84: "Vehicle speed", 85: "Cruise control status",
+    86: "Cruise set speed", 91: "Accelerator pedal position",
     92: "Engine load", 93: "Actual engine torque",
-    94: "Fuel delivery pressure", 96: "Fuel level",
+    94: "Fuel delivery pressure", 95: "Fuel inlet restriction",
+    96: "Fuel level", 98: "Engine oil level", 99: "Oil filter restriction",
     100: "Engine oil pressure", 101: "Crankcase pressure",
-    102: "Intake manifold pressure", 105: "Intake manifold temperature",
+    102: "Intake manifold pressure", 103: "Turbocharger speed",
+    105: "Intake manifold temperature", 106: "Air inlet pressure",
+    107: "Air filter restriction",
     108: "Barometric pressure", 109: "Coolant pressure",
     110: "Coolant temperature", 111: "Coolant level",
     116: "Brake application pressure", 117: "Primary brake air pressure",
     118: "Secondary brake air pressure", 120: "Retarder oil temperature",
+    121: "Engine retarder status", 122: "Retarder torque percentage",
+    154: "Legacy EGR temperature", 155: "Legacy EGR differential pressure",
     162: "Transmission selected gear", 163: "Transmission current gear",
     168: "Electrical system voltage", 171: "Ambient air temperature",
     172: "Engine air intake temperature", 173: "Exhaust gas temperature",
     174: "Fuel temperature",
     175: "Engine oil temperature", 177: "Transmission oil temperature",
     183: "Fuel rate", 184: "Instantaneous fuel economy",
-    185: "Average fuel economy", 190: "Engine speed",
+    185: "Average fuel economy", 187: "Variable speed governor input",
+    190: "Engine speed",
     192: "Multisection parameter", 194: "Diagnostic trouble codes",
     195: "Diagnostic clearing request", 196: "Diagnostic clearing response",
+    222: "Anti-theft status",
     234: "Software identification", 235: "Engine idle hours",
     236: "Engine idle fuel used", 237: "Vehicle identification",
     243: "Component identification", 245: "Total vehicle distance",
     247: "Total engine hours", 250: "Total fuel used",
+    251: "Clock module", 252: "Clock module extension",
+    351: "Turbo compressor inlet temperature", 354: "Relative humidity",
+    404: "Turbo compressor outlet temperature",
+    411: "EGR differential pressure", 412: "EGR temperature",
+    439: "Extended intake manifold pressure",
+}
+PID_REFERENCES = {
+    pid: f"{REFERENCES['ddec']}40{flash:02x}02.html"
+    for pid, flash in (
+        (73, 86), (81, 77), (95, 37), (98, 81), (99, 66), (103, 64),
+        (106, 47), (107, 65), (154, 48), (155, 48), (187, 11), (222, 77),
+        (251, 77), (252, 77), (351, 29), (354, 17), (404, 29), (411, 48),
+        (412, 48),
+    )
 }
 FMIS = {
     0: "Above normal range (most severe)",
@@ -186,6 +224,8 @@ OBD_UNITS = {
     "01:0F": "°C", "01:10": "g/s", "01:11": "%",
 }
 PID_UNITS = {
+    26: "%", 68: "%", 74: "km/h", 86: "km/h", 122: "%",
+    184: "km/L", 185: "km/L", 439: "kPa",
     51: "%", 84: "km/h", 91: "%", 92: "%",
     93: "%", 94: "kPa", 96: "%", 100: "kPa", 101: "kPa", 102: "kPa",
     105: "°C", 108: "kPa", 109: "kPa", 110: "°C", 111: "%",
@@ -207,12 +247,16 @@ class ManufacturerCode:
     reference: str
     pid_fmi: tuple[tuple[int, int], ...] = ()
     sid_fmi: tuple[tuple[int, int], ...] = ()
+    applicability: str = ""
 
 
-def _detroit(code: int, name: str, *pairs: tuple[int, int]):
+def _detroit(
+    code: int, name: str, *pairs: tuple[int, int],
+    sids: tuple[tuple[int, int], ...] = (), applicability: str = "",
+):
     return ManufacturerCode(
         "detroit_ddec_iii_iv", "detroit_flash", str(code), name,
-        f"{REFERENCES['ddec']}40{code:02x}02.html", pairs,
+        f"{REFERENCES['ddec']}40{code:02x}02.html", pairs, sids, applicability,
     )
 
 
@@ -230,24 +274,139 @@ def _detroit_sid(code: int, name: str, *pairs: tuple[int, int]):
 
 
 MANUFACTURER_CODES = (
+    _detroit(11, "Variable speed governor input voltage low", (187, 4)),
+    _detroit(12, "Variable speed governor input voltage high", (187, 3)),
     _detroit(13, "Coolant level sensor circuit low", (111, 4), (111, 6)),
     _detroit(14, "Coolant or oil temperature sensor circuit high",
              (110, 3), (175, 3)),
     _detroit(15, "Coolant or oil temperature sensor circuit low",
              (110, 4), (175, 4)),
     _detroit(16, "Coolant level sensor circuit high", (111, 3), (111, 5)),
+    _detroit(17, "Throttle plate or humidity input voltage high",
+             (51, 3), (354, 3), applicability="Application-dependent sensors"),
+    _detroit(18, "Throttle plate or humidity input voltage low",
+             (51, 4), (354, 4), applicability="Application-dependent sensors"),
     _detroit(21, "Throttle position sensor circuit high", (91, 3)),
     _detroit(22, "Throttle position sensor circuit low", (91, 4)),
     _detroit(23, "Fuel temperature sensor circuit high", (174, 3)),
     _detroit(24, "Fuel temperature sensor circuit low", (174, 4)),
+    _detroit_sid(26, "Auxiliary engine shutdown input active",
+                 (25, 11), (61, 11)),
+    _detroit(27, "Air inlet temperature input voltage high", (172, 3)),
+    _detroit(28, "Air inlet temperature input voltage low", (172, 4)),
+    _detroit(29, "Turbo compressor temperature input voltage low",
+             (351, 4), (404, 4), applicability="Optional turbo/EGR sensors"),
+    _detroit_sid(31, "Engine brake output circuit fault",
+                 (51, 3), (51, 4), (52, 3), (52, 4)),
+    _detroit_sid(32, "Stop or check engine lamp circuit fault",
+                 (238, 3), (238, 4), (239, 3), (239, 4)),
+    _detroit(33, "Boost pressure input voltage high", (102, 3)),
+    _detroit(34, "Boost pressure input voltage low", (102, 4)),
+    _detroit(35, "Oil pressure input voltage high", (100, 3)),
+    _detroit(36, "Oil pressure input voltage low", (100, 4)),
+    _detroit(37, "Fuel pressure or restriction input voltage high",
+             (94, 3), (95, 3)),
+    _detroit(38, "Fuel pressure or restriction input voltage low",
+             (94, 4), (95, 4)),
+    _detroit(39, "EGR valve or variable-nozzle turbo response fault",
+             sids=((146, 2), (146, 12), (146, 7), (152, 7),
+                   (147, 2), (147, 12), (147, 14), (147, 11),
+                   (147, 7), (153, 7)),
+             applicability="EGR/VNT applications only; not assumed installed"),
+    _detroit_sid(41, "Missing timing reference or extra synchronous pulses",
+                 (21, 0)),
+    _detroit_sid(42, "Missing synchronous reference or extra timing pulses",
+                 (21, 1)),
     _detroit(43, "Coolant level below normal", (111, 1)),
     _detroit(44, "Coolant or engine oil temperature above normal",
              (110, 0), (175, 0)),
     _detroit(45, "Engine oil pressure below normal", (100, 1)),
+    _detroit(46, "ECM battery supply voltage low", (168, 1)),
+    _detroit(47, "Fuel, boost or gas-engine inlet pressure above range",
+             (94, 0), (102, 0), (106, 0)),
+    _detroit(48, "Fuel pressure or optional inlet/EGR data below range",
+             (94, 1), (106, 1), (412, 1), (154, 1), (411, 1), (155, 1),
+             (351, 1), (404, 1),
+             applicability="EGR PID numbering depends on ECM software"),
+    _detroit(49, "Turbo compressor temperature above range or derate",
+             (351, 0), (404, 0), (404, 14)),
+    _detroit(51, "Turbo compressor temperature input voltage high",
+             (351, 3), (404, 3)),
+    _detroit_sid(52, "ECM analog-to-digital conversion fault", (254, 12)),
     _detroit_sid(53, "Engine controller nonvolatile memory error",
                  (253, 12), (253, 2)),
+    _detroit(54, "Vehicle speed signal fault", (84, 12)),
+    _detroit_sid(55, "J1939 link or other-controller communication fault",
+                 (231, 12), (216, 14)),
+    _detroit_sid(56, "J1587 diagnostic data link fault", (250, 12)),
+    _detroit_sid(57, "J1922 data link fault", (249, 12)),
+    _detroit(58, "Engine torque overload", (92, 0)),
     _detroit_sid(61, "Injector response too slow",
                  *((cylinder, 0) for cylinder in range(1, 7))),
+    _detroit_sid(62, "Auxiliary output open or short to supply",
+                 *((sid, fmi) for sid in (26, 40, 53, 54, 55, 56)
+                   for fmi in (3, 4))),
+    _detroit_sid(63, "PWM output open or short to supply",
+                 *((sid, fmi) for sid in range(57, 61) for fmi in (3, 4))),
+    _detroit(64, "Turbo speed excessive or speed sensor failure",
+             (103, 0), (103, 8), applicability="Turbo speed sensor required"),
+    _detroit(65, "Air filter sensor or gas-engine throttle response fault",
+             (107, 3), (107, 4), (51, 0), (51, 1), (51, 7)),
+    _detroit(66, "Oil filter sensor or gas-engine knock sensor fault",
+             (99, 3), (99, 4),
+             sids=((76, 0), (76, 7), (76, 3), (76, 4))),
+    _detroit(67, "Coolant pressure or gas-engine inlet pressure circuit fault",
+             (109, 3), (109, 4), (106, 3), (106, 4)),
+    _detroit_sid(68, "Throttle idle-validation circuit fault",
+                 (230, 5), (230, 6)),
+    _detroit_sid(71, "Injector response too fast",
+                 *((cylinder, 1) for cylinder in range(1, 7))),
+    _detroit(72, "Vehicle overspeed", (84, 0), (84, 11)),
+    _detroit(73, "Air restriction, ESS shift input or gas valve fault",
+             sids=((227, 2), (227, 3), (227, 4), (226, 11), (151, 14),
+                   (77, 0), (77, 1), (77, 3), (77, 4)),
+             applicability=(
+                 "ESS/gas options are not assumed. Air restriction 107/0 "
+                 "is omitted: 6SE497 says SID, 7SA743 Appendix A says PID."
+             )),
+    _detroit(74, "Optimized Idle interlock or oil filter restriction fault",
+             applicability=(
+                 "Equivalence withheld: 6SE497 reports PID 70/4 and an "
+                 "Optimized Idle interlock; 7SA743 reports PID 99/0. "
+                 "Select the applicable calibration/service reference."
+             )),
+    _detroit(75, "ECM battery supply voltage high", (168, 0)),
+    _detroit(76, "Engine overspeed with engine brake", (121, 0)),
+    _detroit(77, "Application-specific range, clock or anti-theft fault",
+             (73, 1), (81, 0), (81, 1), (81, 12), (81, 3), (81, 4),
+             (95, 1), (99, 1), (100, 0), (102, 1), (105, 1), (107, 1),
+             (108, 0), (108, 1), (109, 0), (110, 1), (111, 0), (171, 0),
+             (171, 1), (172, 1), (175, 1), (222, 14), (251, 10),
+             (251, 13), (252, 10), (252, 13), (354, 0), (354, 1),
+             applicability=(
+                 "Many entries are not on-highway Series 60 features. "
+                 "PID 174/0 and 174/1 withheld: the guide assigns both "
+                 "fuel temperature and temporary TCO meanings."
+             )),
+    _detroit(78, "Cruise or adaptive-cruise system fault", (86, 14)),
+    _detroit(81, "Oil level or exhaust/EGR sensor input voltage high",
+             (98, 3), (173, 3),
+             applicability=(
+                 "EGR equivalents withheld because the source editions "
+                 "disagree on PID/SID namespace and legacy numbering."
+             )),
+    _detroit(82, "Oil level or exhaust/EGR sensor input voltage low",
+             (98, 4), (173, 4),
+             applicability="EGR crosswalk withheld; see flash 81 notes"),
+    _detroit(83, "Exhaust temperature, pump pressure or EGR value high",
+             (173, 0), (73, 0),
+             applicability="EGR crosswalk withheld; see flash 81 notes"),
+    _detroit(84, "Engine oil level low", (98, 1)),
+    _detroit(85, "Engine overspeed", (190, 0)),
+    _detroit(86, "External pump pressure input voltage high", (73, 3)),
+    _detroit(87, "External pump pressure input voltage low", (73, 4)),
+    _detroit(89, "Fuel restriction or maintenance coolant-level fault",
+             (95, 0), (111, 12)),
     _allison("13-12", "Transmission controller supply voltage low"),
     _allison("13-13", "Transmission controller supply voltage moderately low"),
     _allison("13-23", "Transmission controller supply voltage high"),
@@ -278,6 +437,41 @@ DETROIT_SIDS = {
     },
     253: ("Engine controller nonvolatile memory",
           f"{REFERENCES['ddec']}403501.html"),
+    **{
+        sid: (name, f"{REFERENCES['ddec']}40{flash:02x}02.html")
+        for sid, name, flash in (
+            (21, "Engine timing and synchronous reference sensors", 41),
+            (25, "Auxiliary shutdown input 1", 26),
+            (61, "Auxiliary shutdown input 2", 26),
+            (51, "Engine brake output 1", 31),
+            (52, "Engine brake output 2", 31),
+            (76, "Gas-engine knock sensor", 66),
+            (77, "Gas metering valve", 73),
+            (146, "EGR valve", 39), (147, "Variable-nozzle turbo vanes", 39),
+            (152, "Legacy EGR valve response", 39),
+            (153, "Legacy turbo vane response", 39),
+            (151, "ESS transmission gear state", 73),
+            (216, "Other-controller communications", 55),
+            (226, "ESS neutral switch", 73),
+            (227, "ESS shift knob", 73),
+            (230, "Throttle idle-validation switch", 68),
+            (231, "J1939 data link", 55),
+            (238, "Stop engine lamp circuit", 32),
+            (239, "Check engine lamp circuit", 32),
+            (249, "J1922 data link", 57), (250, "J1587 data link", 56),
+            (254, "ECM analog-to-digital converter", 52),
+        )
+    },
+    **{
+        sid: (f"Auxiliary output {output}",
+              f"{REFERENCES['ddec']}403e02.html")
+        for sid, output in ((26, 1), (40, 2), (53, 5), (54, 6), (55, 7),
+                            (56, 8))
+    },
+    **{
+        sid: (f"PWM output {sid - 56}", f"{REFERENCES['ddec']}403f02.html")
+        for sid in range(57, 61)
+    },
 }
 
 NAMESPACES = (
@@ -336,6 +530,8 @@ def lookup(
         reference = REFERENCES["fmi"]
     elif namespace == "obd_pid":
         reference = REFERENCES["obd"]
+    elif namespace == "pid" and code in PID_REFERENCES:
+        reference = PID_REFERENCES[code]
     elif namespace in ("spn", "pgn"):
         reference = (
             REFERENCES["j1939"] if code in (65226, 65227, 623, 624, 987, 1213)
@@ -410,7 +606,7 @@ def describe_fault(
 
 def export_catalog() -> dict:
     """Export the auditable database without loading any vendor resources."""
-    from .j1587 import export_parameters
+    from .j1587 import READABLE_PIDS, STATUS_PARAMETERS, export_parameters
 
     tables = {
         "pgn": PGNS, "spn": SPNS, "source": SOURCES, "mid": MIDS,
@@ -426,6 +622,11 @@ def export_catalog() -> dict:
             for signal in SIGNALS
         ],
         "j1587_measurements": export_parameters(),
+        "j1587_statuses": [
+            {**asdict(p), "name": p.name, "length": p.length}
+            for p in STATUS_PARAMETERS
+        ],
+        "j1587_readable_pids": sorted(READABLE_PIDS),
         "j1587_failure_modes": J1587_FMIS,
         "j1939_lamp_status": LAMP_STATUS,
         "j1939_lamp_flash": LAMP_FLASH,

@@ -55,8 +55,12 @@ _MILE_KM = 1.609344
 _PSI_KPA = 6.894757293168
 _GALLON_LITRES = 3.785411784
 PARAMETERS = (
+    Parameter(26, 1, 0.5, 0, "%"),
     Parameter(51, 1, 0.4, 0, "%"),
+    Parameter(68, 1, 0.5, 0, "%"),
+    Parameter(74, 1, 0.5 * _MILE_KM, 0, "km/h", "speed"),
     Parameter(84, 1, 0.5 * _MILE_KM, 0, "km/h", "speed"),
+    Parameter(86, 1, 0.5 * _MILE_KM, 0, "km/h", "speed"),
     Parameter(91, 1, 0.4, 0, "%"),
     Parameter(92, 1, 0.5, 0, "%"),
     Parameter(94, 1, 0.5 * _PSI_KPA, 0, "kPa", "pressure"),
@@ -73,6 +77,7 @@ PARAMETERS = (
     Parameter(117, 1, 0.6 * _PSI_KPA, 0, "kPa", "pressure"),
     Parameter(118, 1, 0.6 * _PSI_KPA, 0, "kPa", "pressure"),
     Parameter(120, 1, 10 / 9, -32 * 5 / 9, "°C", "temperature"),
+    Parameter(122, 1, 0.5, 0, "%"),
     Parameter(168, 2, 0.05, 0, "V", "voltage"),
     Parameter(171, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
     Parameter(172, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
@@ -80,6 +85,8 @@ PARAMETERS = (
     Parameter(175, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
     Parameter(177, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
     Parameter(183, 2, _GALLON_LITRES / 64, 0, "L/h", "volume_flow_rate"),
+    Parameter(184, 2, _MILE_KM / _GALLON_LITRES / 256, 0, "km/L"),
+    Parameter(185, 2, _MILE_KM / _GALLON_LITRES / 256, 0, "km/L"),
     Parameter(190, 2, 0.25, 0, "rpm"),
     Parameter(235, 4, 0.05, 0, "h", "duration", "total_increasing"),
     Parameter(236, 4, _GALLON_LITRES / 8, 0, "L",
@@ -89,6 +96,70 @@ PARAMETERS = (
     Parameter(247, 4, 0.05, 0, "h", "duration", "total_increasing"),
     Parameter(250, 4, _GALLON_LITRES / 8, 0, "L",
               "volume", "total_increasing"),
+    Parameter(439, 2, 0.125, 0, "kPa", "pressure"),
+)
+
+
+@dataclass(frozen=True)
+class StatusParameter:
+    """Unitless switch fields or two-character gear text, not magnitudes."""
+
+    pid: int
+    kind: str
+
+    @property
+    def name(self) -> str:
+        return lookup("pid", self.pid)["name"]
+
+    @property
+    def spn(self) -> int:
+        return self.pid
+
+    @property
+    def length(self) -> int:
+        return 2 if self.kind == "gear" else 1
+
+    def decode(self, data: bytes) -> dict:
+        if not isinstance(data, bytes) or len(data) != self.length:
+            raise ValueError("J1587 status value length does not match PID")
+        value = None
+        status = "unavailable"
+        switches = {}
+        if data != b"\xff" * self.length:
+            status = "decoded"
+            if self.kind == "gear":
+                if all(32 <= byte <= 126 for byte in data):
+                    value = data.decode("ascii").strip() or None
+                    if value is None:
+                        status = "unavailable"
+                else:
+                    status = "unsupported_encoding"
+            elif self.kind == "cruise":
+                switches = {
+                    label: bool(data[0] & (1 << bit))
+                    for bit, label in enumerate((
+                        "enabled", "set", "coast", "resume", "accelerate",
+                        "brake", "clutch", "active",
+                    ))
+                }
+                value = "Active" if switches["active"] else "Inactive"
+            else:
+                value = "On" if data[0] & 1 else "Off"
+        return {
+            "pid": self.pid, "name": self.name,
+            "description": (
+                f"{self.name}, reported as J1587 {self.kind} data; "
+                "not a command or safety assessment."
+            ),
+            "value": value, "data": data.hex(), "decode_status": status,
+            **({"switches": switches} if self.kind == "cruise" else {}),
+        }
+
+
+STATUS_PARAMETERS = (
+    StatusParameter(40, "switch"), StatusParameter(70, "switch"),
+    StatusParameter(85, "cruise"), StatusParameter(162, "gear"),
+    StatusParameter(163, "gear"),
 )
 
 
@@ -142,7 +213,13 @@ class IdentificationParameter:
 IDENTIFICATION_PARAMETERS = tuple(
     IdentificationParameter(pid) for pid in (234, 237, 243)
 )
-ENTITIES = PARAMETERS + (DiagnosticParameter(),) + IDENTIFICATION_PARAMETERS
+ENTITIES = (
+    PARAMETERS + STATUS_PARAMETERS + (DiagnosticParameter(),)
+    + IDENTIFICATION_PARAMETERS
+)
+# PID 174 is a documented engine sensor but its scaling is not established
+# by the inspected BlueFire implementation. Explicit reads retain raw bytes.
+READABLE_PIDS = tuple(p.pid for p in ENTITIES) + (174,)
 
 
 def validate_report(report: J1587Report) -> None:
@@ -236,6 +313,14 @@ def decode_report(
             "parameter": parameter,
             "value_decoded": value["decode_status"] == "decoded",
             "identification": value,
+        }
+    status = next((p for p in STATUS_PARAMETERS if p.pid == report.pid), None)
+    if status is not None:
+        value = status.decode(report.data)
+        return {
+            "parameter": parameter,
+            "value_decoded": value["decode_status"] == "decoded",
+            "signals": [value],
         }
     signal = next((p for p in PARAMETERS if p.pid == report.pid), None)
     return {

@@ -1,7 +1,8 @@
 # BlueFire for Home Assistant
 
 Preparation for a **direct BLE → Home Assistant → MQTT** integration, initially
-focused on a 2003-era **500 HP Detroit Diesel**, **Allison B500** transmission
+focused on a **Detroit Series 60 12.7 L, 500 HP, DDEC IV** engine and
+**Allison HD4000MH R** transmission
 and Prevost H3-45 Liberty Coach Elegant Lady.
 No Android gateway is required or planned.
 
@@ -42,7 +43,8 @@ No Android gateway is required or planned.
   and Allison B500/WTEC III reference subsets.
 - Read-only single-frame J1939 DM1/DM2 fault interpretation and MQTT diagnostic
   discovery. Offline analysis also accepts already-reassembled diagnostic reports.
-- J1708/J1587 decoding of 31 numeric PIDs and PID 194 diagnostic entries,
+- J1708/J1587 decoding of 39 numeric PIDs, five switch/cruise/gear status PIDs
+  and PID 194 diagnostic entries,
   with a checksummed-datagram parser and separate MQTT/MID/PID discovery.
 - One-minute J1708 fuel-level, diagnostic-code, odometer, engine-hours and
   total-fuel-used polling after opt-in startup, plus manual refresh actions,
@@ -105,7 +107,7 @@ itself does not enable writes.
 Startup waits for a heartbeat, negotiates client compatibility, checks both
 unsecured authentication responses on firmware 3.x, reads adapter variables
 and J1708 availability, signals application connection, installs passive
-subscriptions and starts reports. It monitors all 31 supported numeric PIDs
+subscriptions and starts reports. It monitors all 39 supported numeric PIDs
 plus diagnostic PID 194 across reported MIDs at a 1000 ms interval. Vendor
 subscription MID 0 means any MID; actual report identities remain unchanged.
 These baseline subscriptions use passive monitoring. After startup is ready,
@@ -113,12 +115,16 @@ fuel PID 96, diagnostic PID 194, distance PID 245, engine hours PID 247 and
 total fuel used PID 250 also receive automatic one-minute active read requests
 as described below. Other PIDs that the ECU does not broadcast may remain absent.
 
-There are 35 passive PID subscriptions in total, all using wildcard MID 0:
-31 measurements, diagnostic PID 194 and identification PIDs 234, 237 and 243.
+There are 48 passive PID subscriptions in total, all using wildcard MID 0:
+39 measurements, five status PIDs, diagnostic PID 194 and identification
+PIDs 234, 237 and 243.
 Compared with the original 16 subscriptions, the expanded set adds throttle
 position, fuel/crankcase/intake/barometric/coolant pressures, coolant level,
 three brake pressures, retarder temperature, ambient/intake/exhaust temperatures,
-engine oil temperature and transmission oil temperature. Sensors are discovered
+engine oil temperature and transmission oil temperature. The latest additions
+include fan speed and engine/retarder torque percentages, maximum/cruise speeds,
+instantaneous/average fuel economy, extended boost, retarder/parking switches,
+cruise status and selected/current gear text. Sensors are discovered
 only when a controller actually reports a supported PID. No new MID selection
 or active vehicle requests are needed; controllers keep distinct MID identities.
 The expanded filter set still requires hardware confirmation, including adapter
@@ -159,6 +165,19 @@ Raw hexadecimal bytes are preserved in both cases. No manufacturer/model
 field splitting, DDEC/WTEC generation inference or automatic fault-profile
 selection is performed. `identity_basis: controller_reported` describes
 the text's provenance; source-role labels remain conventional hints.
+
+For this coach, select **Confirmed engine equipment → Detroit Diesel Series 60 /
+DDEC IV** in **Reconfigure**. The official equipment labels are authoritative;
+this enables the DDEC diagnostic catalog and names engine MID 128 accordingly,
+with `source_name_basis: configured_official_equipment_labels`. Other MIDs
+retain their own identities; neither `Mike1` nor software text `39.02` is used
+to override official labels, infer a calibration or rename unknown controllers.
+The selection survives name/MAC reconfiguration without changing entity IDs.
+Choose standard J1587 to remove the engine-specific interpretation.
+
+BlueFire PID 243 sometimes prefixes component text with the responding MID.
+The vendor boundary validates/removes that wrapper before ASCII decoding;
+normalized reports and raw J1708 datagrams keep their existing contract.
 
 The integration's own BlueFire device also gets native diagnostic text
 sensors, separate from the MQTT-discovered vehicle sensors. They are created
@@ -412,6 +431,32 @@ selecting the BlueFire config entry:
 | `bluefire.read_odometer` | J1587 PID 245 | Total vehicle distance in km per responding MID |
 | `bluefire.read_engine_hours` | J1587 PID 247 | Total engine hours in h per responding MID |
 | `bluefire.read_total_fuel_used` | J1587 PID 250 | Total fuel used in L per responding MID, not fuel remaining |
+| `bluefire.read_software_identification` | J1587 PID 234 | Controller-reported software text |
+| `bluefire.read_vehicle_identification` | J1587 PID 237 | Controller-reported identification; not automatically a valid VIN |
+| `bluefire.read_component_identification` | J1587 PID 243 | Component make/model/serial text, where reported |
+| `bluefire.read_parameter` | Allowlisted `pid` | Any supported measurement/status/identity/fault PID, plus raw-only fuel temperature PID 174 |
+
+All read actions accept optional `mid`: **128** targets the engine, **130**
+the transmission; omitted or **0** collects all responding MIDs. Other valid
+targets are 128–255. Targeting filters the returned response, not unrelated
+passive telemetry. New actions are **manual only** and do not expand the
+five-PID minute polling loop. For example:
+
+```yaml
+action: bluefire.read_parameter
+data:
+  entry_id: YOUR_BLUEFIRE_ENTRY_ID
+  mid: 128
+  pid: 439
+response_variable: boost_report
+```
+
+Useful manual reads include fan speed **26**, engine torque factor **68**, retarder
+torque **122**, cruise status/set speed **85/86**, parking brake **70**,
+selected/current gear **162/163**, fuel economy **184/185**, idle hours/fuel
+**235/236**, and extended boost **439**. The complete allowlist is exported in
+the [code reference](docs/code-reference.md). Arbitrary PIDs, fault clearing
+195/196 and control/programming commands are rejected.
 
 These explicit actions send a one-shot vehicle-bus read request, collect reports
 for five seconds and restore the normal passive subscription, using the same
@@ -438,7 +483,8 @@ vehicle-control commands are exposed.
 
 The wire layout was verified by local static inspection of the supplied
 Windows 12.5.6 package (SHA-256 in the protocol investigation below):
-`CommData.AddPID` writes command 155, wildcard MID 0, a big-endian 16-bit PID,
+`CommData.AddPID` writes command 155, the selected MID (default wildcard 0),
+a big-endian 16-bit PID,
 `OnRequest=1`, `RequestTypes.OnceOnly=1`, zero interval and a trailing zero.
 Restoration uses the existing `OnRequest=0`, `OnInterval=2`, 1000 ms monitor.
 No vendor binaries or implementation are distributed. Active reads still
@@ -458,11 +504,12 @@ setting (PID 245), so distance is a candidate if absent from passive reports.
 Engine hours (PID 247) and total fuel used (PID 250) are also supported decoders
 included in the poll list, not confirmed request-only parameters on this ECU.
 **This is a selected five-PID poll list, not a complete inventory of requestable
-or request-only parameters.** The integration decodes 31 numeric J1587 PIDs plus
-diagnostic PID 194, but decoder support does not establish whether this vehicle
+or request-only parameters.** The integration decodes 39 numeric J1587 PIDs,
+five status PIDs and diagnostic PID 194, but decoder support does not establish
+whether this vehicle
 broadcasts or answers requests for each parameter. Unsupported PIDs remain
-raw-only. This implementation does not actively retrieve VINs, proprietary
-values or J1939 diagnostic reports. Hardware responses are still needed to
+raw-only. Identification can be requested explicitly; arbitrary proprietary
+requests and J1939 diagnostic requests are not exposed. Responses are needed to
 establish the controller-specific list.
 
 ### Adapter inspection
@@ -681,20 +728,29 @@ manual**:
 | Measurements | All 37 prepared SPNs, matching PGN labels, units and descriptions |
 | Other controllers | Conventional engine, transmission, brakes, retarder, instrument, climate, body, cab, tire-pressure and aftertreatment roles |
 | Standard diagnostics | FMI 0–31, including reserved entries; known measurement SPNs and selected brake-pressure/lamp labels |
-| Detroit DDEC III/IV | 13 flash-code references, verified PID/FMI equivalents, six-cylinder injector reference SIDs 1–6 and memory SID 253 scoped to engine MID 128 |
+| Detroit DDEC III/IV | All 66 indexed 6SE497 flash-code sections, verified PID/SID/FMI equivalents, six-cylinder injectors and controller-scoped circuits/data links; explicit exceptions for conflicting tables |
 | Allison B500/WTEC III | 21 exact main/subcode references covering supply voltage, level/temperature/throttle sensors, speed sensors, selectors and missing data sources |
 | J1587 / OBD | Selected parameter labels and units; no reuse of J1939 decoding rules |
-| J1587 decoding | 31 independently defined numeric PIDs plus PID 194 active/inactive diagnostic entries; separate four-bit FMI definitions |
+| J1587 decoding | 39 independently defined numeric PIDs, five switch/cruise/gear status PIDs, three identification PIDs and PID 194; separate four-bit FMI definitions |
 
-The recorded vehicle details are **2003-era, 500 HP Detroit Diesel and Allison
-B500**. They do **not** establish the engine model, ECM generation, transmission
-controller generation or calibration. `detroit_ddec_iii_iv` and
-`allison_wtec_iii` are explicit reference profiles, not automatic settings.
-Do not select them solely from the year or horsepower, and do not apply WTEC
-selector codes to 4th/5th-generation Allison P-codes. Injector numbering and
-cylinder/bank applicability must be checked against the actual engine manual;
-the catalog does not infer an engine model. For example, WTEC III
+The official labels identify **Series 60, 12.7 L, 500 HP, DDEC IV**; the
+Prevost PA1163 maintenance manual independently identifies Series 60/DDEC IV
+and its engine-mounted fuel-temperature sensor. The coach-specific build sheet
+specifies **HD4000MH R**, taking precedence over the generic specification's
+B500 wording. This does not establish the transmission control generation or
+ECM calibration. The engine selection explicitly enables
+`detroit_ddec_iii_iv` in the live path; `allison_wtec_iii` remains a reference,
+not an automatically selected transmission profile. Do not apply WTEC selector
+codes to Allison 4th/5th-generation P-codes. For example, WTEC III
 `13-13` means moderately **low** controller supply voltage; `13-23` is high.
+
+Coverage of the 66 indexed flash sections is not a claim to cover every DDEC
+calibration, optional feature or later code. EGR, gas-engine, ESS and Optimized
+Idle references do not establish that this coach has those features. Crosswalks
+with conflicting namespaces/application meanings (notably flash 73/74 and EGR
+81–83) are explicitly withheld or limited in the catalog. The references are
+manufacturer-authored material hosted by third-party mirrors, not official
+Detroit websites; per-entry links and applicability notes are retained.
 
 Export the dictionary as JSON, or look up codes without an adapter:
 
@@ -786,8 +842,9 @@ rejects them rather than inventing PID meanings.
 
 | Numeric PID | Decoded value | Output unit |
 | --- | --- | --- |
+| 26 / 68 / 122 | Fan speed / engine torque factor / retarder torque | % |
 | 51 | Throttle position | % |
-| 84 | Vehicle speed | km/h |
+| 74 / 84 / 86 | Maximum road / vehicle / cruise set speed | km/h |
 | 91 / 92 / 96 | Accelerator position / engine load / fuel level | % |
 | 94 / 100 | Fuel delivery / engine oil pressure | kPa |
 | 101 / 102 | Crankcase / intake manifold pressure | kPa |
@@ -800,10 +857,17 @@ rejects them rather than inventing PID meanings.
 | 171 / 172 / 173 | Ambient air / engine intake air / exhaust temperature | °C |
 | 175 / 177 | Engine oil / transmission oil temperature | °C |
 | 183 | Fuel rate | L/h |
+| 184 / 185 | Instantaneous / average fuel economy | km/L |
 | 190 | Engine speed | rpm |
 | 235 / 247 | Idle / total engine hours | h |
 | 236 / 250 | Idle / total fuel used | L |
 | 245 | Total vehicle distance | km |
+| 439 | Extended intake manifold pressure | kPa |
+
+Unitless status sensors decode retarder/parking switches **40/70**, cruise
+status **85** (including all eight switch bits as attributes) and two-character
+selected/current gear text **162/163**. These carry no numeric state class or
+unit. Unsupported gear encodings remain null with raw bytes and decode status.
 
 J1587 uses its own scales, little-endian value lengths and native units:
 for example PID 190 uses **0.25 rpm/bit**, not J1939 SPN 190's 0.125.
@@ -814,8 +878,11 @@ Zero values and converted negative temperatures remain valid. PID 101 uses a
 signed one-byte raw value; all-ones still means unavailable, not negative one.
 The two-byte temperature PIDs use unsigned 0.25-degree Fahrenheit values before
 conversion, independently cross-checked against the inspected BlueFire client.
-Labels for other PIDs (including text gears and fuel temperature PID 174) do not
-imply a verified value decoder.
+The installed fuel-temperature sensor is documented, but PID **174** remains
+raw-only because its scaling is not established by the inspected vendor
+decoder. `read_parameter` can request its two raw bytes without assigning a
+guessed temperature. A reported PID is evidence of support; silence after a
+single request is not proof that a sensor is absent.
 The [code reference](docs/code-reference.md) records every implemented scale.
 
 PID 194 diagnostic entries preserve MID, PID versus SID namespace, expanded
@@ -824,8 +891,8 @@ bytes. A missing optional occurrence count is `null`, not zero. An empty list
 means **No faults in this report**, not a vehicle-wide all-clear. These are
 entries in the current parameter report, not an accumulated historical fault
 database. J1587 FMI 15 remains reserved; it is not J1939's least-severe high
-threshold. Detroit mappings require an explicit reference profile for lookup;
-the live publication path does not infer one from MID 128.
+threshold. Detroit mappings require an explicit engine profile; the live path
+uses the configured official-label selection, never MID 128 alone.
 
 | Topic | Content |
 | --- | --- |

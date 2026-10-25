@@ -5,6 +5,14 @@ read_odometer:
       selector:
         config_entry:
           integration: bluefire
+    mid: &controller_mid
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 255
+          step: 1
+          mode: box
 read_engine_hours:
   fields:
     entry_id:
@@ -12,6 +20,7 @@ read_engine_hours:
       selector:
         config_entry:
           integration: bluefire
+    mid: *controller_mid
 read_total_fuel_used:
   fields:
     entry_id:
@@ -19,6 +28,7 @@ read_total_fuel_used:
       selector:
         config_entry:
           integration: bluefire
+    mid: *controller_mid
 read_fuel_level:
   fields:
     entry_id:
@@ -26,6 +36,7 @@ read_fuel_level:
       selector:
         config_entry:
           integration: bluefire
+    mid: *controller_mid
 read_diagnostic_codes:
   fields:
     entry_id:
@@ -33,6 +44,47 @@ read_diagnostic_codes:
       selector:
         config_entry:
           integration: bluefire
+    mid: *controller_mid
+read_software_identification:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
+    mid: *controller_mid
+read_vehicle_identification:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
+    mid: *controller_mid
+read_component_identification:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
+    mid: *controller_mid
+read_parameter:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
+    pid:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 1023
+          step: 1
+          mode: box
+    mid: *controller_mid
 inspect_adapter:
   fields:
     entry_id:

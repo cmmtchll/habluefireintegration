@@ -13,6 +13,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from .const import (
+    CONF_ENGINE_PROFILE,
     CONF_J1587_EXTENDED,
     CONF_J1708_STARTUP,
     DOMAIN,
@@ -124,19 +125,40 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             raise ServiceValidationError("BlueFire receiver is not running")
         runtime.inspecting = True
         try:
-            return await runtime.receiver.async_read(
-                J1708_READ_ACTIONS[call.service]
+            pid = (
+                call.data["pid"] if call.service == "read_parameter"
+                else J1708_READ_ACTIONS[call.service]
             )
+            if call.data.get("mid", 0):
+                return await runtime.receiver.async_read(
+                    pid, mid=call.data["mid"],
+                )
+            return await runtime.receiver.async_read(pid)
         except HomeAssistantError as err:
             runtime.health.error("connection_errors", str(err))
             raise
         finally:
             runtime.inspecting = False
 
-    for service in J1708_READ_ACTIONS:
+    from .catalog import lookup
+    from .j1587 import READABLE_PIDS
+
+    for service in (*J1708_READ_ACTIONS, "read_parameter"):
+        schema = {
+            vol.Required("entry_id"): cv.string,
+            vol.Optional("mid"): vol.All(
+                vol.Coerce(int), vol.Any(0, vol.Range(min=128, max=255)),
+            ),
+        }
+        if service == "read_parameter":
+            schema[vol.Required("pid")] = vol.All(
+                vol.Coerce(int),
+                vol.In({pid: lookup("pid", pid)["name"]
+                        for pid in READABLE_PIDS}),
+            )
         hass.services.async_register(
             DOMAIN, service, read_vehicle,
-            schema=vol.Schema({vol.Required("entry_id"): cv.string}),
+            schema=vol.Schema(schema),
             supports_response=SupportsResponse.ONLY,
         )
 
@@ -228,6 +250,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         known_j1587=await ledger.async_get_j1587(entry.entry_id),
         save_j1587=save_j1587,
         j1708_polling=entry.data.get(CONF_J1708_STARTUP, False),
+        engine_profile=entry.data.get(CONF_ENGINE_PROFILE, "generic"),
     )
     receiver = BlueFireReceiver(
         hass,

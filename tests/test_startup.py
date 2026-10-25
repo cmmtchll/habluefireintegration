@@ -216,8 +216,29 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(startup.identification_requests_sent, 3)
                 for packet in identification:
                     self.assertEqual(self.sent.count(packet[2:-1]), 1)
+                await startup.async_read(243, mid=128)
+                self.assertEqual(
+                    self.sent[-1],
+                    bytes.fromhex("9b 80 00 f3 01 01 00 00 00"),
+                )
                 with self.assertRaisesRegex(StartupError, "Only supported"):
-                    await startup.async_read(243)
+                    await startup.async_read(195)
+
+    async def test_read_allowlist_and_target_mid_validation(self):
+        from custom_components.bluefire.j1587 import READABLE_PIDS
+
+        startup = self.make_startup()
+        await startup.run()
+        for pid in READABLE_PIDS:
+            await startup.async_read(pid, mid=130)
+            self.assertEqual(self.sent[-1][:4],
+                             b"\x9b\x82" + pid.to_bytes(2, "big"))
+        for mid in (-1, 1, 127, 256, True, "128"):
+            with self.assertRaisesRegex(StartupError, "MID"):
+                await startup.async_read(243, mid=mid)
+        for pid in (195, 196, 192, True, "243"):
+            with self.assertRaisesRegex(StartupError, "Only supported"):
+                await startup.async_read(pid)
 
     async def test_identification_write_failure_is_explicit(self):
         startup = self.make_startup()

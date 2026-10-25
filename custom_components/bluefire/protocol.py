@@ -295,6 +295,15 @@ def parse_message(
             data = _report_data(body, offset + 1)
         if pid > 1023:
             raise ProtocolError("J1587 PID outside supported range")
+        # The vendor's component-identification value can include its MID.
+        # Remove only that wrapper, not bytes from normalized/raw J1587.
+        if (
+            pid == 243 and data and data[0] >= 128
+            and data != b"\xff" * len(data)
+        ):
+            if data[0] != body[1]:
+                raise ProtocolError("Component identification MID mismatch")
+            data = data[1:]
         return J1587Report(body[1], pid, data)
     if command == OBD_DATA:
         data = _report_data(body, 6)

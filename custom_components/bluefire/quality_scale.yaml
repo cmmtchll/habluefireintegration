@@ -1,7 +1,7 @@
 rules:
   action-setup:
     status: done
-    comment: Inspection, notification capture and explicit J1708 fuel/fault/distance/hours/total-fuel read actions are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
+    comment: Inspection, notification capture, the bounded allowlisted J1587 parameter action and dedicated measurement/identification read actions are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml. Read actions support an optional controller MID and reject control/clearing PIDs.
   appropriate-polling:
     status: done
     comment: After opt-in startup, custom_components/bluefire/startup.py requests identification PIDs 234, 237 and 243 once per connection and sends bounded liveness queries every 10 seconds while custom_components/bluefire/receiver.py sequentially polls PIDs 96, 194, 245, 247 and 250 each minute with independent backoff capped at 15 minutes, busy-read exclusion and no catch-up bursts. BLE writes are serialized and both tasks stop with the session. Polled sensors expire at 180 seconds; other measurements retain 60-second expiry. Static identification text uses protocol availability without a short expiry. Diagnostic sensors read in-memory counters every 15 seconds.
@@ -22,7 +22,7 @@ rules:
     comment: Runtime dependencies and Home Assistant integrations are declared in custom_components/bluefire/manifest.json.
   docs-actions:
     status: done
-    comment: Adapter inspection, notification capture and all five J1708 manual-read actions and their limits are documented in README.md.
+    comment: Adapter inspection, notification capture and all nine J1708 read actions, target MID selection, the read allowlist and raw-only PID 174 limit are documented in README.md and docs/code-reference.md. Additional manual actions do not expand the five-PID automatic poll set.
   docs-triggers:
     status: exempt
     comment: BlueFire provides no integration-specific triggers to document.
@@ -67,7 +67,7 @@ rules:
     comment: Entry unload and retained-state cleanup are implemented in custom_components/bluefire/__init__.py and covered by tests/test_boundaries.py.
   docs-configuration-parameters:
     status: done
-    comment: Adapter identity, vehicle identifier constraints, and MQTT configuration are documented in README.md.
+    comment: Adapter identity, vehicle identifier constraints, MQTT configuration and the explicit official-label Series 60/DDEC IV engine profile are documented in README.md.
   docs-installation-parameters:
     status: done
     comment: README.md documents manual installation and states the Home Assistant and MQTT prerequisites.
