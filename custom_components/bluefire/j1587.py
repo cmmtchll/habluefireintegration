@@ -21,6 +21,7 @@ class Parameter:
     unit: str
     device_class: str | None = None
     state_class: str = "measurement"
+    signed: bool = False
 
     @property
     def name(self) -> str:
@@ -36,7 +37,7 @@ class Parameter:
             raise ValueError("J1587 parameter value length does not match PID")
         if data == b"\xff" * self.length:
             return None
-        raw = int.from_bytes(data, "little")
+        raw = int.from_bytes(data, "little", signed=self.signed)
         return round(raw * self.resolution + self.offset, 6)
 
     def metadata(self) -> dict:
@@ -54,14 +55,30 @@ _MILE_KM = 1.609344
 _PSI_KPA = 6.894757293168
 _GALLON_LITRES = 3.785411784
 PARAMETERS = (
+    Parameter(51, 1, 0.4, 0, "%"),
     Parameter(84, 1, 0.5 * _MILE_KM, 0, "km/h", "speed"),
     Parameter(91, 1, 0.4, 0, "%"),
     Parameter(92, 1, 0.5, 0, "%"),
+    Parameter(94, 1, 0.5 * _PSI_KPA, 0, "kPa", "pressure"),
     Parameter(96, 1, 0.5, 0, "%"),
     Parameter(100, 1, 0.5 * _PSI_KPA, 0, "kPa", "pressure"),
+    Parameter(101, 1, _PSI_KPA / 8, 0, "kPa", "pressure", signed=True),
+    Parameter(102, 1, _PSI_KPA / 8, 0, "kPa", "pressure"),
     Parameter(105, 1, 5 / 9, -32 * 5 / 9, "°C", "temperature"),
+    Parameter(108, 1, _PSI_KPA / 16, 0, "kPa", "pressure"),
+    Parameter(109, 1, _PSI_KPA / 8, 0, "kPa", "pressure"),
     Parameter(110, 1, 5 / 9, -32 * 5 / 9, "°C", "temperature"),
+    Parameter(111, 1, 0.5, 0, "%"),
+    Parameter(116, 1, 0.6 * _PSI_KPA, 0, "kPa", "pressure"),
+    Parameter(117, 1, 0.6 * _PSI_KPA, 0, "kPa", "pressure"),
+    Parameter(118, 1, 0.6 * _PSI_KPA, 0, "kPa", "pressure"),
+    Parameter(120, 1, 10 / 9, -32 * 5 / 9, "°C", "temperature"),
     Parameter(168, 2, 0.05, 0, "V", "voltage"),
+    Parameter(171, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
+    Parameter(172, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
+    Parameter(173, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
+    Parameter(175, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
+    Parameter(177, 2, 5 / 36, -32 * 5 / 9, "°C", "temperature"),
     Parameter(183, 2, _GALLON_LITRES / 64, 0, "L/h", "volume_flow_rate"),
     Parameter(190, 2, 0.25, 0, "rpm"),
     Parameter(235, 4, 0.05, 0, "h", "duration", "total_increasing"),

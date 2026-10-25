@@ -8,7 +8,7 @@ Generated from the shared code dictionary. Do not edit tables by hand; update th
 python .\scripts\catalog_bluefire.py --markdown --output .\docs\code-reference.md
 ```
 
-Catalog version: **1**. Curated, incomplete; unknown codes are not inferred.
+Catalog version: **2**. Curated, incomplete; unknown codes are not inferred.
 
 Vehicle context: **2003-era Detroit Diesel, 500 HP, Allison B500**. Year, horsepower and transmission model do not identify the ECM/controller generation or calibration. Profiles below are reference-only and never selected automatically.
 
@@ -64,29 +64,45 @@ Measurement provenance: https://github.com/canboat/canboat/tree/3de4c8463383e33e
 
 ## J1708/J1587 decoded measurements
 
-These independent PID definitions are not J1939 layouts. The parameter value excludes its PID and any variable-parameter byte-count prefix. Engineering value = raw * resolution + offset, rounded to six decimals. All-ones values become null using the observed BlueFire unavailable convention; J1939's upper reserved ranges are not reused.
+These independent PID definitions are not J1939 layouts. The parameter value excludes its PID and any variable-parameter byte-count prefix. Engineering value = raw * resolution + offset, rounded to six decimals. All-ones values become null using the observed BlueFire unavailable convention; J1939's upper reserved ranges are not reused. Only PID 101 uses a signed two's-complement raw value; the other supported numeric PIDs are unsigned.
 
 Native units include mph, psi, degrees Fahrenheit and US gallons. Conversions use 1 mile = 1.609344 km and 1 US gallon = 3.785411784 L. Other mapped PIDs below may have labels without a value decoder; they remain raw-only rather than borrowing a J1939 scale.
 
-| PID | Label | Value bytes | Output unit | Resolution | Offset | HA state class | Description |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 84 | Vehicle speed | 1 | km/h | 0.804672 | 0 | measurement | Vehicle speed, converted from J1587 units to km/h. An all-ones unavailable value is reported as null. |
-| 91 | Accelerator pedal position | 1 | % | 0.4 | 0 | measurement | Accelerator pedal position, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
-| 92 | Engine load | 1 | % | 0.5 | 0 | measurement | Engine load, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
-| 96 | Fuel level | 1 | % | 0.5 | 0 | measurement | Fuel level, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
-| 100 | Engine oil pressure | 1 | kPa | 3.447378646584 | 0 | measurement | Engine oil pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
-| 105 | Intake manifold temperature | 1 | °C | 0.5555555555555556 | -17.77777777777778 | measurement | Intake manifold temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
-| 110 | Coolant temperature | 1 | °C | 0.5555555555555556 | -17.77777777777778 | measurement | Coolant temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
-| 168 | Electrical system voltage | 2 | V | 0.05 | 0 | measurement | Electrical system voltage, converted from J1587 units to V. An all-ones unavailable value is reported as null. |
-| 183 | Fuel rate | 2 | L/h | 0.059147059125 | 0 | measurement | Fuel rate, converted from J1587 units to L/h. An all-ones unavailable value is reported as null. |
-| 190 | Engine speed | 2 | rpm | 0.25 | 0 | measurement | Engine speed, converted from J1587 units to rpm. An all-ones unavailable value is reported as null. |
-| 235 | Engine idle hours | 4 | h | 0.05 | 0 | total_increasing | Engine idle hours, converted from J1587 units to h. An all-ones unavailable value is reported as null. |
-| 236 | Engine idle fuel used | 4 | L | 0.473176473 | 0 | total_increasing | Engine idle fuel used, converted from J1587 units to L. An all-ones unavailable value is reported as null. |
-| 245 | Total vehicle distance | 4 | km | 0.1609344 | 0 | total_increasing | Total vehicle distance, converted from J1587 units to km. An all-ones unavailable value is reported as null. |
-| 247 | Total engine hours | 4 | h | 0.05 | 0 | total_increasing | Total engine hours, converted from J1587 units to h. An all-ones unavailable value is reported as null. |
-| 250 | Total fuel used | 4 | L | 0.473176473 | 0 | total_increasing | Total fuel used, converted from J1587 units to L. An all-ones unavailable value is reported as null. |
+| PID | Label | Value bytes | Signed | Output unit | Resolution | Offset | HA state class | Description |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 51 | Throttle position | 1 | False | % | 0.4 | 0 | measurement | Throttle position, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
+| 84 | Vehicle speed | 1 | False | km/h | 0.804672 | 0 | measurement | Vehicle speed, converted from J1587 units to km/h. An all-ones unavailable value is reported as null. |
+| 91 | Accelerator pedal position | 1 | False | % | 0.4 | 0 | measurement | Accelerator pedal position, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
+| 92 | Engine load | 1 | False | % | 0.5 | 0 | measurement | Engine load, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
+| 94 | Fuel delivery pressure | 1 | False | kPa | 3.447378646584 | 0 | measurement | Fuel delivery pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 96 | Fuel level | 1 | False | % | 0.5 | 0 | measurement | Fuel level, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
+| 100 | Engine oil pressure | 1 | False | kPa | 3.447378646584 | 0 | measurement | Engine oil pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 101 | Crankcase pressure | 1 | True | kPa | 0.861844661646 | 0 | measurement | Crankcase pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 102 | Intake manifold pressure | 1 | False | kPa | 0.861844661646 | 0 | measurement | Intake manifold pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 105 | Intake manifold temperature | 1 | False | °C | 0.5555555555555556 | -17.77777777777778 | measurement | Intake manifold temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 108 | Barometric pressure | 1 | False | kPa | 0.430922330823 | 0 | measurement | Barometric pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 109 | Coolant pressure | 1 | False | kPa | 0.861844661646 | 0 | measurement | Coolant pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 110 | Coolant temperature | 1 | False | °C | 0.5555555555555556 | -17.77777777777778 | measurement | Coolant temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 111 | Coolant level | 1 | False | % | 0.5 | 0 | measurement | Coolant level, converted from J1587 units to %. An all-ones unavailable value is reported as null. |
+| 116 | Brake application pressure | 1 | False | kPa | 4.1368543759008 | 0 | measurement | Brake application pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 117 | Primary brake air pressure | 1 | False | kPa | 4.1368543759008 | 0 | measurement | Primary brake air pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 118 | Secondary brake air pressure | 1 | False | kPa | 4.1368543759008 | 0 | measurement | Secondary brake air pressure, converted from J1587 units to kPa. An all-ones unavailable value is reported as null. |
+| 120 | Retarder oil temperature | 1 | False | °C | 1.1111111111111112 | -17.77777777777778 | measurement | Retarder oil temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 168 | Electrical system voltage | 2 | False | V | 0.05 | 0 | measurement | Electrical system voltage, converted from J1587 units to V. An all-ones unavailable value is reported as null. |
+| 171 | Ambient air temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Ambient air temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 172 | Engine air intake temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Engine air intake temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 173 | Exhaust gas temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Exhaust gas temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 175 | Engine oil temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Engine oil temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 177 | Transmission oil temperature | 2 | False | °C | 0.1388888888888889 | -17.77777777777778 | measurement | Transmission oil temperature, converted from J1587 units to °C. An all-ones unavailable value is reported as null. |
+| 183 | Fuel rate | 2 | False | L/h | 0.059147059125 | 0 | measurement | Fuel rate, converted from J1587 units to L/h. An all-ones unavailable value is reported as null. |
+| 190 | Engine speed | 2 | False | rpm | 0.25 | 0 | measurement | Engine speed, converted from J1587 units to rpm. An all-ones unavailable value is reported as null. |
+| 235 | Engine idle hours | 4 | False | h | 0.05 | 0 | total_increasing | Engine idle hours, converted from J1587 units to h. An all-ones unavailable value is reported as null. |
+| 236 | Engine idle fuel used | 4 | False | L | 0.473176473 | 0 | total_increasing | Engine idle fuel used, converted from J1587 units to L. An all-ones unavailable value is reported as null. |
+| 245 | Total vehicle distance | 4 | False | km | 0.1609344 | 0 | total_increasing | Total vehicle distance, converted from J1587 units to km. An all-ones unavailable value is reported as null. |
+| 247 | Total engine hours | 4 | False | h | 0.05 | 0 | total_increasing | Total engine hours, converted from J1587 units to h. An all-ones unavailable value is reported as null. |
+| 250 | Total fuel used | 4 | False | L | 0.473176473 | 0 | total_increasing | Total fuel used, converted from J1587 units to L. An all-ones unavailable value is reported as null. |
 
-J1587 provenance: Local BlueFire J1708 parameter scaling cross-check; independent J1587 native-unit conversions. Datalink/diagnostic structure: https://github.com/ainfosec/pretty_j1587
+J1587 provenance: Local Windows BlueFire 12.5.6 J1708 parameter scaling cross-check, including unsigned quarter-degree Fahrenheit temperatures and signed crankcase pressure; independent native-unit conversions. Datalink/diagnostic structure: https://github.com/ainfosec/pretty_j1587
 
 ## Standard code labels
 

@@ -42,7 +42,7 @@ No Android gateway is required or planned.
   and Allison B500/WTEC III reference subsets.
 - Read-only single-frame J1939 DM1/DM2 fault interpretation and MQTT diagnostic
   discovery. Offline analysis also accepts already-reassembled diagnostic reports.
-- J1708/J1587 decoding of 15 numeric PIDs and PID 194 diagnostic entries,
+- J1708/J1587 decoding of 31 numeric PIDs and PID 194 diagnostic entries,
   with a checksummed-datagram parser and separate MQTT/MID/PID discovery.
 - Hardware-unverified offline receive framing and PGN/J1587/OBD report analysis
   based on local inspection of Android 9.7.5/11.2.3 and Windows 12.5.6 packages;
@@ -102,11 +102,21 @@ itself does not enable writes.
 Startup waits for a heartbeat, negotiates client compatibility, checks both
 unsecured authentication responses on firmware 3.x, reads adapter variables
 and J1708 availability, signals application connection, installs passive
-subscriptions and starts reports. It monitors all 15 supported numeric PIDs
+subscriptions and starts reports. It monitors all 31 supported numeric PIDs
 plus diagnostic PID 194 across reported MIDs at a 1000 ms interval. Vendor
 subscription MID 0 means any MID; actual report identities remain unchanged.
 Subscriptions use monitoring, not on-request vehicle-bus retrieval. A PID that
 the ECU does not broadcast may therefore remain absent.
+
+There are 32 passive PID subscriptions in total, all using wildcard MID 0.
+Compared with the original 16 subscriptions, the expanded set adds throttle
+position, fuel/crankcase/intake/barometric/coolant pressures, coolant level,
+three brake pressures, retarder temperature, ambient/intake/exhaust temperatures,
+engine oil temperature and transmission oil temperature. Sensors are discovered
+only when a controller actually reports a supported PID. No new MID selection
+or active vehicle requests are needed; controllers keep distinct MID identities.
+The expanded filter set still requires hardware confirmation, including adapter
+filter capacity. An explicit subscription rejection remains a startup error.
 
 Client packets are at most 20 bytes and use write-with-response on EZ `ca101`.
 The compatibility tuple `12.5.6` describes the inspected wire compatibility
@@ -328,7 +338,7 @@ Example **synthetic** measurement illustrating the schema, not received data:
   "source_name": "Engine",
   "source_name_basis": "conventional_address_not_verified_identity",
   "pgn_name": "Electronic engine controller 1",
-  "catalog_version": 1,
+  "catalog_version": 2,
   "timestamp": "2026-01-01T00:00:00+00:00",
   "spn": 190,
   "name": "Engine speed",
@@ -432,7 +442,7 @@ manual**:
 | Detroit DDEC III/IV | 13 flash-code references, verified PID/FMI equivalents, six-cylinder injector reference SIDs 1–6 and memory SID 253 scoped to engine MID 128 |
 | Allison B500/WTEC III | 21 exact main/subcode references covering supply voltage, level/temperature/throttle sensors, speed sensors, selectors and missing data sources |
 | J1587 / OBD | Selected parameter labels and units; no reuse of J1939 decoding rules |
-| J1587 decoding | 15 independently defined numeric PIDs plus PID 194 active/inactive diagnostic entries; separate four-bit FMI definitions |
+| J1587 decoding | 31 independently defined numeric PIDs plus PID 194 active/inactive diagnostic entries; separate four-bit FMI definitions |
 
 The recorded vehicle details are **2003-era, 500 HP Detroit Diesel and Allison
 B500**. They do **not** establish the engine model, ECM generation, transmission
@@ -530,11 +540,19 @@ rejects them rather than inventing PID meanings.
 
 | Numeric PID | Decoded value | Output unit |
 | --- | --- | --- |
+| 51 | Throttle position | % |
 | 84 | Vehicle speed | km/h |
 | 91 / 92 / 96 | Accelerator position / engine load / fuel level | % |
-| 100 | Engine oil pressure | kPa |
+| 94 / 100 | Fuel delivery / engine oil pressure | kPa |
+| 101 / 102 | Crankcase / intake manifold pressure | kPa |
 | 105 / 110 | Intake manifold / coolant temperature | °C |
+| 108 / 109 | Barometric / coolant pressure | kPa |
+| 111 | Coolant level | % |
+| 116 / 117 / 118 | Brake application / primary / secondary air pressure | kPa |
+| 120 | Retarder oil temperature | °C |
 | 168 | Electrical system voltage | V |
+| 171 / 172 / 173 | Ambient air / engine intake air / exhaust temperature | °C |
+| 175 / 177 | Engine oil / transmission oil temperature | °C |
 | 183 | Fuel rate | L/h |
 | 190 | Engine speed | rpm |
 | 235 / 247 | Idle / total engine hours | h |
@@ -546,8 +564,12 @@ for example PID 190 uses **0.25 rpm/bit**, not J1939 SPN 190's 0.125.
 Fahrenheit, mph, psi and US gallons are converted explicitly into the table's
 units. All-ones supported values become `null` using the observed BlueFire
 unavailable convention. J1939's upper reserved raw ranges are **not** reused.
-Zero values and converted negative temperatures remain valid. Labels for other
-PIDs (including transmission temperature) do not imply a verified value decoder.
+Zero values and converted negative temperatures remain valid. PID 101 uses a
+signed one-byte raw value; all-ones still means unavailable, not negative one.
+The two-byte temperature PIDs use unsigned 0.25-degree Fahrenheit values before
+conversion, independently cross-checked against the inspected BlueFire client.
+Labels for other PIDs (including text gears and fuel temperature PID 174) do not
+imply a verified value decoder.
 The [code reference](docs/code-reference.md) records every implemented scale.
 
 PID 194 diagnostic entries preserve MID, PID versus SID namespace, expanded

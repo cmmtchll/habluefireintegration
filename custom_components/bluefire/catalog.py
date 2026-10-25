@@ -9,7 +9,7 @@ import re
 
 from .signals import SIGNALS
 
-CATALOG_VERSION = 1
+CATALOG_VERSION = 2
 REFERENCES = {
     "bluefire": (
         "Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; "
@@ -37,8 +37,10 @@ REFERENCES = {
         "https://www.detroitmanuals.info/ddec-singleecm-troubleshooting/"
     ),
     "j1587": (
-        "Local BlueFire J1708 parameter scaling cross-check; independent "
-        "J1587 native-unit conversions. Datalink/diagnostic structure: "
+        "Local Windows BlueFire 12.5.6 J1708 parameter scaling cross-check, "
+        "including unsigned quarter-degree Fahrenheit temperatures and "
+        "signed crankcase pressure; independent native-unit conversions. "
+        "Datalink/diagnostic structure: "
         "https://github.com/ainfosec/pretty_j1587"
     ),
 }

@@ -76,7 +76,8 @@ def render_markdown(catalog: dict) -> str:
         "byte-count prefix. Engineering value = raw * resolution + offset, "
         "rounded to six decimals. All-ones values become null using the "
         "observed BlueFire unavailable convention; J1939's upper reserved "
-        "ranges are not reused.", "",
+        "ranges are not reused. Only PID 101 uses a signed two's-complement "
+        "raw value; the other supported numeric PIDs are unsigned.", "",
         "Native units include mph, psi, degrees Fahrenheit and US gallons. "
         "Conversions use 1 mile = 1.609344 km and "
         "1 US gallon = 3.785411784 L. "
@@ -84,10 +85,11 @@ def render_markdown(catalog: dict) -> str:
         "they remain raw-only rather than borrowing a J1939 scale.", "",
     ])
     table(
-        ("PID", "Label", "Value bytes", "Output unit", "Resolution",
+        ("PID", "Label", "Value bytes", "Signed", "Output unit", "Resolution",
          "Offset", "HA state class", "Description"),
         (
-            (p["pid"], p["name"], p["length"], p["unit"], p["resolution"],
+            (p["pid"], p["name"], p["length"], p["signed"],
+             p["unit"], p["resolution"],
              p["offset"], p["state_class"], p["description"])
             for p in catalog["j1587_measurements"]
         ),
