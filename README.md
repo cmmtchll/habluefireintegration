@@ -703,6 +703,77 @@ telemetry, `Adapter.txt` line endings/spacing, and valid-to-invalid MQTT values
 without retaining an old value or borrowing another source's reading.
 There are still no real adapter recordings in the tests.
 
+### Heartbeat-only EZ startup investigation
+
+A user-supplied EZ diagnostic capture on 2026-10-25 established a working BLE
+connection and the expected EZ service/characteristics. Its 20-second capture
+contained 38 checksum-valid heartbeat packets, with no PGN, PID or OBD reports.
+The live receiver also counted only heartbeats before the capture. This
+validates heartbeat receive framing on that adapter, not authentication,
+vehicle-bus availability or telemetry decoding. The coach's J1708 bus is
+user-confirmed; it cannot be identified from these heartbeat packets alone.
+
+Targeted static reinspection of the previously supplied Windows 12.5.6 package
+(same SHA-256 as above) identifies the missing application-level exchanges:
+
+| Stage | Observed behavior | Evidence |
+| --- | --- | --- |
+| BLE transport | Subscribe to both EZ receive and send characteristics; write client packets to the send characteristic ending `ca101` | `CommBLE.StartNotifications`, `GetCharacteristicData`, `WaitForWrittenData` |
+| First heartbeat | Command 255 starts version negotiation once per connection, rather than being ignored indefinitely | `CommData.CheckPid` |
+| Firmware 3.x negotiation | Request command 0 (`GetVersion`), inspect the response, send platform/build-date queries and command 9 (`AppVersion`), then require a positive compatibility response | `GetAdapterVersion3`, `SendVersions3`, `SendAppVersion3` |
+| Firmware 4.x negotiation | Start with a different command 9 payload containing application major/minor/patch and platform; do not reuse the 3.x layout | `SendVersions4`, `SendAppVersion4` |
+| Authentication | 3.x sends commands 130 and 171; 4.x sends command 169. Authentication responses gate subsequent initialization | `CheckAuthentication`, `CheckPid` |
+| Connected initialization | Read firmware-specific adapter variables and bus settings, then synchronize command 8 (`AppIsConnected`) | `RetrieveData`, `SendGetVariables3`, `SendGetVariables4` |
+| J1708 subscriptions | Command 155 (`AddPID`) selects MID, PID, on-request behavior, retrieval mode and interval; the incoming measurement command is 154 (`PIDData`) | `AddPID`, `AddPIDData`, `PIDCommands` |
+| Report flow control | Page data setup can stop reports with command 153, install subscriptions, then explicitly restart reports with that command | `HomeBase.ConnectData`, `DataConnected`, `CommData.StartSendingData` |
+
+The receiver currently implements only the first stage's subscriptions and
+incoming parsing. Its heartbeat branch counts packets but sends no version
+request, authentication, PID subscriptions or report-start command. Repeating
+the passive diagnostic capture cannot exercise these missing exchanges.
+
+Important implementation boundaries:
+
+- **Client framing differs from receive framing.** The inspected modern EZ
+  writer uses two big-endian body-length bytes, the body, and a complemented
+  end-around-carry checksum covering both length bytes and the body. It does
+  not add the receive header's length-XOR byte or an original-LE packet
+  selector. Writes go to `ca101`, not the writable receive characteristic.
+- **Authentication is not necessarily a password prompt.** With no configured
+  username/password or device/adapter binding, the inspected 3.x path sends
+  zero-length authentication data and the 4.x path sends three zero-length
+  fields. Secured adapters use encrypted data instead. Empty fields are a
+  normal unsecured-client path, not proof that a secured adapter will accept
+  them. Never reset security or fall back after rejection.
+- **Firmware selection is separate from PID report format.** The app uses
+  version-bearing device names to select its 4.x path; an unversioned
+  `BlueFire EZ` name takes its 3.x path. That is evidence of the app's
+  selection rule, not proof of this adapter's firmware. The integration's
+  `j1587_extended` setting only selects how incoming PID reports are parsed.
+- **Subscriptions and bus enablement are distinct.** `AddPID` contains a
+  big-endian 16-bit PID even when incoming PID reports use page extensions.
+  It also distinguishes monitoring from on-request retrieval, which can
+  cause vehicle-bus requests. Read the J1708 ignore/availability state before
+  deciding whether a missing measurement means a bus, filter or ECU issue.
+  The notification-status setting is not a substitute for PID subscriptions
+  and report flow control.
+- **Do not replay the whole vendor initialization routine.** It can change
+  adapter variables, bus-ignore flags and other settings to match its UI.
+  A telemetry implementation should preserve existing settings, reject
+  incompatible/authentication failures explicitly, use bounded response
+  waits, rebuild session subscriptions on reconnect and never send fault-clear,
+  reset, firmware-flash or arbitrary vehicle-transmit commands.
+
+The next hardware gate is a firmware/security-confirmed, bidirectional startup
+trace or a staged implementation that first obtains a valid version response,
+then compatibility/authentication responses, and finally a narrowly scoped
+J1708 subscription such as engine MID 128 / engine-speed PID 190. Do not claim
+telemetry readiness until actual PIDData reports arrive. The passive capture
+does not contain the adapter firmware, authentication result or J1708
+availability response, so those remain unknown. No live writes or new
+authentication implementation were enabled by this investigation, and no
+vendor code, keys or security payloads are included here.
+
 ### Offline replay and resilience checks
 
 `custom_components/bluefire/protocol.py` is an independent, receive-only
