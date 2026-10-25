@@ -8,7 +8,7 @@ import logging
 import re
 
 from .const import J1708_READ_ACTIONS
-from .j1587 import ENTITIES
+from .j1587 import ENTITIES, IDENTIFICATION_PARAMETERS
 from .protocol import AdapterMessage, receive_checksum
 
 STEP_TIMEOUT = 10
@@ -70,6 +70,7 @@ class J1708Startup:
         self.extended = extended
         self.j1708_available: bool | None = None
         self.subscriptions_sent = 0
+        self.identification_requests_sent = 0
         self.discarded_reports = 0
         self.keepalive_requests = 0
         self.keepalive_responses = 0
@@ -89,6 +90,7 @@ class J1708Startup:
             "expected_command": self.expected_command,
             "j1708_available": self.j1708_available,
             "subscriptions_sent": self.subscriptions_sent,
+            "identification_requests_sent": self.identification_requests_sent,
             "discarded_reports": self.discarded_reports,
             "error": self.error,
             "keepalive": {
@@ -280,6 +282,12 @@ class J1708Startup:
                 self.subscriptions_sent += 1
             await self._ack("start_reports", b"\x99\x01")
             self.stage = "ready"
+            # Accept immediate replies without waiting for optional ECU data.
+            for parameter in IDENTIFICATION_PARAMETERS:
+                await self._write(
+                    pid_subscription(parameter.pid, on_request=True)
+                )
+                self.identification_requests_sent += 1
         except (StartupError, TimeoutError) as err:
             self.error = (
                 f"Timed out during {self.stage}"

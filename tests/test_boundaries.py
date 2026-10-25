@@ -683,6 +683,33 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.mqtt.async_subscribe.assert_not_awaited()
         self.assertEqual(self.entry.async_on_unload.call_count, 6)
 
+    async def test_mqtt_reconnect_preserves_native_identification(self):
+        from custom_components.bluefire.protocol import J1587Report
+
+        await async_setup_entry(self.hass, self.entry)
+        bridge = self.entry.runtime_data.bridge
+        await bridge.async_process_j1587(
+            J1587Report(128, 243, b"EXAMPLE ENGINE")
+        )
+        changed = Mock()
+        remove = bridge.j1587.add_identification_listener(changed)
+        self.mqtt.async_publish.reset_mock()
+        self.callbacks[-1](True)
+        await asyncio.gather(*self.tasks)
+        self.assertEqual(
+            bridge.j1587.identification_report(128, 243)["value"],
+            "EXAMPLE ENGINE",
+        )
+        changed.assert_not_called()
+        self.assertFalse(any(
+            "/pid/" in call.args[1]
+            for call in self.mqtt.async_publish.await_args_list
+        ))
+        await bridge.async_disconnected()
+        self.assertIsNone(bridge.j1587.identification_report(128, 243))
+        changed.assert_called_once_with()
+        remove()
+
     async def test_shutdown_withdraws_availability(self):
         await async_setup_entry(self.hass, self.entry)
         self.mqtt.async_publish.reset_mock()

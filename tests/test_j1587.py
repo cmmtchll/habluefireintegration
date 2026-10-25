@@ -11,7 +11,8 @@ from unittest.mock import AsyncMock, Mock
 
 from custom_components.bluefire.catalog import export_catalog
 from custom_components.bluefire.j1587 import (
-    PARAMETERS, decode_faults, decode_report, parse_j1708_message,
+    IDENTIFICATION_PARAMETERS, PARAMETERS,
+    decode_faults, decode_report, parse_j1708_message,
 )
 from custom_components.bluefire.protocol import J1587Report, ProtocolError
 from custom_components.bluefire.telemetry import (
@@ -34,6 +35,44 @@ def packet(body):
 
 
 class ParameterTests(unittest.TestCase):
+    def test_identification_text_is_reported_not_inferred(self):
+        for parameter, data in zip(IDENTIFICATION_PARAMETERS, (
+            b"ECU SOFTWARE EXAMPLE*REV A",
+            b"EXAMPLE VIN",
+            b"EXAMPLE MAKE*EXAMPLE MODEL*EXAMPLE SERIAL*",
+        )):
+            with self.subTest(pid=parameter.pid):
+                result = decode_report(J1587Report(128, parameter.pid, data))
+                self.assertTrue(result["value_decoded"])
+                value = result["identification"]
+                self.assertEqual(value["value"], data.decode("ascii"))
+                self.assertEqual(value["decode_status"], "decoded")
+                self.assertEqual(
+                    value["identity_basis"], "controller_reported"
+                )
+                self.assertEqual(value["data"], data.hex())
+                self.assertEqual(value["name"], parameter.name)
+                self.assertNotIn("profile", value)
+        for data, status in (
+            (b"", "unavailable"), (b"\xff\xff", "unavailable"),
+            (b"   ", "unavailable"), (b"\x01ABC", "unsupported_encoding"),
+            (b"ABC\xff", "unsupported_encoding"),
+            (b"ABC\x00", "unsupported_encoding"),
+        ):
+            with self.subTest(data=data):
+                result = decode_report(J1587Report(128, 243, data))
+                self.assertFalse(result["value_decoded"])
+                self.assertIsNone(result["identification"]["value"])
+                self.assertEqual(
+                    result["identification"]["decode_status"], status
+                )
+                self.assertEqual(result["identification"]["data"], data.hex())
+        self.assertEqual(
+            decode_report(J1587Report(128, 243, b" A "))[
+                "identification"]["value"],
+            "A",
+        )
+
     def test_independent_scaling_and_canonical_units(self):
         fixtures = (
             (51, 125, 50, "%"),
@@ -271,6 +310,66 @@ class ReplayTests(unittest.TestCase):
 
 
 class PublishingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_identification_mid_isolation_and_removal(self):
+        for mid, pid, data in (
+            (128, 243, b"EXAMPLE ENGINE*MODEL*SERIAL*"),
+            (130, 243, b"EXAMPLE TRANSMISSION*MODEL*SERIAL*"),
+            (128, 234, b"EXAMPLE ECU SOFTWARE"),
+            (128, 237, b"EXAMPLE VIN"),
+            (175, 243, b"\x01\xff"),
+        ):
+            await self.bridge.async_process_j1587(J1587Report(mid, pid, data))
+        messages = self.messages()
+        for mid, pid in ((128, 243), (130, 243), (128, 234), (128, 237),
+                         (175, 243)):
+            config = json.loads(next(
+                payload for topic, payload, _ in messages
+                if topic == "homeassistant/sensor/"
+                f"bluefire_coach_j1587_{mid}_{pid}/config"
+            ))
+            self.assertEqual(config["entity_category"], "diagnostic")
+            self.assertNotIn("expire_after", config)
+            self.assertNotIn("unit_of_measurement", config)
+            self.assertNotIn("state_class", config)
+            topic = f"vehicle/coach/j1587/{mid}/pid/{pid}"
+            self.assertEqual(config["state_topic"], topic)
+            self.assertEqual(config["json_attributes_topic"], topic)
+            _, payload, retain = next(
+                item for item in messages if item[0] == topic
+            )
+            self.assertFalse(retain)
+            self.assertEqual(json.loads(payload)["mid"], mid)
+        snapshot = self.bridge.diagnostics()["j1587"][
+            "controller_identification"
+        ]
+        self.assertEqual(snapshot["128"]["243"]["value"],
+                         "EXAMPLE ENGINE*MODEL*SERIAL*")
+        self.assertEqual(snapshot["130"]["243"]["value"],
+                         "EXAMPLE TRANSMISSION*MODEL*SERIAL*")
+        self.assertEqual(snapshot["175"]["243"]["decode_status"],
+                         "unsupported_encoding")
+        known = self.save.await_args.args[0]
+        self.assertEqual(known, [
+            [128, 234], [128, 237], [128, 243], [130, 243], [175, 243],
+        ])
+        restored = MqttBridge("coach", self.publish, known_j1587=known)
+        self.publish.reset_mock()
+        await restored.async_rediscover()
+        self.assertFalse(any(
+            "/pid/" in topic for topic, _, _ in self.messages()
+        ))
+        self.publish.reset_mock()
+        await restored.async_remove_discovery()
+        self.assertEqual(sum(
+            payload == "" and topic.endswith("/config") and retain
+            for topic, payload, retain in self.messages()
+        ), 7)
+        await self.bridge.async_disconnected()
+        self.assertEqual(
+            self.bridge.diagnostics()["j1587"]["controller_identification"], {}
+        )
+        self.assertTrue(snapshot["128"]["243"]["value"])
+
     async def test_polling_extends_only_selected_reading_expiry(self):
         bridge = MqttBridge(
             "coach", self.publish, clock=self.clock, j1708_polling=True,

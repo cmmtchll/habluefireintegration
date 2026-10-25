@@ -102,7 +102,47 @@ class DiagnosticParameter:
         return self.pid
 
 
-ENTITIES = PARAMETERS + (DiagnosticParameter(),)
+@dataclass(frozen=True)
+class IdentificationParameter:
+    """Controller-reported text, not an inferred hardware/control profile."""
+
+    pid: int
+
+    @property
+    def name(self) -> str:
+        return lookup("pid", self.pid)["name"]
+
+    @property
+    def spn(self) -> int:
+        return self.pid
+
+    def decode(self, data: bytes) -> dict:
+        status = "decoded"
+        value = None
+        if not data or data == b"\xff" * len(data):
+            status = "unavailable"
+        elif not all(32 <= byte <= 126 for byte in data):
+            status = "unsupported_encoding"
+        else:
+            value = data.decode("ascii").strip()
+            if not value:
+                status = "unavailable"
+                value = None
+        return {
+            "pid": self.pid, "name": self.name,
+            "description": (
+                "Controller-reported identification text; not independently "
+                "verified and not used to select an ECU diagnostic profile."
+            ),
+            "value": value, "decode_status": status, "data": data.hex(),
+            "identity_basis": "controller_reported",
+        }
+
+
+IDENTIFICATION_PARAMETERS = tuple(
+    IdentificationParameter(pid) for pid in (234, 237, 243)
+)
+ENTITIES = PARAMETERS + (DiagnosticParameter(),) + IDENTIFICATION_PARAMETERS
 
 
 def validate_report(report: J1587Report) -> None:
@@ -186,6 +226,16 @@ def decode_report(
             "diagnostics": decode_faults(
                 report.data, mid=report.mid, profile=profile
             ),
+        }
+    identification = next(
+        (p for p in IDENTIFICATION_PARAMETERS if p.pid == report.pid), None
+    )
+    if identification is not None:
+        value = identification.decode(report.data)
+        return {
+            "parameter": parameter,
+            "value_decoded": value["decode_status"] == "decoded",
+            "identification": value,
         }
     signal = next((p for p in PARAMETERS if p.pid == report.pid), None)
     return {

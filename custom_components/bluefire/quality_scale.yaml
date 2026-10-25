@@ -4,7 +4,7 @@ rules:
     comment: Inspection, notification capture and explicit J1708 fuel/fault/distance/hours/total-fuel read actions are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
   appropriate-polling:
     status: done
-    comment: After opt-in startup, custom_components/bluefire/startup.py sends bounded liveness queries every 10 seconds while custom_components/bluefire/receiver.py sequentially polls PIDs 96, 194, 245, 247 and 250 each minute with independent backoff capped at 15 minutes, busy-read exclusion and no catch-up bursts. BLE writes are serialized and both tasks stop with the session. Polled sensors expire at 180 seconds; other sensors retain 60-second expiry. Diagnostic sensors read in-memory counters every 15 seconds.
+    comment: After opt-in startup, custom_components/bluefire/startup.py requests identification PIDs 234, 237 and 243 once per connection and sends bounded liveness queries every 10 seconds while custom_components/bluefire/receiver.py sequentially polls PIDs 96, 194, 245, 247 and 250 each minute with independent backoff capped at 15 minutes, busy-read exclusion and no catch-up bursts. BLE writes are serialized and both tasks stop with the session. Polled sensors expire at 180 seconds; other measurements retain 60-second expiry. Static identification text uses protocol availability without a short expiry. Diagnostic sensors read in-memory counters every 15 seconds.
   brands:
     status: done
     comment: The integration provides a local HACS brand icon at custom_components/bluefire/brand/icon.png.
@@ -40,7 +40,7 @@ rules:
     comment: Retained MQTT discovery cleanup on permanent entry removal is documented in README.md.
   entity-event-setup:
     status: done
-    comment: Health sensors register their update listener in async_added_to_hass with async_on_remove in custom_components/bluefire/sensor.py.
+    comment: Health and native controller-identification sensors register update listeners in async_added_to_hass with async_on_remove in custom_components/bluefire/sensor.py. Dynamic identification discovery registers an entry-unload listener and reuses config-entry/MID/PID identities across reconnects; tests/test_sensor.py covers lifecycle cleanup and MQTT-independent updates.
   entity-unique-id:
     status: done
     comment: The diagnostic entity and MQTT discoveries use stable unique identifiers in custom_components/bluefire/sensor.py and custom_components/bluefire/telemetry.py.

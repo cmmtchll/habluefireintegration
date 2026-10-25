@@ -248,7 +248,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def mqtt_ready() -> None:
         await async_flush_removals(hass, ledger)
-        await bridge.async_disconnected()
+        await bridge.async_disconnected(clear_identification=False)
         await bridge.async_rediscover()
 
     async def birth_received(message):

@@ -5,9 +5,11 @@ import importlib
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from test_boundaries import module
+from custom_components.bluefire.protocol import J1587Report
+from custom_components.bluefire.telemetry import MqttBridge
 
 
 class SensorTests(unittest.IsolatedAsyncioTestCase):
@@ -70,11 +72,17 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         self.health = Health(
             clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)
         )
+        self.publish = AsyncMock()
+        self.bridge = MqttBridge("coach", self.publish)
+        self.unloaders = []
         self.entry = SimpleNamespace(
             entry_id="stable-entry-id",
             unique_id="AA:BB:CC:DD:EE:01",
             title="Coach adapter",
-            runtime_data=SimpleNamespace(health=self.health),
+            runtime_data=SimpleNamespace(
+                health=self.health, bridge=self.bridge
+            ),
+            async_on_unload=self.unloaders.append,
         )
 
     async def sensors(self):
@@ -243,3 +251,108 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         await self.api.async_setup_entry(object(), self.entry, Mock())
         self.entity_registry.async_update_entity.assert_not_called()
         self.device_registry.async_update_device.assert_not_called()
+
+    async def test_identification_sensors_are_discovered_per_mid_and_pid(self):
+        added = Mock()
+        await self.api.async_setup_entry(object(), self.entry, added)
+        self.assertEqual(added.call_count, 1)
+        await self.bridge.async_process_j1587(J1587Report(128, 190, bytes(2)))
+        self.assertEqual(added.call_count, 1)
+        for mid, pid, value in (
+            (128, 243, b"EXAMPLE ENGINE"),
+            (130, 243, b"EXAMPLE TRANSMISSION"),
+            (128, 234, b"EXAMPLE SOFTWARE"),
+            (128, 237, b"EXAMPLE VIN"),
+            (175, 243, b"\x01\xff"),
+        ):
+            await self.bridge.async_process_j1587(J1587Report(mid, pid, value))
+            sensor, = added.call_args.args[0]
+            self.assertEqual(
+                sensor._attr_unique_id,
+                f"stable-entry-id_j1587_{mid}_{pid}_identification",
+            )
+            self.assertEqual(sensor._attr_device_info,
+                             self.api._device_info(self.entry))
+            self.assertEqual(sensor._attr_device_info["manufacturer"],
+                             "BlueFire")
+            self.assertEqual(sensor._attr_entity_category, "diagnostic")
+            self.assertFalse(sensor._attr_should_poll)
+            self.assertEqual(sensor.extra_state_attributes["mid"], mid)
+            self.assertEqual(sensor.extra_state_attributes["pid"], pid)
+            self.assertEqual(
+                sensor.extra_state_attributes["data"], value.hex()
+            )
+            self.assertTrue(sensor.available)
+        self.assertIsNone(sensor.native_value)
+        self.assertEqual(sensor.extra_state_attributes["decode_status"],
+                         "unsupported_encoding")
+        self.assertEqual(sensor._attr_name,
+                         "Controller (175): Component identification")
+        self.assertEqual(added.call_count, 6)
+
+    async def test_native_identification_updates_without_mqtt_and_cleans_up(
+        self,
+    ):
+        added = Mock()
+        await self.api.async_setup_entry(object(), self.entry, added)
+        self.publish.side_effect = RuntimeError("MQTT unavailable")
+        with self.assertRaisesRegex(RuntimeError, "MQTT unavailable"):
+            await self.bridge.async_process_j1587(
+                J1587Report(128, 243, b"EXAMPLE ENGINE")
+            )
+        sensor, = added.call_args.args[0]
+        sensor.removers, sensor.writes = [], []
+        await sensor.async_added_to_hass()
+        self.assertEqual(sensor.native_value, "EXAMPLE ENGINE")
+        self.assertEqual(sensor.writes, ["EXAMPLE ENGINE"])
+        self.entry.unique_id = "AA:BB:CC:DD:EE:02"
+        with self.assertRaisesRegex(RuntimeError, "MQTT unavailable"):
+            await self.bridge.async_process_j1587(
+                J1587Report(128, 243, b"UPDATED ENGINE")
+            )
+        self.assertEqual(added.call_count, 2)
+        self.assertEqual(sensor.writes[-1], "UPDATED ENGINE")
+        self.assertEqual(sensor._attr_unique_id,
+                         "stable-entry-id_j1587_128_243_identification")
+        self.publish.side_effect = None
+        await self.bridge.async_disconnected(clear_identification=False)
+        self.assertTrue(sensor.available)
+        self.assertEqual(sensor.native_value, "UPDATED ENGINE")
+        self.publish.side_effect = RuntimeError("MQTT unavailable")
+        with self.assertRaisesRegex(RuntimeError, "MQTT unavailable"):
+            await self.bridge.async_disconnected()
+        self.assertFalse(sensor.available)
+        self.assertIsNone(sensor.native_value)
+        self.assertIsNone(sensor.extra_state_attributes)
+        self.assertIsNone(sensor.writes[-1])
+        self.publish.side_effect = None
+        await self.bridge.async_process_j1587(
+            J1587Report(128, 243, b"RECONNECTED ENGINE")
+        )
+        self.assertTrue(sensor.available)
+        self.assertEqual(sensor.native_value, "RECONNECTED ENGINE")
+        self.assertEqual(added.call_count, 2)
+        sensor.removers[0]()
+        self.unloaders[0]()
+        count = len(sensor.writes)
+        await self.bridge.async_process_j1587(
+            J1587Report(130, 243, b"EXAMPLE TRANSMISSION")
+        )
+        await self.bridge.async_disconnected()
+        self.assertEqual(len(sensor.writes), count)
+        self.assertEqual(added.call_count, 2)
+
+    async def test_native_identification_present_before_platform_setup(self):
+        await self.bridge.async_process_j1587(
+            J1587Report(128, 234, b"EARLY SOFTWARE RESPONSE")
+        )
+        added = Mock()
+        await self.api.async_setup_entry(object(), self.entry, added)
+        self.assertEqual(added.call_count, 2)
+        sensor, = added.call_args.args[0]
+        self.assertEqual(sensor.native_value, "EARLY SOFTWARE RESPONSE")
+        await self.bridge.async_disconnected()
+        sensor.removers, sensor.writes = [], []
+        await sensor.async_added_to_hass()
+        self.assertFalse(sensor.available)
+        self.assertEqual(sensor.writes, [None])
