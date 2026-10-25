@@ -36,10 +36,22 @@ def packet(body):
 class ParameterTests(unittest.TestCase):
     def test_independent_scaling_and_canonical_units(self):
         fixtures = (
+            (51, 125, 50, "%"),
             (84, 100, 80.4672, "km/h"),
             (91, 125, 50, "%"), (92, 100, 50, "%"),
+            (94, 100, 344.737865, "kPa"),
             (96, 100, 50, "%"), (100, 100, 344.737865, "kPa"),
+            (101, 16, 13.789515, "kPa"), (102, 80, 68.947573, "kPa"),
             (105, 32, 0, "°C"), (110, 212, 100, "°C"),
+            (108, 232, 99.973981, "kPa"), (109, 80, 68.947573, "kPa"),
+            (111, 100, 50, "%"),
+            (116, 200, 827.370875, "kPa"),
+            (117, 200, 827.370875, "kPa"),
+            (118, 200, 827.370875, "kPa"),
+            (120, 106, 100, "°C"),
+            (171, 848, 100, "°C"), (172, 848, 100, "°C"),
+            (173, 848, 100, "°C"), (175, 848, 100, "°C"),
+            (177, 848, 100, "°C"),
             (168, 480, 24, "V"), (183, 64, 3.785412, "L/h"),
             (190, 4000, 1000, "rpm"), (235, 20000, 1000, "h"),
             (236, 8, 3.785412, "L"), (245, 10, 1.609344, "km"),
@@ -47,7 +59,7 @@ class ParameterTests(unittest.TestCase):
         )
         self.assertEqual({p.pid for p in PARAMETERS},
                          {pid for pid, *_ in fixtures})
-        self.assertEqual(len(PARAMETERS), 15)
+        self.assertEqual(len(PARAMETERS), 31)
         for pid, raw, expected, unit in fixtures:
             definition = next(p for p in PARAMETERS if p.pid == pid)
             result = decode_report(J1587Report(
@@ -83,8 +95,8 @@ class ParameterTests(unittest.TestCase):
         self.assertEqual(coolant.decode(b"\x00"), -17.777778)
 
     def test_unknown_pids_do_not_acquire_j1939_meanings(self):
-        for pid in (1, 15, 177, 439, 1023):
-            data = b"\x01\x00" if pid in (177, 439) else b"\x01"
+        for pid in (1, 15, 174, 439, 1023):
+            data = b"\x01\x00" if pid in (174, 439) else b"\x01"
             result = decode_report(J1587Report(130, pid, data))
             self.assertFalse(result["value_decoded"])
             self.assertEqual(result["signals"], [])
@@ -101,6 +113,18 @@ class ParameterTests(unittest.TestCase):
         ):
             with self.subTest(report=report), self.assertRaises(ValueError):
                 decode_report(report)
+
+    def test_crankcase_pressure_is_signed_but_all_ones_stays_unavailable(self):
+        parameter = next(p for p in PARAMETERS if p.pid == 101)
+        self.assertTrue(parameter.signed)
+        self.assertEqual(parameter.decode(b"\x80"), -110.316117)
+        self.assertEqual(parameter.decode(b"\xfe"), -1.723689)
+        self.assertIsNone(parameter.decode(b"\xff"))
+        exported = next(
+            p for p in export_catalog()["j1587_measurements"]
+            if p["pid"] == 101
+        )
+        self.assertTrue(exported["signed"])
 
 
 class J1708DatagramTests(unittest.TestCase):
@@ -327,7 +351,9 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                     1 if parameter.unit in ("%", "°C") else 2,
                 )
                 self.assertIn("mid", config["json_attributes_template"])
-        self.assertEqual(len(self.save.await_args.args[0]), 30)
+        self.assertEqual(
+            len(self.save.await_args.args[0]), 2 * len(PARAMETERS)
+        )
 
     async def test_voltage_and_fuel_flow_keep_fractional_values(self):
         fixtures = (

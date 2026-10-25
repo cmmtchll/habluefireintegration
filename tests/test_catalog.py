@@ -28,7 +28,7 @@ from scripts.catalog_bluefire import main, render_markdown
 class CatalogTests(unittest.TestCase):
     def test_export_has_unique_scoped_keys_and_provenance(self):
         catalog = json.loads(json.dumps(export_catalog(), allow_nan=False))
-        self.assertEqual(catalog["catalog_version"], 1)
+        self.assertEqual(catalog["catalog_version"], 2)
         self.assertEqual(len(catalog["measurements"]), 37)
         self.assertEqual(len(FMIS), 32)
         self.assertEqual(set(FMIS), set(range(32)))

@@ -375,6 +375,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
 
     def configure_startup_session(
         self, overrides=None, *, report_on_start=True,
+        report_body=bytes.fromhex("9a 80 be 02 a0 0f"),
     ):
         self.receiver.j1708_startup = True
         self.receiver.j1587_extended = True
@@ -407,7 +408,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 callback(characteristic, self.packet(b"\xff"))
                 callback(
                     characteristic,
-                    self.packet(bytes.fromhex("9a 80 be 02 a0 0f")),
+                    self.packet(report_body),
                 )
 
         async def write(characteristic, packet, *, response):
@@ -423,9 +424,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             if data is not None:
                 reply = self.packet(bytes((body[0],)) + data)
                 if body == b"\x99\x01" and report_on_start:
-                    reply += self.packet(
-                        bytes.fromhex("9a 80 be 02 a0 0f")
-                    )
+                    reply += self.packet(report_body)
                 self.receiver._notification_received(None, reply)
 
         self.client.start_notify.side_effect = subscribe
@@ -445,7 +444,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             diagnostics = self.receiver.startup_diagnostics()
             self.assertEqual(diagnostics["stage"], "disconnected")
             self.assertEqual(diagnostics["firmware"], [3, 23, 0])
-            self.assertEqual(diagnostics["subscriptions_sent"], 16)
+            self.assertEqual(diagnostics["subscriptions_sent"], 32)
             self.assertEqual(diagnostics["discarded_reports"], 1)
         self.assertEqual(self.bridge.async_process_j1587.await_count, 2)
         self.assertEqual(self.startup_bodies.count(b"\x00"), 2)
@@ -521,8 +520,42 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         ))
         diagnostics = self.receiver.startup_diagnostics()
         self.assertIsNone(diagnostics["error"])
-        self.assertEqual(diagnostics["subscriptions_sent"], 16)
+        self.assertEqual(diagnostics["subscriptions_sent"], 32)
         self.assertEqual(self.receiver.health.counters["connection_errors"], 0)
+
+    async def test_expanded_subscription_publishes_transmission_temperature(
+        self,
+    ):
+        self.configure_startup_session(
+            report_body=bytes.fromhex("9a 82 b1 02 50 03"),
+        )
+        messages = {}
+
+        async def publish(topic, payload, retain):
+            self.assertTrue(self.receiver._startup.ready)
+            messages[topic] = payload
+            if topic == "vehicle/coach/j1587/130/pid/177":
+                self.client.is_connected = False
+
+        self.receiver.bridge = MqttBridge("coach", publish)
+        with self.assertRaises(self.bleak_error):
+            await asyncio.wait_for(self.receiver._async_receive_session(), 2)
+        self.assertIn(
+            bytes.fromhex("9b 00 00 b1 00 02 03 e8 00"),
+            self.startup_bodies,
+        )
+        state = json.loads(messages["vehicle/coach/j1587/130/pid/177"])
+        self.assertEqual(
+            (state["mid"], state["pid"], state["value"], state["unit"]),
+            (130, 177, 100, "°C"),
+        )
+        config = json.loads(messages[
+            "homeassistant/sensor/bluefire_coach_j1587_130_177/config"
+        ])
+        self.assertEqual(config["device_class"], "temperature")
+        self.assertEqual(config["unit_of_measurement"], "°C")
+        self.assertEqual(self.receiver._startup.subscriptions_sent, 32)
+        self.assertEqual(self.receiver._startup.discarded_reports, 1)
 
     async def test_unavailable_status_without_telemetry_never_publishes_online(
         self,
