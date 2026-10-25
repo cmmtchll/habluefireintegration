@@ -373,7 +373,9 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             await self.receiver.async_run()
         self.bridge.async_disconnected.assert_awaited_once()
 
-    def configure_startup_session(self, overrides=None):
+    def configure_startup_session(
+        self, overrides=None, *, report_on_start=True,
+    ):
         self.receiver.j1708_startup = True
         self.receiver.j1587_extended = True
         self.bluetooth.async_ble_device_from_address.return_value = (
@@ -420,7 +422,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 data = body[1:]
             if data is not None:
                 reply = self.packet(bytes((body[0],)) + data)
-                if body == b"\x99\x01":
+                if body == b"\x99\x01" and report_on_start:
                     reply += self.packet(
                         bytes.fromhex("9a 80 be 02 a0 0f")
                     )
@@ -470,6 +472,21 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_to_real_mqtt_bridge_publishes_1000_rpm(self):
         self.configure_startup_session()
+        await self.assert_startup_publishes_real_mqtt_state()
+        self.assertTrue(
+            self.receiver.startup_diagnostics()["j1708_available"]
+        )
+
+    async def test_initially_unavailable_bus_still_publishes_real_mqtt_state(
+        self,
+    ):
+        self.configure_startup_session(overrides={7: b"\x00"})
+        await self.assert_startup_publishes_real_mqtt_state()
+        self.assertFalse(
+            self.receiver.startup_diagnostics()["j1708_available"]
+        )
+
+    async def assert_startup_publishes_real_mqtt_state(self):
         messages = []
 
         async def publish(topic, payload, retain):
@@ -502,6 +519,38 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             topic.startswith("vehicle/coach/j1939")
             for topic, _, _ in messages
         ))
+        diagnostics = self.receiver.startup_diagnostics()
+        self.assertIsNone(diagnostics["error"])
+        self.assertEqual(diagnostics["subscriptions_sent"], 16)
+        self.assertEqual(self.receiver.health.counters["connection_errors"], 0)
+
+    async def test_unavailable_status_without_telemetry_never_publishes_online(
+        self,
+    ):
+        self.configure_startup_session(
+            overrides={7: b"\x00"}, report_on_start=False,
+        )
+        publish = AsyncMock()
+        self.receiver.bridge = MqttBridge("coach", publish)
+        task = asyncio.create_task(self.receiver._async_receive_session())
+        try:
+            async with asyncio.timeout(2):
+                while (
+                    self.receiver._startup is None
+                    or not self.receiver._startup.ready
+                ):
+                    if task.done():
+                        task.result()
+                        self.fail("Session ended before report setup")
+                    await asyncio.sleep(0)
+            self.assertFalse(self.receiver._startup.j1708_available)
+            self.assertEqual(self.receiver._startup.discarded_reports, 1)
+            self.assertFalse(task.done())
+            publish.assert_not_awaited()
+        finally:
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
 
     async def test_startup_timeout_is_visible_and_disconnects(self):
         self.configure_startup_session(overrides={0: None})

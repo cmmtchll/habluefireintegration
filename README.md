@@ -113,16 +113,19 @@ The compatibility tuple `12.5.6` describes the inspected wire compatibility
 profile, not this integration's version; platform 0 is unspecified. Unversioned
 EZ advertisements take the firmware 3.x version-query path. A version-bearing
 4.x advertisement uses its separate startup layout. Firmware-format mismatches,
-malformed/rejected responses, unavailable J1708 or missing replies fail
+malformed/rejected responses, explicitly disabled J1708 or missing replies fail
 explicitly, with a 10-second deadline per exchange and normal reconnect backoff.
+The initial J1708 availability response is diagnostic status, not a prerequisite
+for report setup: a false response is logged and preserved in diagnostics while
+authenticated passive initialization continues, matching the vendor client.
 Telemetry received before startup succeeds is discarded. Subscriptions and
 authentication state are rebuilt for every new connection, including after
 diagnostic inspection.
 
 Download diagnostics and inspect **`startup_before_capture`** for the stage,
-firmware, expected response command, J1708 availability, subscription count and
-last startup error. `ready` means the report-start exchange completed, not that
-the coach is sending measurements. MQTT availability still requires valid
+firmware, expected response command, initial J1708 availability, subscription
+count and last startup error. `ready` means the report-start exchange completed,
+not that the coach is sending measurements. MQTT availability still requires valid
 telemetry. Diagnostic captures themselves remain passive and temporarily
 replace the live connection, so use the pre-capture startup/health state when
 investigating the active session.
@@ -131,8 +134,11 @@ No security settings, bus-ignore flags, sleep/LED variables or adapter firmware
 are changed. Secured adapters are rejected without retrying with alternate
 credentials or resetting security. **Firmware 4.2.3 is not installed by this
 integration**; no firmware update is needed to exercise the 3.23.0 path.
-Actual startup responses and measurements still require verification on the
-adapter; synthetic coverage is not a claim of hardware compatibility.
+A firmware 3.23.0 diagnostic confirms version negotiation, compatibility,
+authentication and adapter-variable reads, followed by a false initial J1708
+availability response. Full report setup and measurements still require
+verification on the adapter; synthetic coverage is not a claim of hardware
+compatibility.
 
 ### Link to MQTT
 
@@ -820,8 +826,10 @@ then compatibility/authentication responses, and finally a narrowly scoped
 J1708 subscription such as engine MID 128 / engine-speed PID 190. Do not claim
 telemetry readiness until actual PIDData reports arrive. The passive capture
 does not contain the adapter firmware, authentication result or J1708
-availability response. The owner subsequently confirmed firmware 3.23.0;
-authentication acceptance and J1708 availability remain unverified. The
+availability response. A later live diagnostic confirms firmware 3.23.0,
+accepted compatibility/authentication and an initial false J1708 availability
+response. The vendor client queries that status without treating it as a
+connection failure; passive report setup must not be blocked by it. The
 implementation sends only the normal unsecured authentication fields and
 never includes vendor code, keys or captured security payloads.
 

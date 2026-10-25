@@ -132,6 +132,24 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         await startup.run()
         self.assertTrue(startup.ready)
 
+    async def test_initial_bus_status_does_not_gate_passive_report_setup(self):
+        for name in ("BlueFire EZ", "BlueFire EZ 4.1-4.2.3"):
+            with self.subTest(name=name):
+                startup = self.make_startup(
+                    name=name, overrides={7: b"\x00"}
+                )
+                with self.assertLogs(
+                    "custom_components.bluefire.startup", level="WARNING"
+                ) as logs:
+                    await startup.run()
+                self.assertTrue(startup.ready)
+                self.assertFalse(startup.j1708_available)
+                self.assertIsNone(startup.error)
+                self.assertEqual(startup.subscriptions_sent, len(ENTITIES))
+                self.assertIn(b"\x08", self.sent)
+                self.assertEqual(self.sent[-1], b"\x99\x01")
+                self.assertIn("waiting for telemetry", logs.output[0])
+
     async def test_rejections_and_malformed_responses_fail_closed(self):
         cases = (
             ({0: bytes(21)}, "Malformed firmware"),
@@ -146,7 +164,6 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
             ({171: b"\x01\x01"}, "Malformed authentication_2"),
             ({206: bytes(14)}, "Malformed firmware 3.x variables"),
             ({7: b"\x02"}, "Malformed J1708 availability"),
-            ({7: b"\x00"}, "bus is unavailable"),
             ({8: b"\x00"}, "Unexpected application_connected"),
             ({153: b"\x02"}, "Unexpected stop_reports"),
         )
