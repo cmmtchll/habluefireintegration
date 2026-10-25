@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import logging
 import re
 
 from .j1587 import ENTITIES
@@ -14,6 +15,7 @@ STEP_TIMEOUT = 10
 CLIENT_COMPATIBILITY = (12, 5, 6)
 PLATFORM_UNSPECIFIED = 0
 REPORT_INTERVAL_MS = 1000
+_LOGGER = logging.getLogger(__name__)
 
 
 class StartupError(ValueError):
@@ -179,9 +181,10 @@ class J1708Startup:
                 raise StartupError("Malformed J1708 availability response")
             self.j1708_available = available == b"\x01"
             if not self.j1708_available:
-                raise StartupError(
-                    "J1708 bus is unavailable; check ignition, bus wiring "
-                    "and the vendor app's J1708 setting"
+                # The vendor queries this status without gating report setup.
+                _LOGGER.warning(
+                    "Adapter reported J1708 unavailable during initialization;"
+                    " continuing passive report setup; waiting for telemetry"
                 )
             await self._ack("application_connected", b"\x08")
             await self._ack("stop_reports", b"\x99\x00", 0)
