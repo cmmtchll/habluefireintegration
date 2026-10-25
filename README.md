@@ -137,12 +137,29 @@ After successful opt-in startup, a read-only **Get J1708 availability**
 application-level liveness probe, not repeated authentication, a settings
 change or an active vehicle-bus request. Both available and unavailable replies
 prove the adapter responded; an unavailable bus does not disconnect it or
-publish telemetry availability. Missing replies time out after 10 seconds;
-malformed replies and BLE write failures also trigger normal reconnect recovery.
+publish telemetry availability. A missing reply times out after 10 seconds
+but no longer forces an immediate disconnect. Misses are logged and counted; a successful
+reply resets the consecutive-miss count. Three consecutive misses trigger
+reconnect only when no checksum-valid receive traffic has arrived within
+30 seconds. Valid heartbeats and reports prove transport liveness even if a
+probe reply is lost; they do not by themselves mark telemetry available.
+Malformed probe replies and BLE write failures still trigger reconnect.
 Probes run independently of MQTT publication, are cancelled before disconnect,
 and are disabled in receive-only mode. A successful session resets reconnect
 backoff, so earlier startup failures do not leave later recoveries waiting at
 the maximum delay.
+
+After startup, isolated receive framing/checksum errors are counted and logged
+without immediately disconnecting. The live decoder discards corrupt bytes
+and requires **two adjacent, complete packets with valid length headers and
+payload checksums** before resuming a damaged stream. It preserves intact
+packets before and after corruption, including across notification boundaries,
+and buffers at most 528 bytes. Ten framing errors within ten seconds trigger
+reconnect; 30 seconds without any checksum-valid packet also triggers recovery,
+even if malformed notifications keep arriving. Authentication/startup framing,
+explicit subscription/authentication rejection, queue overflow and actual BLE
+loss remain fail-closed. Offline capture analysis remains strict, so it still
+shows the original corruption rather than hiding it behind live recovery.
 
 The vendor's general guide describes heartbeat-based connection checks, but
 static inspection of Android 11.2.3 places its outgoing command-255 timer in
@@ -154,12 +171,31 @@ adapter dropouts still needs verification on hardware.
 
 Download diagnostics and inspect **`startup_before_capture`** for the stage,
 firmware, expected response command, initial J1708 availability, subscription
-count, last session error and `keepalive` request/response counters. `ready`
+count, last session error and `keepalive` request/response/timeout counters.
+The keepalive diagnostics include consecutive misses and their threshold.
+`receive_stream` shows recovery state/count, recent framing errors, the silence
+deadline and age of the last checksum-valid packet. `ready`
 means the report-start exchange completed,
 not that the coach is sending measurements. MQTT availability still requires valid
 telemetry. **`receiver_before_capture`** and **`receiver`** include live connection
 state, retry delay, last notification time and the latest 20 connection events
 with UTC timestamps and failure reasons.
+
+Both receiver snapshots also include **`connection_history`**, an in-memory
+ring of the last **10 connection attempts**, including the current attempt.
+Each record has attempt/start/connected/ready/end timestamps, a disconnect
+reason and the scheduled retry delay. At disconnect, it freezes the startup
+and keepalive state, last write command/time (not its payload), traffic
+counters for that attempt, last data
+and notification times, Bluetooth advertisement/RSSI/source information,
+queue depth/overflow and pending decoder bytes. It also retains the last 10
+receive notifications, capped at 512 bytes each with explicit truncation flags.
+Startup/authentication notifications are excluded from this rolling byte
+history; telemetry bytes can still contain vehicle data, so review diagnostics
+before sharing. Context is saved before BLE cleanup, even when a diagnostic
+capture ends during disconnect. History survives automatic reconnects but
+resets when the entry is unloaded/reloaded or Home Assistant restarts; it is
+not written to disk.
 
 Diagnostic downloads observe the existing EZ subscriptions without pausing the
 receiver, opening another connection or interrupting probes/reporting. If no

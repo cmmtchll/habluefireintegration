@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime, timezone
 import logging
+import sys
 from time import monotonic
 
 from bleak.exc import BleakError
@@ -26,7 +28,7 @@ from .protocol import (
     ObdReport,
     PgnReport,
     ProtocolError,
-    ReceiveDecoder,
+    RecoveringReceiveDecoder,
     parse_message,
 )
 from .startup import J1708Startup, StartupError
@@ -48,6 +50,12 @@ CONNECTION_TIMEOUT = 30
 BLE_OPERATION_TIMEOUT = 10
 BLE_CLEANUP_TIMEOUT = 5
 SESSION_CLOSE_TIMEOUT = 20
+CONNECTION_HISTORY = 10
+RECENT_NOTIFICATIONS = 10
+NOTIFICATION_BYTES = 512
+RECEIVE_ERROR_LIMIT = 10
+RECEIVE_ERROR_WINDOW = 10
+RECEIVE_SILENCE_TIMEOUT = 30
 
 
 class BlueFireReceiver:
@@ -64,8 +72,13 @@ class BlueFireReceiver:
         self.j1587_extended = j1587_extended
         self.j1708_startup = j1708_startup
         self._startup: J1708Startup | None = None
-        self._decoder = ReceiveDecoder()
-        self._control_decoder = ReceiveDecoder()
+        self._decoder = RecoveringReceiveDecoder()
+        self._control_decoder = RecoveringReceiveDecoder()
+        self._framing_error_times: deque[float] = deque(
+            maxlen=RECEIVE_ERROR_LIMIT
+        )
+        self._last_valid_packet: float | None = None
+        self._receive_started = monotonic()
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=128)
         self._overflow = asyncio.Event()
         self._pause_event = asyncio.Event()
@@ -86,23 +99,171 @@ class BlueFireReceiver:
         self._reconnect_delay = 0
         self._connection_events: deque[dict] = deque(maxlen=20)
         self._last_notification: str | None = None
+        self._connection_history: deque[dict] = deque(
+            maxlen=CONNECTION_HISTORY
+        )
+        self._connection_record: dict | None = None
+        self._attempt = 0
+        self._attempt_started = monotonic()
+        self._initial_counters: dict[str, int] = {}
+        self._recent_notifications: deque[dict] = deque(
+            maxlen=RECENT_NOTIFICATIONS
+        )
+        self._last_write: dict | None = None
         self.services: list[dict] = []
 
     def connection_diagnostics(self) -> dict:
-        """Expose bounded connection history alongside startup errors."""
+        """Expose bounded event and per-attempt disconnect histories."""
         return {
             "connected": self._connected,
             "retry_delay_s": self._reconnect_delay,
             "last_notification": self._last_notification,
-            "events": list(self._connection_events),
+            "receive_stream": self._receive_stream_diagnostics(),
+            "events": deepcopy(list(self._connection_events)),
+            "connection_history": deepcopy(list(self._connection_history)),
         }
 
     def _connection_event(self, event: str, reason: str | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
         self._connection_events.append({
-            "time": datetime.now(timezone.utc).isoformat(),
+            "time": now,
             "event": event,
             "reason": reason,
         })
+        if event == "connecting":
+            self._attempt += 1
+            self._attempt_started = monotonic()
+            self._initial_counters = (
+                dict(self.health.counters) if self.health is not None else {}
+            )
+            self._recent_notifications.clear()
+            self._last_write = None
+            self._startup = None
+            self._last_valid_packet = None
+            self._framing_error_times.clear()
+            self._connection_record = {
+                "attempt": self._attempt,
+                "started_at": now,
+                "connected_at": None,
+                "ready_at": None,
+                "ended_at": None,
+                "end_event": None,
+                "reason": None,
+                "retry_delay_s": None,
+                "context": None,
+            }
+            self._connection_history.append(self._connection_record)
+        elif self._connection_record is not None:
+            if event == "connected":
+                self._connection_record["connected_at"] = now
+            elif event == "startup_ready":
+                self._connection_record["ready_at"] = now
+            elif event in ("disconnected", "paused"):
+                self._remember_disconnect(event, reason)
+                self._connection_record["reason"] = reason
+
+    def _remember_disconnect(self, event: str, reason: str | None) -> None:
+        """Freeze session evidence before cleanup clears pending state."""
+        record = self._connection_record
+        if record is None or record["ended_at"] is not None:
+            return
+        health = self.health
+        now = datetime.now(timezone.utc)
+        error = sys.exception()
+        record.update({
+            "ended_at": now.isoformat(),
+            "end_event": event,
+            "reason": reason,
+            "context": {
+                "duration_s": round(monotonic() - self._attempt_started, 3),
+                "exception_type": (
+                    type(error).__name__ if error is not None else None
+                ),
+                "exception_message": (
+                    str(error) if error is not None else reason
+                ),
+                "startup": self.startup_diagnostics(),
+                "last_notification": self._last_notification,
+                "last_data": (
+                    health.last_data.isoformat()
+                    if health is not None and health.last_data else None
+                ),
+                "last_write": deepcopy(self._last_write),
+                "queue_depth": self._queue.qsize(),
+                "queue_capacity": self._queue.maxsize,
+                "queue_overflow": self._overflow.is_set(),
+                "pending_bytes": self._decoder.pending_bytes,
+                "control_pending_bytes": self._control_decoder.pending_bytes,
+                "receive_stream": self._receive_stream_diagnostics(),
+                "counters": self._connection_counters(),
+                "bluetooth": {
+                    "rssi": health.rssi,
+                    "source": health.source,
+                    "present": health.present,
+                    "last_advertisement": (
+                        health.last_advertisement.isoformat()
+                        if health.last_advertisement else None
+                    ),
+                } if health is not None else None,
+                "recent_notifications": deepcopy(
+                    list(self._recent_notifications)
+                ),
+            },
+        })
+
+    def _connection_counters(self) -> dict[str, int]:
+        return {
+            name: value - self._initial_counters.get(name, 0)
+            for name, value in (
+                self.health.counters.items()
+                if self.health is not None else ()
+            )
+        }
+
+    def _receive_is_recent(self) -> bool:
+        return (
+            self._last_valid_packet is not None
+            and monotonic() - self._last_valid_packet < RECEIVE_SILENCE_TIMEOUT
+        )
+
+    def _receive_stream_diagnostics(self) -> dict:
+        now = monotonic()
+        return {
+            "resynchronizing": self._decoder.resynchronizing,
+            "resynchronizations": self._decoder.resynchronizations,
+            "control_resynchronizing": self._control_decoder.resynchronizing,
+            "last_valid_packet_age_s": (
+                round(now - self._last_valid_packet, 3)
+                if self._last_valid_packet is not None else None
+            ),
+            "recent_framing_errors": sum(
+                now - observed < RECEIVE_ERROR_WINDOW
+                for observed in self._framing_error_times
+            ),
+            "error_limit": RECEIVE_ERROR_LIMIT,
+            "error_window_s": RECEIVE_ERROR_WINDOW,
+            "silence_timeout_s": RECEIVE_SILENCE_TIMEOUT,
+        }
+
+    def _record_stream_errors(self) -> None:
+        errors = self._decoder.framing_errors
+        if not errors:
+            return
+        if self._startup is not None and not self._startup.ready:
+            raise ProtocolError(errors[0])
+        now = monotonic()
+        for error in errors:
+            self._framing_error_times.append(now)
+            self._health_error("framing_errors", error)
+            _LOGGER.warning("BlueFire receive stream recovering: %s", error)
+        if sum(
+            now - observed < RECEIVE_ERROR_WINDOW
+            for observed in self._framing_error_times
+        ) >= RECEIVE_ERROR_LIMIT:
+            raise BleakError(
+                "Too many malformed BlueFire receive packets "
+                f"({RECEIVE_ERROR_LIMIT} in {RECEIVE_ERROR_WINDOW} seconds)"
+            )
 
     async def async_capture(self, duration: float) -> dict:
         """Observe one live session without disconnecting or extra writes."""
@@ -187,35 +348,51 @@ class BlueFireReceiver:
             self._session_task = session_task
             paused_session = False
             end_reason = "Receiver stopped"
+            end_error_type = None
             try:
                 await session_task
                 delay = RECONNECT_MIN
             except asyncio.CancelledError:
+                end_error_type = "CancelledError"
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
+                    end_reason = "Receiver task cancelled"
                     raise
                 if not (self._paused or self._closed):
                     raise
                 paused_session = self._paused and not self._closed
+                end_reason = (
+                    "Diagnostic inspection requested" if paused_session
+                    else "Receiver stopped"
+                )
             except _ReceiverPaused:
                 paused_session = True
+                end_reason = "Diagnostic inspection requested"
             except (
                 BleakError, HomeAssistantError, OSError, TimeoutError
             ) as err:
                 end_reason = str(err)
+                end_error_type = type(err).__name__
                 self._health_error("connection_errors", str(err))
                 _LOGGER.warning("BlueFire BLE receiver unavailable: %s", err)
             except ProtocolError as err:
                 end_reason = str(err)
+                end_error_type = type(err).__name__
                 self._health_error("framing_errors", str(err))
                 _LOGGER.warning("BlueFire receive stream rejected: %s", err)
-            except Exception:
+            except Exception as err:
                 end_reason = "Unexpected receiver session failure"
+                end_error_type = type(err).__name__
                 _LOGGER.exception("BlueFire receiver session failed")
             finally:
                 self._connection_event(
                     "paused" if paused_session else "disconnected", end_reason
                 )
+                if self._connection_record is not None:
+                    context = self._connection_record["context"]
+                    context["counters"] = self._connection_counters()
+                    if end_error_type is not None:
+                        context["exception_type"] = end_error_type
                 self._session_task = None
                 self._session_closed.set()
                 self._decoder.reset()
@@ -232,6 +409,8 @@ class BlueFireReceiver:
                 if self._session_healthy:
                     delay = RECONNECT_MIN
                 self._reconnect_delay = delay
+                if self._connection_record is not None:
+                    self._connection_record["retry_delay_s"] = delay
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX)
 
@@ -344,6 +523,11 @@ class BlueFireReceiver:
                     )
 
                 async def write(packet: bytes) -> None:
+                    self._last_write = {
+                        "time": datetime.now(timezone.utc).isoformat(),
+                        "command": packet[2],
+                        "length": len(packet),
+                    }
                     async with asyncio.timeout(BLE_OPERATION_TIMEOUT):
                         await client.write_gatt_char(
                             write_characteristic, packet, response=True
@@ -352,11 +536,14 @@ class BlueFireReceiver:
                 self._startup = J1708Startup(
                     write, getattr(device, "name", None),
                     self.j1587_extended,
+                    is_receiving=self._receive_is_recent,
                 )
 
             self._queue = asyncio.Queue(maxsize=128)
             self._overflow.clear()
             self._pause_event.clear()
+            self._last_valid_packet = None
+            self._receive_started = monotonic()
             for uuid in notify_uuids:
                 async with asyncio.timeout(BLE_OPERATION_TIMEOUT):
                     await client.start_notify(
@@ -392,6 +579,16 @@ class BlueFireReceiver:
                     startup_task = None
                 if self._overflow.is_set():
                     raise BleakError("BlueFire receive queue overflow")
+                last_received = (
+                    self._last_valid_packet
+                    if self._last_valid_packet is not None
+                    else self._receive_started
+                )
+                if monotonic() - last_received >= RECEIVE_SILENCE_TIMEOUT:
+                    raise BleakError(
+                        "No valid BlueFire receive packets for "
+                        f"{RECEIVE_SILENCE_TIMEOUT} seconds"
+                    )
                 get_chunk = asyncio.create_task(self._queue.get())
                 overflow = asyncio.create_task(self._overflow.wait())
                 paused = asyncio.create_task(self._pause_event.wait())
@@ -427,6 +624,7 @@ class BlueFireReceiver:
                     continue
                 chunk = get_chunk.result()
                 bodies = self._decoder.feed(chunk)
+                self._record_stream_errors()
                 for body in bodies:
                     try:
                         await self._async_process_body(body)
@@ -448,6 +646,19 @@ class BlueFireReceiver:
                 ) from err
             raise
         finally:
+            error = sys.exception()
+            paused = self._paused and not self._closed
+            if paused:
+                reason = "Diagnostic inspection requested"
+            elif self._closed:
+                reason = "Receiver stopped"
+            elif error is not None:
+                reason = str(error)
+            else:
+                reason = "Bluetooth session ended"
+            self._remember_disconnect(
+                "paused" if paused else "disconnected", reason
+            )
             self._connected = False
             self._session_ended.set()
             if startup_task is not None:
@@ -477,6 +688,15 @@ class BlueFireReceiver:
     def _notification_received(self, _characteristic, data: bytearray) -> None:
         """Queue callbacks from both EZ characteristics in arrival order."""
         self._last_notification = datetime.now(timezone.utc).isoformat()
+        if self._startup is None or self._startup.ready:
+            self._recent_notifications.append({
+                "time": self._last_notification,
+                "characteristic": getattr(_characteristic, "uuid", ""),
+                "handle": getattr(_characteristic, "handle", None),
+                "length": len(data),
+                "hex": bytes(data[:NOTIFICATION_BYTES]).hex(),
+                "truncated": len(data) > NOTIFICATION_BYTES,
+            })
         if self._capture_callback is not None:
             self._capture_callback(_characteristic, data)
         if self.health is not None:
@@ -492,6 +712,8 @@ class BlueFireReceiver:
         except ProtocolError:
             # The queued live consumer records/rejects this same framing error.
             return
+        if bodies:
+            self._last_valid_packet = monotonic()
         if self._startup is not None and self._startup.ready:
             for body in bodies:
                 if body[0] == 7:

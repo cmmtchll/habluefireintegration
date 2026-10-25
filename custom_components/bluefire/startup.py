@@ -12,6 +12,7 @@ from .protocol import AdapterMessage, receive_checksum
 
 STEP_TIMEOUT = 10
 KEEPALIVE_INTERVAL = 10
+KEEPALIVE_MAX_MISSES = 3
 # Wire compatibility version, not the integration version or an app identity.
 CLIENT_COMPATIBILITY = (12, 5, 6)
 PLATFORM_UNSPECIFIED = 0
@@ -36,9 +37,11 @@ class J1708Startup:
 
     def __init__(
         self, write: Callable[[bytes], Awaitable[None]],
-        name: str | None, extended: bool,
+        name: str | None, extended: bool, *,
+        is_receiving: Callable[[], bool] | None = None,
     ) -> None:
         self._write = write
+        self._is_receiving = is_receiving
         self._heartbeat = asyncio.Event()
         self._response: asyncio.Future[bytes] | None = None
         self.expected_command: int | None = None
@@ -57,6 +60,8 @@ class J1708Startup:
         self.discarded_reports = 0
         self.keepalive_requests = 0
         self.keepalive_responses = 0
+        self.keepalive_timeouts = 0
+        self.keepalive_consecutive_timeouts = 0
         self.last_keepalive_available: bool | None = None
 
     @property
@@ -77,6 +82,9 @@ class J1708Startup:
                 "interval_s": KEEPALIVE_INTERVAL,
                 "requests": self.keepalive_requests,
                 "responses": self.keepalive_responses,
+                "timeouts": self.keepalive_timeouts,
+                "consecutive_timeouts": self.keepalive_consecutive_timeouts,
+                "max_misses": KEEPALIVE_MAX_MISSES,
                 "last_j1708_available": self.last_keepalive_available,
             },
         }
@@ -114,10 +122,18 @@ class J1708Startup:
             asyncio.get_running_loop().create_future()
         )
         self._response = response
+        written = False
         try:
             async with asyncio.timeout(STEP_TIMEOUT):
                 await self._write(client_packet(body))
+                written = True
                 return await response
+        except TimeoutError as err:
+            if not written:
+                raise StartupError(
+                    f"BLE write timed out during {stage}"
+                ) from err
+            raise
         finally:
             self.expected_command = None
             response.cancel()
@@ -150,10 +166,29 @@ class J1708Startup:
                 # Keep the ready stage so telemetry continues during the probe.
                 result = await self._request("ready", b"\x07")
             except TimeoutError as err:
-                raise StartupError("Timed out during J1708 keepalive") from err
+                self.keepalive_timeouts += 1
+                self.keepalive_consecutive_timeouts += 1
+                receiving = (
+                    self._is_receiving is not None and self._is_receiving()
+                )
+                _LOGGER.warning(
+                    "BlueFire J1708 probe timed out (%d consecutive); "
+                    "recent valid receive traffic: %s",
+                    self.keepalive_consecutive_timeouts, receiving,
+                )
+                if (
+                    self.keepalive_consecutive_timeouts >= KEEPALIVE_MAX_MISSES
+                    and not receiving
+                ):
+                    raise StartupError(
+                        "Timed out during J1708 keepalive: repeated missing "
+                        "replies without recent valid receive traffic"
+                    ) from err
+                continue
             if result not in (b"\x00", b"\x01"):
                 raise StartupError("Malformed J1708 keepalive response")
             self.keepalive_responses += 1
+            self.keepalive_consecutive_timeouts = 0
             self.last_keepalive_available = result == b"\x01"
 
     async def run(self) -> None:

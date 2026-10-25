@@ -7,10 +7,12 @@ from custom_components.bluefire.protocol import (
     AdapterMessage,
     J1587Report,
     MAX_BODY_SIZE,
+    MAX_PACKET_SIZE,
     ObdReport,
     PgnReport,
     ProtocolError,
     ReceiveDecoder,
+    RecoveringReceiveDecoder,
     parse_message,
     receive_checksum,
 )
@@ -190,6 +192,115 @@ class ReceiveTests(unittest.TestCase):
             offset += size
         decoder.finish()
         self.assertEqual(decoded, bodies)
+
+
+class RecoveryTests(unittest.TestCase):
+    def test_valid_streams_and_nested_headers_are_unchanged(self):
+        nested = b"\x42" + HEARTBEAT * 2 + b"\x00"
+        stream = packet(nested) + RPM_PACKET + HEARTBEAT
+        for split in range(len(stream) + 1):
+            decoder = RecoveringReceiveDecoder()
+            bodies = decoder.feed(stream[:split])
+            bodies += decoder.feed(stream[split:])
+            self.assertEqual(bodies, (nested, RPM_BODY, b"\xff"))
+            self.assertEqual(decoder.resynchronizations, 0)
+            self.assertEqual(decoder.framing_errors, ())
+
+    def test_missing_body_preserves_good_prefix_and_recovers_good_tail(self):
+        reports = [
+            bytes((154, 128, 190, 2, value, 0)) for value in range(15)
+        ]
+        stream = packet(reports[0]) + b"\x00\x05\x05"
+        stream += b"".join(packet(body) for body in reports[1:])
+        for split in range(len(stream) + 1):
+            decoder = RecoveringReceiveDecoder()
+            bodies = decoder.feed(stream[:split])
+            errors = decoder.framing_errors
+            bodies += decoder.feed(stream[split:])
+            errors += decoder.framing_errors
+            self.assertEqual(bodies, tuple(reports))
+            self.assertEqual(errors, ("Invalid receive payload checksum",))
+            self.assertEqual(decoder.resynchronizations, 1)
+            self.assertFalse(decoder.resynchronizing)
+            self.assertEqual(decoder.pending_bytes, 0)
+
+    def test_recovery_requires_two_adjacent_complete_valid_packets(self):
+        decoder = RecoveringReceiveDecoder()
+        self.assertEqual(decoder.feed(b"\x7f\x00\x00" + HEARTBEAT), ())
+        self.assertTrue(decoder.resynchronizing)
+        self.assertEqual(decoder.feed(RPM_PACKET[:-1]), ())
+        self.assertEqual(decoder.feed(RPM_PACKET[-1:]),
+                         (b"\xff", RPM_BODY))
+        self.assertEqual(decoder.resynchronizations, 1)
+
+    def test_incomplete_false_header_cannot_block_a_later_valid_pair(self):
+        decoder = RecoveringReceiveDecoder()
+        self.assertEqual(
+            decoder.feed(b"\x7f\x00\x00\x01\x04\x05" + HEARTBEAT * 2),
+            (b"\xff", b"\xff"),
+        )
+        self.assertFalse(decoder.resynchronizing)
+
+    def test_corrupt_candidate_is_never_returned_during_recovery(self):
+        bad = RPM_PACKET[:-1] + bytes((RPM_PACKET[-1] ^ 1,))
+        decoder = RecoveringReceiveDecoder()
+        self.assertEqual(decoder.feed(bad + HEARTBEAT + bad), ())
+        self.assertEqual(decoder.feed(HEARTBEAT * 2), (b"\xff", b"\xff"))
+        self.assertEqual(decoder.resynchronizations, 1)
+
+    def test_noise_is_bounded_and_two_maximum_packets_can_recover(self):
+        decoder = RecoveringReceiveDecoder()
+        for _ in range(20):
+            self.assertEqual(decoder.feed(bytes(1000)), ())
+            self.assertLessEqual(decoder.pending_bytes, MAX_PACKET_SIZE * 2)
+        bodies = (bytes([42]) * MAX_BODY_SIZE, bytes([43]) * MAX_BODY_SIZE)
+        stream = b"".join(packet(body) for body in bodies)
+        for value in stream[:-1]:
+            self.assertEqual(decoder.feed(bytes((value,))), ())
+            self.assertLessEqual(decoder.pending_bytes, MAX_PACKET_SIZE * 2)
+        self.assertEqual(decoder.feed(stream[-1:]), bodies)
+        self.assertEqual(decoder.pending_bytes, 0)
+
+    def test_multiple_errors_in_one_feed_keep_all_valid_packets(self):
+        decoder = RecoveringReceiveDecoder()
+        noise = b"\x7f\x00\x00"
+        self.assertEqual(
+            decoder.feed(HEARTBEAT + (noise + HEARTBEAT * 2) * 2),
+            (b"\xff",) * 5,
+        )
+        self.assertEqual(len(decoder.framing_errors), 2)
+        self.assertEqual(decoder.resynchronizations, 2)
+
+    def test_reset_and_invalid_api_input_clear_recovery(self):
+        decoder = RecoveringReceiveDecoder()
+        for value in (None, bytearray(3), "invalid"):
+            decoder.feed(b"\x7f\x00\x00" + HEARTBEAT)
+            with self.assertRaises(ProtocolError):
+                decoder.feed(value)
+            self.assertFalse(decoder.resynchronizing)
+            self.assertEqual(decoder.pending_bytes, 0)
+        decoder.feed(b"\x7f\x00\x00" + HEARTBEAT)
+        decoder.reset()
+        self.assertEqual(decoder.feed(HEARTBEAT), (b"\xff",))
+        self.assertEqual(decoder.resynchronizations, 0)
+
+    def test_randomized_valid_fragmentation_matches_strict_decoder(self):
+        rng = random.Random(323)
+        bodies = [
+            bytes(rng.randrange(256) for _ in range(rng.randint(1, 260)))
+            for _ in range(200)
+        ]
+        stream = b"".join(packet(body) for body in bodies)
+        decoder = RecoveringReceiveDecoder()
+        decoded = []
+        offset = 0
+        while offset < len(stream):
+            size = rng.randint(1, 700)
+            decoded.extend(decoder.feed(stream[offset:offset + size]))
+            self.assertLessEqual(decoder.pending_bytes, MAX_PACKET_SIZE * 2)
+            offset += size
+        self.assertEqual(decoded, bodies)
+        self.assertEqual(decoder.resynchronizations, 0)
 
 
 class ReportTests(unittest.TestCase):
