@@ -15,7 +15,7 @@ from time import monotonic
 
 from .catalog import CATALOG_VERSION, lookup, source_name
 from .const import (
-    J1708_POLL_TIMEOUT, J1708_READ_ACTIONS, TELEMETRY_TIMEOUT,
+    ENGINE_PROFILES, J1708_POLL_PIDS, J1708_POLL_TIMEOUT, TELEMETRY_TIMEOUT,
 )
 from .faults import DIAGNOSTICS, Diagnostic, decode_diagnostics
 from .j1587 import (
@@ -23,6 +23,7 @@ from .j1587 import (
     DiagnosticParameter,
     IdentificationParameter,
     Parameter,
+    StatusParameter,
     decode_report,
     parse_j1708_message,
 )
@@ -38,7 +39,7 @@ _DISPLAY_NAMES = {
 }
 _DISPLAY_PRECISION = {
     "%": 1, "°C": 1, "rpm": 2, "kPa": 2, "km/h": 2,
-    "L/h": 2, "h": 2, "km": 2, "V": 2, "L": 2,
+    "L/h": 2, "h": 2, "km": 2, "V": 2, "L": 2, "km/L": 2,
 }
 
 
@@ -126,9 +127,17 @@ class MqttBridge:
         known_j1587: list[list[int]] | None = None,
         save_j1587: SaveDiscovery | None = None,
         j1708_polling: bool = False,
+        engine_profile: str = "generic",
     ) -> None:
         if not valid_vehicle_id(vehicle_id):
             raise ValueError("Invalid vehicle identifier")
+        if engine_profile not in ENGINE_PROFILES:
+            raise ValueError("Unknown engine profile")
+        self.engine_profile = engine_profile
+        self.diagnostic_profile = (
+            "detroit_ddec_iii_iv"
+            if engine_profile == "detroit_series_60_ddec_iv" else None
+        )
         self.vehicle_id = vehicle_id
         self.prefix = f"vehicle/{vehicle_id}/{self.protocol}"
         self.publish = publish
@@ -160,6 +169,7 @@ class MqttBridge:
                 device_name=self.device_name, known_signals=known_j1587,
                 save_discovery=save_j1587, clock=clock,
                 j1708_polling=j1708_polling,
+                engine_profile=engine_profile,
             ) if self.protocol == "j1939" else None
         )
 
@@ -211,6 +221,8 @@ class MqttBridge:
         if self.j1587 is not None:
             result["j1587"] = self.j1587.diagnostics()
         if self.protocol == "j1587":
+            result["engine_profile"] = self.engine_profile
+            result["diagnostic_profile"] = self.diagnostic_profile
             result["controller_identification"] = {
                 str(mid): {
                     str(pid): dict(value) for pid, value in parameters.items()
@@ -292,7 +304,7 @@ class MqttBridge:
         self, source: int,
         signal: (
             Signal | Diagnostic | Parameter | DiagnosticParameter
-            | IdentificationParameter
+            | IdentificationParameter | StatusParameter
         ),
     ) -> tuple[str, str]:
         """Build discovery from trusted definitions, not stored payloads."""
@@ -300,6 +312,11 @@ class MqttBridge:
         label = source_name(source, j1587=self.protocol == "j1587")
         if label == "Unidentified controller":
             label = f"Controller {source}"
+        if (
+            self.protocol == "j1587" and source == 128
+            and self.diagnostic_profile is not None
+        ):
+            label = ENGINE_PROFILES[self.engine_profile]
         namespace = "spn"
         if self.protocol == "j1587":
             unique_id = (
@@ -323,7 +340,7 @@ class MqttBridge:
             "expire_after": (
                 J1708_POLL_TIMEOUT
                 if self.protocol == "j1587" and self._j1708_polling
-                and signal.spn in J1708_READ_ACTIONS.values()
+                and signal.spn in J1708_POLL_PIDS
                 else TELEMETRY_TIMEOUT
             ),
             "device": {
@@ -353,6 +370,8 @@ class MqttBridge:
             config["entity_category"] = "diagnostic"
             config["json_attributes_topic"] = config["state_topic"]
             del config["expire_after"]
+        elif isinstance(signal, StatusParameter):
+            config["json_attributes_topic"] = config["state_topic"]
         else:
             config["unit_of_measurement"] = signal.unit
             config["suggested_display_precision"] = (
@@ -370,6 +389,7 @@ class MqttBridge:
                 config["json_attributes_template"] = (
                     "{{ {'description': value_json.description, "
                     "'source_name': value_json.source_name, "
+                    "'source_name_basis': value_json.source_name_basis, "
                     "'mid': value_json.mid, 'pid': value_json.pid} | tojson }}"
                 )
             if signal.device_class:
@@ -636,7 +656,10 @@ class J1587MqttBridge(MqttBridge):
         raise ValueError("J1587 accepts parameter reports, not CAN frames")
 
     async def async_process_j1587(self, report: J1587Report) -> None:
-        decoded = decode_report(report)
+        decoded = decode_report(
+            report,
+            profile=self.diagnostic_profile if report.mid == 128 else None,
+        )
         async with self._frame_lock:
             common = {
                 "schema_version": 1, "protocol": "j1587",
@@ -647,6 +670,13 @@ class J1587MqttBridge(MqttBridge):
                 "catalog_version": CATALOG_VERSION,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
+            if report.mid == 128 and self.diagnostic_profile is not None:
+                common.update(
+                    source_name=ENGINE_PROFILES[self.engine_profile],
+                    source_name_basis="configured_official_equipment_labels",
+                    engine_profile=self.engine_profile,
+                    diagnostic_profile=self.diagnostic_profile,
+                )
             identification = decoded.get("identification")
             if identification is not None:
                 self._identification.setdefault(report.mid, {})[

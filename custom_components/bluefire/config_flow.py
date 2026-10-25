@@ -7,11 +7,13 @@ from homeassistant.config_entries import ConfigFlow
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 
 from .const import (
+    CONF_ENGINE_PROFILE,
     CONF_J1587_EXTENDED,
     CONF_J1708_STARTUP,
     CONF_VEHICLE_ID,
     DEFAULT_VEHICLE_ID,
     DOMAIN,
+    ENGINE_PROFILES,
 )
 from .telemetry import valid_vehicle_id
 from .validation import normalize_address
@@ -101,6 +103,7 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             data, errors = self._validate_input({
+                **entry.data,
                 **user_input,
                 CONF_VEHICLE_ID: entry.data[CONF_VEHICLE_ID],
             })
@@ -150,6 +153,12 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
                 data[CONF_J1708_STARTUP] = value
                 if value and CONF_J1587_EXTENDED not in data:
                     errors[CONF_J1587_EXTENDED] = "required_j1587_format"
+        if CONF_ENGINE_PROFILE in user_input:
+            value = user_input[CONF_ENGINE_PROFILE]
+            if not isinstance(value, str) or value not in ENGINE_PROFILES:
+                errors[CONF_ENGINE_PROFILE] = "invalid_engine_profile"
+            else:
+                data[CONF_ENGINE_PROFILE] = value
         return data, errors
 
     def _show_settings(self, step_id, defaults, errors):
@@ -182,6 +191,12 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_J1708_STARTUP,
             default=defaults.get(CONF_J1708_STARTUP, False),
         )] = bool
+        profile = vol.Optional(CONF_ENGINE_PROFILE)
+        if CONF_ENGINE_PROFILE in defaults:
+            profile = vol.Optional(
+                CONF_ENGINE_PROFILE, default=defaults[CONF_ENGINE_PROFILE],
+            )
+        schema[profile] = vol.In(ENGINE_PROFILES)
         return self.async_show_form(
             step_id=step_id,
             data_schema=vol.Schema(schema),

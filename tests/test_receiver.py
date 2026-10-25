@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from custom_components.bluefire.health import Health
+from custom_components.bluefire.j1587 import ENTITIES
 from custom_components.bluefire.telemetry import MqttBridge
 
 
@@ -304,7 +305,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.receiver.j1587_extended = True
         self.read_started = asyncio.Event()
 
-        async def read(pid, *, restore=False):
+        async def read(pid, *, restore=False, mid=0):
             if not restore:
                 self.read_started.set()
 
@@ -315,6 +316,61 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         timer = patch.object(self.api, "READ_WINDOW_SECONDS", 0.02)
         timer.start()
         self.addCleanup(timer.stop)
+
+    async def test_targeted_manual_read_filters_and_restores_wildcard(self):
+        self.configure_read()
+        self.receiver.bridge = MqttBridge(
+            "coach", AsyncMock(), engine_profile="detroit_series_60_ddec_iv",
+        )
+        for pid, body in (
+            (194, bytes.fromhex("c2 02 a8 21")),
+            (243, b"\xf3\x06\x80MAKE*"),
+            (439, bytes.fromhex("ff b7 02 20 03")),
+            (174, bytes.fromhex("ae 02 40 01")),
+        ):
+            self.read_started.clear()
+            task = asyncio.create_task(self.receiver.async_read(pid, mid=128))
+            await self.read_started.wait()
+            if pid != 243:
+                await self.receiver._async_process_body(b"\x9a\x82" + body)
+            await self.receiver._async_process_body(b"\x9a\x80" + body)
+            result = await task
+            report, = result["reports"]
+            self.assertEqual(report["mid"], 128)
+            self.receiver._startup.async_read.assert_any_await(pid, mid=128)
+            self.receiver._startup.async_read.assert_awaited_with(
+                pid, restore=True,
+            )
+            self.assertEqual(self.receiver._read_mid, 0)
+            if pid == 194:
+                match, = report["diagnostics"]["faults"][0][
+                    "manufacturer_matches"
+                ]
+                self.assertEqual(match["code"], "46")
+            elif pid == 243:
+                self.assertEqual(report["identification"]["value"], "MAKE*")
+            elif pid == 439:
+                self.assertEqual(report["signals"][0]["value"], 100)
+            else:
+                self.assertFalse(report["value_decoded"])
+                self.assertEqual(report["signals"], [])
+                self.assertEqual(report["data"], "4001")
+
+    async def test_wrong_source_does_not_satisfy_target_and_bad_mid_rejected(
+        self,
+    ):
+        self.configure_read()
+        for mid in (-1, 1, 127, 256, True, "128"):
+            with self.assertRaisesRegex(self.home_assistant_error, "MID"):
+                await self.receiver.async_read(96, mid=mid)
+        task = asyncio.create_task(self.receiver.async_read(96, mid=128))
+        await self.read_started.wait()
+        await self.receiver._async_process_body(
+            bytes.fromhex("9a 82 60 01 64"),
+        )
+        with self.assertRaisesRegex(self.home_assistant_error, "MID 128"):
+            await task
+        self.receiver._startup.async_read.assert_awaited_with(96, restore=True)
 
     async def test_fuel_read_collects_sources_and_updates_existing_mqtt(self):
         self.configure_read()
@@ -1317,7 +1373,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             diagnostics = self.receiver.startup_diagnostics()
             self.assertEqual(diagnostics["stage"], "disconnected")
             self.assertEqual(diagnostics["firmware"], [3, 23, 0])
-            self.assertEqual(diagnostics["subscriptions_sent"], 35)
+            self.assertEqual(diagnostics["subscriptions_sent"], len(ENTITIES))
             self.assertEqual(diagnostics["discarded_reports"], 1)
         self.assertEqual(self.bridge.async_process_j1587.await_count, 2)
         self.assertEqual(self.startup_bodies.count(b"\x00"), 2)
@@ -1477,7 +1533,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         ))
         diagnostics = self.receiver.startup_diagnostics()
         self.assertIsNone(diagnostics["error"])
-        self.assertEqual(diagnostics["subscriptions_sent"], 35)
+        self.assertEqual(diagnostics["subscriptions_sent"], len(ENTITIES))
         self.assertEqual(self.receiver.health.counters["connection_errors"], 0)
 
     async def test_expanded_subscription_publishes_transmission_temperature(
@@ -1511,7 +1567,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(config["device_class"], "temperature")
         self.assertEqual(config["unit_of_measurement"], "°C")
-        self.assertEqual(self.receiver._startup.subscriptions_sent, 35)
+        self.assertEqual(self.receiver._startup.subscriptions_sent,
+                         len(ENTITIES))
         self.assertEqual(self.receiver._startup.discarded_reports, 1)
 
     async def test_unavailable_status_without_telemetry_never_publishes_online(

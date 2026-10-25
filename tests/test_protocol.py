@@ -350,6 +350,27 @@ class ReportTests(unittest.TestCase):
             parse_message(ambiguous, j1587_extended=True),
         )
 
+    def test_component_mid_wrapper_is_normalized_only_at_vendor_boundary(self):
+        for extended in (False, True):
+            pid = b"\xf3" if extended else b"\x00\xf3"
+            for mid in (128, 130, 249):
+                data = bytes((mid,)) + b"MAKE*MODEL*SERIAL*"
+                body = bytes((154, mid)) + pid + bytes((len(data),)) + data
+                self.assertEqual(
+                    parse_message(body, j1587_extended=extended),
+                    J1587Report(mid, 243, data[1:]),
+                )
+                with self.assertRaisesRegex(ProtocolError, "MID mismatch"):
+                    parse_message(
+                        bytes((154, mid + 1)) + body[2:],
+                        j1587_extended=extended,
+                    )
+            for data in (b"", b"\xff\xff", b"MAKE*MODEL*"):
+                body = b"\x9a\x80" + pid + bytes((len(data),)) + data
+                self.assertEqual(
+                    parse_message(body, j1587_extended=extended).data, data,
+                )
+
     def test_obd_is_not_j1939(self):
         body = bytes.fromhex("ae 07 e8 01 00 0c 02 1f 40")
         self.assertEqual(

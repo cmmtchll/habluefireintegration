@@ -22,10 +22,10 @@ from homeassistant.exceptions import HomeAssistantError
 from .catalog import lookup
 from .capture import analyze_notifications, serialize_notifications
 from .const import (
-    J1708_POLL_INTERVAL, J1708_POLL_MAX_BACKOFF, J1708_READ_ACTIONS,
+    J1708_POLL_INTERVAL, J1708_POLL_MAX_BACKOFF, J1708_POLL_PIDS,
     MAX_CAPTURE_NOTIFICATIONS,
 )
-from .j1587 import decode_report
+from .j1587 import READABLE_PIDS, decode_report
 from .protocol import (
     AdapterMessage,
     J1587Report,
@@ -97,6 +97,7 @@ class BlueFireReceiver:
         self._session_task: asyncio.Task | None = None
         self._read_waiter: asyncio.Future[None] | None = None
         self._read_pid: int | None = None
+        self._read_mid = 0
         self._read_reports: dict[int, dict] = {}
         self._connected = False
         self._session_healthy = False
@@ -121,7 +122,7 @@ class BlueFireReceiver:
         self._last_write: dict | None = None
         self.services: list[dict] = []
 
-    async def async_read(self, pid: int) -> dict:
+    async def async_read(self, pid: int, *, mid: int = 0) -> dict:
         """Collect fresh reports during a bounded, explicit J1708 request."""
         startup = self._startup
         if (
@@ -132,9 +133,13 @@ class BlueFireReceiver:
             raise HomeAssistantError(
                 "Enable J1708 startup and wait for a ready BLE connection"
             )
-        if type(pid) is not int or pid not in J1708_READ_ACTIONS.values():
+        if type(pid) is not int or pid not in READABLE_PIDS:
             raise HomeAssistantError(
                 "Only supported J1708 sensor reads are allowed"
+            )
+        if type(mid) is not int or (mid != 0 and not 128 <= mid <= 255):
+            raise HomeAssistantError(
+                "Expected wildcard MID 0 or controller MID 128..255"
             )
         if self._read_waiter is not None:
             raise HomeAssistantError("A J1708 read is already running")
@@ -143,9 +148,13 @@ class BlueFireReceiver:
         )
         self._read_waiter = waiter
         self._read_pid = pid
+        self._read_mid = mid
         self._read_reports = {}
         try:
-            await startup.async_read(pid)
+            if mid:
+                await startup.async_read(pid, mid=mid)
+            else:
+                await startup.async_read(pid)
             try:
                 async with asyncio.timeout(READ_WINDOW_SECONDS):
                     await asyncio.shield(waiter)
@@ -153,7 +162,7 @@ class BlueFireReceiver:
                 if not self._read_reports:
                     raise HomeAssistantError(
                         f"No J1708 PID {pid} report received "
-                        "during read window"
+                        f"during read window (requested MID {mid})"
                     ) from None
             return {
                 "pid": pid,
@@ -180,6 +189,7 @@ class BlueFireReceiver:
             finally:
                 self._read_waiter = None
                 self._read_pid = None
+                self._read_mid = 0
                 self._read_reports = {}
 
     def connection_diagnostics(self) -> dict:
@@ -403,7 +413,7 @@ class BlueFireReceiver:
     async def _async_poll(self) -> None:
         """Poll each minute, backing off each silent PID independently."""
         next_poll = monotonic() + J1708_POLL_INTERVAL
-        retry_at = {pid: next_poll for pid in J1708_READ_ACTIONS.values()}
+        retry_at = {pid: next_poll for pid in J1708_POLL_PIDS}
         backoff = {pid: J1708_POLL_INTERVAL for pid in retry_at}
         while True:
             await asyncio.sleep(max(0, next_poll - monotonic()))
@@ -868,7 +878,11 @@ class BlueFireReceiver:
                 body, j1587_extended=self.j1587_extended
             )
             if isinstance(message, J1587Report):
-                decoded = decode_report(message)
+                decoded = decode_report(
+                    message, profile=getattr(
+                        self.bridge, "diagnostic_profile", None,
+                    ) if message.mid == 128 else None,
+                )
         except ValueError as err:
             self._health_error("parse_errors", str(err))
             _LOGGER.warning("BlueFire report rejected: %s", err)
@@ -906,8 +920,11 @@ class BlueFireReceiver:
                 self._read_waiter is not None
                 and not self._read_waiter.done()
                 and message.pid == self._read_pid
+                and (self._read_mid == 0 or message.mid == self._read_mid)
             ):
-                self._read_reports[message.mid] = decoded
+                self._read_reports[message.mid] = {
+                    "data": message.data.hex(), **decoded,
+                }
         elif isinstance(message, ObdReport):
             self._session_healthy = True
             if self.health is not None:

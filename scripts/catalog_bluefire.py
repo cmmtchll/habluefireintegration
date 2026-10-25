@@ -26,16 +26,20 @@ def render_markdown(catalog: dict) -> str:
         "```", "",
         f"Catalog version: **{catalog['catalog_version']}**. "
         f"{catalog['coverage']}", "",
-        "Vehicle context: **2003-era Detroit Diesel, 500 HP, "
-        "Allison B500**. Year, horsepower and transmission model do not "
-        "identify the ECM/controller generation or calibration. Profiles "
-        "below are reference-only and never selected automatically.", "",
+        "Vehicle context: official labels and Prevost documentation identify "
+        "**Detroit Diesel Series 60, 12.7 L, 500 HP, DDEC IV**. The coach "
+        "build sheet specifies **Allison HD4000MH R**, not the B500 listed "
+        "in the generic coach specification. Transmission control generation "
+        "is not established. Engine interpretation requires explicit entry "
+        "configuration; no profile is inferred from reported text.", "",
         "J1939 SPNs, J1587 PIDs/SIDs, OBD mode/PIDs, Detroit flash codes "
         "and Allison main/subcodes are separate namespaces. A number alone "
         "is not enough to identify its meaning. Unknown codes retain their "
         "IDs and an explicit unmapped label; no meaning is guessed.", "",
-        "Source-address and MID labels are conventional roles, not verified "
-        "ECU identities. These are independently worded factual summaries, "
+        "Source-address and MID labels are conventional roles unless engine "
+        "MID 128 uses the configured official-label DDEC IV profile. "
+        "Other controller identities are not inferred. "
+        "These are independently worded factual summaries, "
         "not a complete service manual or a repair/safety assessment.", "",
         "## J1939 decoded measurements", "",
         "Offsets are zero-based byte offsets; values are little-endian. "
@@ -96,6 +100,29 @@ def render_markdown(catalog: dict) -> str:
     )
     lines.extend([
         "J1587 provenance: " + catalog["references"]["j1587"], "",
+        "## J1587 status and read-only request support", "",
+        "Switch and cruise values are one-byte bitfields; gear values are "
+        "two printable ASCII characters. These are unitless sensors, not "
+        "commands or numeric quantities. All-ones is unavailable; unsupported "
+        "gear encodings retain raw bytes and a null value. Cruise status "
+        "includes enabled/set/coast/resume/accelerate/brake/clutch/active "
+        "attributes.", "",
+    ])
+    table(
+        ("PID", "Label", "Value bytes", "Encoding"),
+        ((p["pid"], p["name"], p["length"], p["kind"])
+         for p in catalog["j1587_statuses"]),
+    )
+    lines.extend([
+        "The `bluefire.read_parameter` action accepts only these PIDs: "
+        + ", ".join(map(str, catalog["j1587_readable_pids"])) + ".", "",
+        "Requests collect for five seconds and optionally target MID 128–255 "
+        "(zero/omitted means wildcard). PID 174 fuel temperature is raw-only: "
+        "Prevost documents the installed sensor, but the inspected vendor "
+        "decoder does not establish its scale. The automatic poll set remains "
+        "96, 194, 245, 247 and 250; additional reads are manual only. No "
+        "fault clearing, programming, arbitrary requests or actuator tests "
+        "are exposed.", "",
         "## Standard code labels", "",
         "For J1587 PID lookups, units mean preferred display units only; "
         "an actual conversion is implemented only for the decoded subset "
@@ -157,7 +184,8 @@ def render_markdown(catalog: dict) -> str:
         ]
         table(
             ("Namespace", "Code", "Label / description",
-             "J1587 equivalents (code / FMI)", "Reference"),
+             "J1587 equivalents (code / FMI)", "Applicability / exceptions",
+             "Reference"),
             (
                 (p["namespace"], p["code"], p["name"],
                  ", ".join(
@@ -165,7 +193,7 @@ def render_markdown(catalog: dict) -> str:
                      for kind, pairs in (
                          ("PID", p["pid_fmi"]), ("SID", p["sid_fmi"])
                      ) for code, fmi in pairs
-                 ) or "-", p["reference"])
+                 ) or "-", p["applicability"] or "-", p["reference"])
                 for p in records
             ),
         )

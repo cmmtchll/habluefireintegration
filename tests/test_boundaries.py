@@ -129,6 +129,9 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             ("read_fuel_level", 96), ("read_diagnostic_codes", 194),
             ("read_odometer", 245), ("read_engine_hours", 247),
             ("read_total_fuel_used", 250),
+            ("read_software_identification", 234),
+            ("read_vehicle_identification", 237),
+            ("read_component_identification", 243),
         ):
             result = await self.services[service](SimpleNamespace(
                 service=service, data={"entry_id": "entry"},
@@ -151,6 +154,9 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             "read_fuel_level": 96, "read_diagnostic_codes": 194,
             "read_odometer": 245, "read_engine_hours": 247,
             "read_total_fuel_used": 250,
+            "read_software_identification": 234,
+            "read_vehicle_identification": 237,
+            "read_component_identification": 243,
         })
         folder = (
             Path(__file__).resolve().parents[1]
@@ -165,7 +171,7 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         english = json.loads(
             (folder / "translations" / "en.json").read_text(encoding="utf-8")
         )
-        for action in J1708_READ_ACTIONS:
+        for action in (*J1708_READ_ACTIONS, "read_parameter"):
             self.assertIn(action, self.services)
             self.assertTrue(
                 definitions[action]["fields"]["entry_id"]["required"]
@@ -173,6 +179,39 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 strings["services"][action], english["services"][action]
             )
+            self.assertIn("mid", definitions[action]["fields"])
+
+    async def test_parameter_read_schema_targets_and_rejects_control_pids(
+        self,
+    ):
+        import voluptuous as vol
+
+        registration = next(
+            call for call in self.service_registration.call_args_list
+            if call.args[1] == "read_parameter"
+        )
+        schema = registration.kwargs["schema"]
+        for data in (
+            {"entry_id": "entry", "pid": 174},
+            {"entry_id": "entry", "pid": "439", "mid": "128"},
+            {"entry_id": "entry", "pid": 235, "mid": 0},
+        ):
+            normalized = schema(data)
+            await self.services["read_parameter"](SimpleNamespace(
+                service="read_parameter", data=normalized,
+            ))
+            if normalized.get("mid"):
+                self.receiver.async_read.assert_awaited_with(
+                    normalized["pid"], mid=128,
+                )
+            else:
+                self.receiver.async_read.assert_awaited_with(normalized["pid"])
+        for pid, mid in ((195, 128), (196, 128), (192, 128), (1, 128),
+                         (439, 127), (439, 256), (439, -1)):
+            with (
+                self.subTest(pid=pid, mid=mid), self.assertRaises(vol.Invalid),
+            ):
+                schema({"entry_id": "entry", "pid": pid, "mid": mid})
 
     async def test_vehicle_reads_surface_errors_and_reject_busy_entries(self):
         action = self.services["read_fuel_level"]
@@ -512,6 +551,14 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.entry.runtime_data.bridge.j1587._availability_timeout, 180
         )
+
+    async def test_setup_passes_confirmed_engine_profile_to_live_bridge(self):
+        self.entry.data["engine_profile"] = "detroit_series_60_ddec_iv"
+        self.assertTrue(await async_setup_entry(self.hass, self.entry))
+        bridge = self.entry.runtime_data.bridge
+        self.assertEqual(bridge.diagnostic_profile, "detroit_ddec_iii_iv")
+        self.assertEqual(bridge.j1587.engine_profile,
+                         "detroit_series_60_ddec_iv")
 
     async def test_missing_mqtt_client_is_retryable(self):
         self.mqtt.async_wait_for_mqtt_client.return_value = False

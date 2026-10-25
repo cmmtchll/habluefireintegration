@@ -28,7 +28,7 @@ from scripts.catalog_bluefire import main, render_markdown
 class CatalogTests(unittest.TestCase):
     def test_export_has_unique_scoped_keys_and_provenance(self):
         catalog = json.loads(json.dumps(export_catalog(), allow_nan=False))
-        self.assertEqual(catalog["catalog_version"], 2)
+        self.assertEqual(catalog["catalog_version"], 3)
         self.assertEqual(len(catalog["measurements"]), 37)
         self.assertEqual(len(FMIS), 32)
         self.assertEqual(set(FMIS), set(range(32)))
@@ -61,6 +61,38 @@ class CatalogTests(unittest.TestCase):
         self.assertIn(
             "500 HP", PROFILES["detroit_ddec_iii_iv"]["applicability"]
         )
+
+    def test_ddec_index_coverage_and_conflicting_equivalents(self):
+        expected = {
+            11, 12, 13, 14, 15, 16, 17, 18, 21, 22, 23, 24, 26, 27, 28, 29,
+            31, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 43, 44, 45, 46, 47,
+            48, 49, 51, 52, 53, 54, 55, 56, 57, 58, 61, 62, 63, 64, 65, 66,
+            67, 68, 71, 72, 73, 74, 75, 76, 77, 78, 81, 82, 83, 84, 85, 86,
+            87, 89,
+        }
+        detroit = {
+            int(item.code): item for item in MANUFACTURER_CODES
+            if item.profile == "detroit_ddec_iii_iv"
+        }
+        self.assertEqual(set(detroit), expected)
+        self.assertEqual(len(detroit), 66)
+        self.assertEqual(detroit[74].pid_fmi, ())
+        self.assertTrue(detroit[74].applicability)
+        self.assertNotIn((107, 0), detroit[73].pid_fmi)
+        self.assertNotIn((107, 0), detroit[73].sid_fmi)
+        self.assertNotIn((174, 0), detroit[77].pid_fmi)
+        for namespace, code, fmi, flash in (
+            ("pid", 168, 1, "46"), ("sid", 238, 3, "32"),
+            ("sid", 250, 12, "56"), ("sid", 6, 1, "71"),
+            ("pid", 100, 1, "45"),
+        ):
+            fault = describe_fault(
+                namespace, code, fmi, source=128,
+                profile="detroit_ddec_iii_iv",
+            )
+            self.assertEqual(
+                [m["code"] for m in fault["manufacturer_matches"]], [flash],
+            )
 
     def test_protocol_namespaces_are_not_interchangeable(self):
         self.assertEqual(lookup("spn", 190)["name"], "Engine speed")

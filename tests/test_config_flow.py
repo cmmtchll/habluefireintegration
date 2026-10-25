@@ -126,6 +126,37 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(errors)
         self.assertIs(data["j1587_extended"], False)
 
+    async def test_confirmed_engine_profile_is_explicit_and_preserved(self):
+        schema = (await self.flow.async_step_manual())["data_schema"]
+        self.assertNotIn("engine_profile", schema({}))
+        profile = "detroit_series_60_ddec_iv"
+        for value in (profile, "generic"):
+            result = await self.flow.async_step_manual({
+                **self.data, "engine_profile": value,
+            })
+            self.assertEqual(result["data"]["engine_profile"], value)
+        for value in ("guess", True, None, []):
+            _, errors = self.flow._validate_input({
+                **self.data, "engine_profile": value,
+            })
+            self.assertEqual(errors, {
+                "engine_profile": "invalid_engine_profile",
+            })
+        with self.assertRaises(vol.Invalid):
+            schema({"engine_profile": "guess"})
+        entry = self.reconfigure_entry()
+        entry.data["engine_profile"] = profile
+        result = await self.flow.async_step_reconfigure()
+        self.assertEqual(result["data_schema"]({})["engine_profile"], profile)
+        result = await self.flow.async_step_reconfigure({
+            "name": "Renamed", "address": self.data["address"],
+        })
+        self.assertEqual(result["data_updates"]["engine_profile"], profile)
+        result = await self.flow.async_step_reconfigure({
+            **self.data, "engine_profile": "generic",
+        })
+        self.assertEqual(result["data_updates"]["engine_profile"], "generic")
+
     async def test_field_errors_preserve_input(self):
         bad = {"name": " ", "address": "oops", "vehicle_id": "invalid/topic"}
         result = await self.flow.async_step_manual(bad)

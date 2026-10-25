@@ -24,9 +24,11 @@
           "address": "Bluetooth MAC address",
           "vehicle_id": "Vehicle MQTT identifier",
           "j1587_extended": "J1587 adapter firmware format",
-          "j1708_startup": "Enable J1708 startup (unsecured EZ adapters)"
+          "j1708_startup": "Enable J1708 startup (unsecured EZ adapters)",
+          "engine_profile": "Confirmed engine equipment"
         },
         "data_description": {
+          "engine_profile": "Select Detroit Series 60 / DDEC IV when identified by official equipment labels or documentation. Enables engine MID 128 names and Detroit diagnostic references; does not infer other controllers, installed options or calibration. Leave blank for standard J1587.",
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "vehicle_id": "1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
           "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; otherwise leave blank to ignore J1587 PIDData.",
@@ -40,9 +42,11 @@
           "name": "Adapter name",
           "address": "Bluetooth MAC address",
           "j1587_extended": "J1587 adapter firmware format",
-          "j1708_startup": "Enable J1708 startup (unsecured EZ adapters)"
+          "j1708_startup": "Enable J1708 startup (unsecured EZ adapters)",
+          "engine_profile": "Confirmed engine equipment"
         },
         "data_description": {
+          "engine_profile": "Select the engine identified by official equipment labels. Existing MQTT identities are preserved; Detroit references apply only to engine MID 128. Choose standard J1587 to remove the engine-specific interpretation.",
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; firmware 3.23.0 uses Extended (3.19+).",
           "j1708_startup": "Opt in to unsecured authentication, passive monitoring and one-minute active reads of fuel level, diagnostics, odometer, engine hours and total fuel used, with failure backoff. Disabled entries remain receive-only. Does not clear faults or change security, bus settings or firmware."
@@ -56,6 +60,7 @@
       "invalid_vehicle_id": "Use 1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
       "invalid_j1587_format": "Select a supported J1587 firmware format.",
       "invalid_j1708_startup": "Enable or disable J1708 startup.",
+      "invalid_engine_profile": "Select a supported engine profile or standard J1587.",
       "required_j1587_format": "Select the adapter firmware format before enabling J1708 startup.",
       "vehicle_id_in_use": "Another adapter already uses this vehicle MQTT identifier."
     },
@@ -70,6 +75,10 @@
       "name": "Read odometer",
       "description": "Send a one-shot J1708 PID 245 request and collect reports for five seconds. Updates existing MQTT total-distance sensors and returns kilometres per responding controller. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
       "fields": {
+        "mid": {
+          "name": "Controller MID",
+          "description": "Optional controller MID 128–255; 128 is the engine, 130 the transmission. Omit or use 0 for all responding controllers."
+        },
         "entry_id": {
           "name": "Config entry",
           "description": "The connected BlueFire adapter to request total vehicle distance from."
@@ -80,6 +89,10 @@
       "name": "Read engine hours",
       "description": "Send a one-shot J1708 PID 247 request and collect reports for five seconds. Updates existing MQTT total-engine-hours sensors and returns hours per responding controller. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
       "fields": {
+        "mid": {
+          "name": "Controller MID",
+          "description": "Optional controller MID 128–255; omit or use 0 for all responding controllers."
+        },
         "entry_id": {
           "name": "Config entry",
           "description": "The connected BlueFire adapter to request total engine hours from."
@@ -90,6 +103,10 @@
       "name": "Read total fuel used",
       "description": "Send a one-shot J1708 PID 250 request and collect reports for five seconds. Updates existing MQTT total-fuel-used sensors and returns litres per responding controller, not fuel remaining. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
       "fields": {
+        "mid": {
+          "name": "Controller MID",
+          "description": "Optional controller MID 128–255; omit or use 0 for all responding controllers."
+        },
         "entry_id": {
           "name": "Config entry",
           "description": "The connected BlueFire adapter to request total fuel used from."
@@ -100,6 +117,10 @@
       "name": "Read fuel level",
       "description": "Send a one-shot J1708 fuel-level request and collect reports for five seconds. Updates MQTT fuel sensors and returns percent readings per responding controller. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
       "fields": {
+        "mid": {
+          "name": "Controller MID",
+          "description": "Optional controller MID 128–255; omit or use 0 for all responding controllers."
+        },
         "entry_id": {
           "name": "Config entry",
           "description": "The connected BlueFire adapter to request fuel level from."
@@ -110,9 +131,73 @@
       "name": "Read diagnostic codes",
       "description": "Send a one-shot J1708 PID 194 request and collect reported active/inactive faults for five seconds. Updates MQTT diagnostic sensors and returns codes per responding controller. Requires ready, opt-in J1708 startup. Never clears faults; no response is not a clean bill of health.",
       "fields": {
+        "mid": {
+          "name": "Controller MID",
+          "description": "Optional controller MID 128–255; omit or use 0 for all responding controllers."
+        },
         "entry_id": {
           "name": "Config entry",
           "description": "The connected BlueFire adapter to request diagnostic codes from."
+        }
+      }
+    },
+    "read_parameter": {
+      "name": "Read J1587 parameter",
+      "description": "Request one allowlisted measurement, status, diagnostic or identification PID for five seconds. Returns fresh data and updates supported MQTT entities. PID 174 fuel temperature returns raw bytes only. Never clears faults, programs the ECM or runs actuators. Requires ready J1708 startup; no response is an error, not proof a sensor is absent.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter."
+        },
+        "pid": {
+          "name": "J1587 PID",
+          "description": "Only PIDs in the documented read allowlist are accepted. Examples: 26 fan, 68 torque, 85 cruise, 162/163 gears, 184/185 economy, 235/236 idle totals, 439 extended boost. Arbitrary bus writes and fault-clearing PIDs are rejected."
+        },
+        "mid": {
+          "name": "Controller MID",
+          "description": "Optional controller MID 128–255; omit or use 0 for all responding controllers."
+        }
+      }
+    },
+    "read_software_identification": {
+      "name": "Read software identification",
+      "description": "Request PID 234 software identification. Returns controller-reported text, not an inferred calibration. Manual only; not added to periodic polling.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter."
+        },
+        "mid": {
+          "name": "Controller MID",
+          "description": "Use 128 for the engine, or omit/use 0 for all responding controllers."
+        }
+      }
+    },
+    "read_vehicle_identification": {
+      "name": "Read vehicle identification",
+      "description": "Request PID 237 vehicle identification. Returns the actual controller text even if it is not a valid VIN. Does not replace official equipment labels.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter."
+        },
+        "mid": {
+          "name": "Controller MID",
+          "description": "Use a controller MID 128–255, or omit/use 0 for all responding controllers."
+        }
+      }
+    },
+    "read_component_identification": {
+      "name": "Read component identification",
+      "description": "Request PID 243 component identification. Validates/removes the BlueFire embedded MID wrapper where present and preserves reported make/model/serial text. Requires ready J1708 startup.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter."
+        },
+        "mid": {
+          "name": "Controller MID",
+          "description": "Use 128 for the engine, 130 for transmission, or omit/use 0 for all responding controllers."
         }
       }
     },

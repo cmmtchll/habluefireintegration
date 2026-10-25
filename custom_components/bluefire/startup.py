@@ -7,8 +7,7 @@ from collections.abc import Awaitable, Callable
 import logging
 import re
 
-from .const import J1708_READ_ACTIONS
-from .j1587 import ENTITIES, IDENTIFICATION_PARAMETERS
+from .j1587 import ENTITIES, IDENTIFICATION_PARAMETERS, READABLE_PIDS
 from .protocol import AdapterMessage, receive_checksum
 
 STEP_TIMEOUT = 10
@@ -33,12 +32,18 @@ def client_packet(body: bytes) -> bytes:
     return packet + bytes((receive_checksum(packet),))
 
 
-def pid_subscription(pid: int, *, on_request: bool = False) -> bytes:
-    """Wildcard MID; one-shot ECU retrieval or the normal passive monitor."""
-    if type(pid) is not int or pid not in {p.pid for p in ENTITIES}:
+def pid_subscription(
+    pid: int, *, on_request: bool = False, mid: int = 0,
+) -> bytes:
+    """Read-only retrieval; MID zero monitors/requests all responding ECUs."""
+    if type(pid) is not int or pid not in READABLE_PIDS:
         raise StartupError("Unsupported J1708 PID")
+    if type(mid) is not int or (mid != 0 and not 128 <= mid <= 255):
+        raise StartupError(
+            "Expected wildcard MID 0 or controller MID 128..255"
+        )
     return client_packet(
-        b"\x9b\x00" + pid.to_bytes(2, "big")
+        bytes((155, mid)) + pid.to_bytes(2, "big")
         + bytes((int(on_request), 1 if on_request else 2))
         + (0 if on_request else REPORT_INTERVAL_MS).to_bytes(2, "big")
         + b"\x00"
@@ -108,15 +113,19 @@ class J1708Startup:
         if self.stage != "failed":
             self.stage = "disconnected"
 
-    async def async_read(self, pid: int, *, restore: bool = False) -> None:
+    async def async_read(
+        self, pid: int, *, restore: bool = False, mid: int = 0,
+    ) -> None:
         """Request allowlisted readings, never arbitrary bus writes."""
         if not self.ready:
             raise StartupError("J1708 startup is not ready")
-        if type(pid) is not int or pid not in J1708_READ_ACTIONS.values():
+        if type(pid) is not int or pid not in READABLE_PIDS:
             raise StartupError(
                 "Only supported J1708 sensor reads are allowed"
             )
-        await self._write(pid_subscription(pid, on_request=not restore))
+        await self._write(pid_subscription(
+            pid, on_request=not restore, mid=mid,
+        ))
 
     def receive(self, message: AdapterMessage) -> bool:
         """Correlate controls without interpreting heartbeats as telemetry."""
