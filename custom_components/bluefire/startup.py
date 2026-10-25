@@ -11,6 +11,7 @@ from .j1587 import ENTITIES
 from .protocol import AdapterMessage, receive_checksum
 
 STEP_TIMEOUT = 10
+KEEPALIVE_INTERVAL = 10
 # Wire compatibility version, not the integration version or an app identity.
 CLIENT_COMPATIBILITY = (12, 5, 6)
 PLATFORM_UNSPECIFIED = 0
@@ -54,6 +55,9 @@ class J1708Startup:
         self.j1708_available: bool | None = None
         self.subscriptions_sent = 0
         self.discarded_reports = 0
+        self.keepalive_requests = 0
+        self.keepalive_responses = 0
+        self.last_keepalive_available: bool | None = None
 
     @property
     def ready(self) -> bool:
@@ -69,6 +73,12 @@ class J1708Startup:
             "subscriptions_sent": self.subscriptions_sent,
             "discarded_reports": self.discarded_reports,
             "error": self.error,
+            "keepalive": {
+                "interval_s": KEEPALIVE_INTERVAL,
+                "requests": self.keepalive_requests,
+                "responses": self.keepalive_responses,
+                "last_j1708_available": self.last_keepalive_available,
+            },
         }
 
     def disconnected(self) -> None:
@@ -128,6 +138,23 @@ class J1708Startup:
         result = await self._request(stage, body)
         if result not in (b"", bytes((value,))):
             raise StartupError(f"Unexpected {stage} acknowledgement")
+
+    async def keepalive(self) -> None:
+        """Probe liveness without reauthentication or setting writes."""
+        if not self.ready:
+            raise StartupError("Cannot ping before startup completes")
+        while True:
+            await asyncio.sleep(KEEPALIVE_INTERVAL)
+            self.keepalive_requests += 1
+            try:
+                # Keep the ready stage so telemetry continues during the probe.
+                result = await self._request("ready", b"\x07")
+            except TimeoutError as err:
+                raise StartupError("Timed out during J1708 keepalive") from err
+            if result not in (b"\x00", b"\x01"):
+                raise StartupError("Malformed J1708 keepalive response")
+            self.keepalive_responses += 1
+            self.last_keepalive_available = result == b"\x01"
 
     async def run(self) -> None:
         """Negotiate, authenticate, subscribe and start reports."""

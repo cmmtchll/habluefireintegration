@@ -26,8 +26,8 @@ No Android gateway is required or planned.
 - Diagnostic `Protocol status` sensor showing `receiver_enabled`, plus
   receive-health diagnostic sensors (last data/advertisement, signal strength,
   notification, packet, error and unrecognized-message tallies).
-- Downloadable diagnostics with full entry/MQTT/Bluetooth state and a 20-second
-  raw BLE notification capture with framing, parse and timing analysis.
+- Downloadable diagnostics with full entry/MQTT/Bluetooth state, connection
+  history and a non-disruptive 20-second live notification capture.
 - Explicit, read-only BLE GATT inspection via Home Assistant's connectable
   Bluetooth scanners, including compatible proxies.
 - Provisional receive-only BLE subscriptions for the documented EZ service,
@@ -132,13 +132,46 @@ Telemetry received before startup succeeds is discarded. Subscriptions and
 authentication state are rebuilt for every new connection, including after
 diagnostic inspection.
 
+After successful opt-in startup, a read-only **Get J1708 availability**
+(command 7) request is sent every 10 seconds. This is an experimental
+application-level liveness probe, not repeated authentication, a settings
+change or an active vehicle-bus request. Both available and unavailable replies
+prove the adapter responded; an unavailable bus does not disconnect it or
+publish telemetry availability. Missing replies time out after 10 seconds;
+malformed replies and BLE write failures also trigger normal reconnect recovery.
+Probes run independently of MQTT publication, are cancelled before disconnect,
+and are disabled in receive-only mode. A successful session resets reconnect
+backoff, so earlier startup failures do not leave later recoveries waiting at
+the maximum delay.
+
+The vendor's general guide describes heartbeat-based connection checks, but
+static inspection of Android 11.2.3 places its outgoing command-255 timer in
+the Bluetooth Classic `CommBaseBT2` path, not the EZ BLE path. Windows 12.5.6
+also has no corresponding outgoing EZ heartbeat timer. Do not treat Classic
+heartbeat behavior as proof of an EZ BLE requirement. The periodic command-7
+probe uses an already-supported status query; whether it prevents physical
+adapter dropouts still needs verification on hardware.
+
 Download diagnostics and inspect **`startup_before_capture`** for the stage,
 firmware, expected response command, initial J1708 availability, subscription
-count and last startup error. `ready` means the report-start exchange completed,
+count, last session error and `keepalive` request/response counters. `ready`
+means the report-start exchange completed,
 not that the coach is sending measurements. MQTT availability still requires valid
-telemetry. Diagnostic captures themselves remain passive and temporarily
-replace the live connection, so use the pre-capture startup/health state when
-investigating the active session.
+telemetry. **`receiver_before_capture`** and **`receiver`** include live connection
+state, retry delay, last notification time and the latest 20 connection events
+with UTC timestamps and failure reasons.
+
+Diagnostic downloads observe the existing EZ subscriptions without pausing the
+receiver, opening another connection or interrupting probes/reporting. If no
+subscribed session is active, raw capture is skipped and retries continue.
+A capture ends early if that session disconnects, rather than combining packet
+fragments from separate connections. It is bounded to 5,000 notifications and
+does not count live traffic twice in health totals. Captures can start or end
+mid-packet, so their independent framing analysis can report boundary errors
+without adding errors to live receiver health. The explicit
+`bluefire.capture_notifications` and `bluefire.inspect_adapter` actions still
+take exclusive BLE ownership and interrupt the live session; they are separate
+from downloading diagnostics.
 
 No security settings, bus-ignore flags, sleep/LED variables or adapter firmware
 are changed. Secured adapters are rejected without retrying with alternate
@@ -265,16 +298,17 @@ redacted**. It takes about 20 seconds plus connection time and contains:
 - Home Assistant's Bluetooth view: scanner counts, whether the address is seen
   by any/connectable scanners, and the last advertisement (name, RSSI, TX
   power, source scanner/proxy, age, service UUIDs, manufacturer and service
-  data) before and after the capture.
+  data).
 - Receive-health counters and RSSI history (`health_before_capture` and
   `health`), recent error messages and the last capture summary.
-- A **raw notification capture**: the integration connects, subscribes to every
-  notify/indicate characteristic for 20 seconds, then unsubscribes and
-  disconnects. Every notification is listed with its time offset,
-  characteristic UUID/handle, length and hex payload (bounded to 5,000
-  notifications; `dropped_notifications` reports overflow). Subscription
-  failures, MTU, connection time and the full GATT inventory with handles are
-  included.
+- Connection state/history before and after capture, and startup/probe state.
+- A **live notification capture**: the integration observes its existing EZ
+  subscriptions for up to 20 seconds without disconnecting or reauthenticating.
+  Every notification is listed with its time offset, characteristic UUID/handle,
+  length and hex payload (bounded to 5,000 notifications;
+  `dropped_notifications` reports overflow). `connection_lost` indicates an early
+  end at a session boundary. No active session means `skipped`, not a new BLE
+  connection.
 - Capture analysis per characteristic in both stream and padded-notification
   framing: packet counts, framing/parse error messages, decode success rate,
   command/PGN/J1587/OBD tallies (with names and whether each PGN is known),
@@ -282,21 +316,21 @@ redacted**. It takes about 20 seconds plus connection time and contains:
   rate, mean interval, longest gap and length histogram. `selected_framing`
   names the mode that explains the data with fewer errors.
 
-Enabling notifications writes only the standard client characteristic
-configuration descriptors. No characteristic values are read, no
-authentication or BlueFire commands are sent and nothing is published to MQTT.
-Adapters that need an authentication handshake may therefore send little or no
-data; an empty capture is itself useful evidence. The live receive task pauses
-and releases the BLE connection during capture, then resumes without marking
-the MQTT stream offline. If another inspection or
-capture is running, or the adapter is not visible, the file reports the capture
-as `skipped`/`failed` and still includes all other state. Stop other apps using
-the adapter first. Review the file before sharing it: it can contain the MAC,
-VIN or location-related vehicle data.
+The diagnostic observer adds no BLE commands or MQTT publications. Normal
+live startup, liveness probes, telemetry processing and MQTT publication
+continue during capture. Its analysis does not inflate the live counters or
+change telemetry availability. If another inspection or capture is running,
+the file reports the capture as `skipped` and still includes other state.
+Review the file before sharing it: it can contain the MAC, VIN or
+location-related vehicle data.
 
-For a capture without the rest of the dump, or a different length, run the
-`bluefire.capture_notifications` action with a 5–60 second `duration`; it
-returns the same capture structure as an action response.
+For an explicit standalone capture, run `bluefire.capture_notifications` with a
+5–60 second `duration`. Unlike a diagnostic download, this action pauses the
+receiver and opens a separate passive connection, subscribing to every
+notify/indicate characteristic. Its response additionally includes subscription
+failures, MTU, connection time, GATT inventory and Bluetooth state before/after.
+It does not authenticate or send BlueFire commands, so it may see little or no
+telemetry. It releases the connection and resumes normal reception afterward.
 
 ### Diagnostic sensors
 
@@ -822,8 +856,9 @@ Targeted static reinspection of the previously supplied Windows 12.5.6 package
 
 At the time of this capture, the receiver implemented only the first stage's
 subscriptions and incoming parsing. The opt-in startup implementation now
-provides the missing exchanges. Repeating a passive diagnostic capture still
-does not exercise startup; inspect the pre-capture live startup state instead.
+provides the missing exchanges. A standalone passive capture still does not
+exercise startup; diagnostic downloads now observe the live session instead
+of replacing it with a passive connection.
 
 Important implementation boundaries:
 
