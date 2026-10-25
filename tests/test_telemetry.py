@@ -309,6 +309,35 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(configs), 4)
         self.assertEqual(len(set(configs)), 4)
 
+    async def test_restored_voltage_discovery_preserves_source_identity(self):
+        bridge = MqttBridge(
+            "coach", self.publish,
+            known_signals=[[0, 168], [11, 168], [130, 168], [131, 168]],
+        )
+        await bridge.async_rediscover()
+        names = {
+            0: "Engine: Supply voltage",
+            11: "Brakes: Supply voltage",
+            130: "Controller 130: Supply voltage",
+            131: "Controller 131: Supply voltage",
+        }
+        self.assertEqual(len(self.messages()), len(names))
+        for topic, payload, retained in self.messages():
+            config = json.loads(payload)
+            source = int(config["unique_id"].split("_")[-2])
+            self.assertEqual(config["name"], names[source])
+            self.assertEqual(config["suggested_display_precision"], 2)
+            self.assertEqual(
+                config["state_topic"], f"vehicle/coach/j1939/{source}/spn/168"
+            )
+            self.assertIn("source_address",
+                          config["json_attributes_template"])
+            self.assertEqual(
+                topic,
+                f"homeassistant/sensor/bluefire_coach_{source}_168/config",
+            )
+            self.assertTrue(retained)
+
     async def test_unknown_pgn_is_preserved_without_guessing(self):
         await self.bridge.async_process_frame(
             frame(65000, "01 02 03 04 05 06 07 08")
@@ -442,6 +471,10 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                     config.get("device_class"), signal.device_class
                 )
                 self.assertEqual(config["unit_of_measurement"], signal.unit)
+                self.assertEqual(
+                    config["suggested_display_precision"],
+                    1 if signal.unit in ("%", "°C") else 2,
+                )
                 payload, retain = messages[config["state_topic"]]
                 state = json.loads(payload)
                 self.assertFalse(retain)

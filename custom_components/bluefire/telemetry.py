@@ -13,7 +13,7 @@ import json
 import re
 from time import monotonic
 
-from .catalog import CATALOG_VERSION, lookup, source_label, source_name
+from .catalog import CATALOG_VERSION, lookup, source_name
 from .const import TELEMETRY_TIMEOUT
 from .faults import DIAGNOSTICS, Diagnostic, decode_diagnostics
 from .j1587 import (
@@ -27,6 +27,16 @@ from .protocol import J1587Report, ObdReport, PgnReport
 from .signals import SIGNALS, Signal
 
 ENTITIES = SIGNALS + DIAGNOSTICS
+
+_DISPLAY_NAMES = {
+    "Electrical system voltage": "Supply voltage",
+    "Battery potential": "Supply voltage",
+    "Charging system potential": "Charging voltage",
+}
+_DISPLAY_PRECISION = {
+    "%": 1, "°C": 1, "rpm": 2, "kPa": 2, "km/h": 2,
+    "L/h": 2, "h": 2, "km": 2, "V": 2, "L": 2,
+}
 
 
 def valid_vehicle_id(value: str) -> bool:
@@ -203,16 +213,20 @@ class MqttBridge:
     ) -> tuple[str, str]:
         """Build discovery from trusted definitions, not stored payloads."""
         unique_id = f"bluefire_{self.vehicle_id}_{source}_{signal.spn}"
-        label = source_label(source)
+        label = source_name(source, j1587=self.protocol == "j1587")
+        if label == "Unidentified controller":
+            label = f"Controller {source}"
         namespace = "spn"
         if self.protocol == "j1587":
             unique_id = (
                 f"bluefire_{self.vehicle_id}_j1587_{source}_{signal.spn}"
             )
-            label = f"{source_name(source, j1587=True)} ({source})"
             namespace = "pid"
+        name = _DISPLAY_NAMES.get(signal.name, signal.name)
+        name = name.removeprefix(f"{label} ")
+        name = name[0].upper() + name[1:]
         config = {
-            "name": f"{signal.name} - {label}",
+            "name": f"{label}: {name}",
             "unique_id": unique_id,
             "state_topic": f"{self.prefix}/{source}/{namespace}/{signal.spn}",
             "value_template": (
@@ -248,6 +262,9 @@ class MqttBridge:
             config["json_attributes_topic"] = config["state_topic"]
         else:
             config["unit_of_measurement"] = signal.unit
+            config["suggested_display_precision"] = (
+                _DISPLAY_PRECISION[signal.unit]
+            )
             config["state_class"] = signal.state_class
             config["json_attributes_topic"] = config["state_topic"]
             config["json_attributes_template"] = (

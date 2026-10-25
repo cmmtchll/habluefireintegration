@@ -172,7 +172,9 @@ class DiagnosticPublishingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(retain)
                 self.assertNotIn("unit_of_measurement", config)
                 self.assertNotIn("state_class", config)
-                self.assertIn("faults - ", config["name"])
+                self.assertIn(": ", config["name"])
+                self.assertIn("faults", config["name"])
+                self.assertNotIn("suggested_display_precision", config)
                 self.assertEqual(config["entity_category"], "diagnostic")
                 self.assertEqual(config["value_template"],
                                  "{{ value_json.summary }}")

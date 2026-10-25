@@ -162,6 +162,21 @@ compatibility.
    duplicate MQTT YAML sensors or assume HA merges devices across config entries.
    MAC corrections do not change MQTT topics or unique IDs.
 
+Sensor names put the reporting controller first, for example **Engine: Coolant
+temperature** or **Brakes: Supply voltage**. Known controllers do not include
+numeric IDs in their names; unknown sources use **Controller 253** (for example)
+so separate readings remain distinguishable without guessing the controller's
+role. Controller roles are conventional hints, not verified ECU identities.
+MID/PID or source-address/SPN/PGN details remain in the entity attributes.
+
+MQTT discovery suggests two decimal places for voltage, fuel flow, speed,
+pressure, distance, volume and hours, and one for temperatures and percentages.
+This affects display only: published values keep their decoded precision and
+Home Assistant can still convert units. A user-selected **Display precision**
+overrides this suggestion. Reload BlueFire after upgrading to republish names
+and precision for existing entities without changing unique IDs or history.
+User-customized entity names remain under Home Assistant's control.
+
 In the MQTT integration's **Configure → Listen to a topic** tool, listen to
 `vehicle/liberty_h3_45/j1939/#` (replace the vehicle ID). Expect retained `offline`
 until the first valid report, not sample engine data. Once receiving, inspect numeric

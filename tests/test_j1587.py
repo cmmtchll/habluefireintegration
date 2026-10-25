@@ -282,7 +282,8 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         config = messages[
             "homeassistant/sensor/bluefire_coach_j1587_128_190/config"
         ]
-        self.assertEqual(config["name"], "Engine speed - Engine (128)")
+        self.assertEqual(config["name"], "Engine: Speed")
+        self.assertEqual(config["suggested_display_precision"], 2)
         self.assertEqual(config["unit_of_measurement"], "rpm")
         self.assertEqual(config["expire_after"], 60)
         self.assertEqual(config["availability_topic"],
@@ -321,8 +322,67 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                                  parameter.state_class)
                 self.assertEqual(config.get("device_class"),
                                  parameter.device_class)
+                self.assertEqual(
+                    config["suggested_display_precision"],
+                    1 if parameter.unit in ("%", "°C") else 2,
+                )
                 self.assertIn("mid", config["json_attributes_template"])
         self.assertEqual(len(self.save.await_args.args[0]), 30)
+
+    async def test_voltage_and_fuel_flow_keep_fractional_values(self):
+        fixtures = (
+            (128, 168, 268, 13.4, "Engine: Supply voltage"),
+            (136, 168, 265, 13.25, "Brakes: Supply voltage"),
+            (128, 183, 80, 4.731765, "Engine: Fuel rate"),
+        )
+        for mid, pid, raw, value, name in fixtures:
+            await self.bridge.async_process_j1587(
+                J1587Report(mid, pid, raw.to_bytes(2, "little"))
+            )
+        messages = {
+            t: (json.loads(p), retained) for t, p, retained in self.messages()
+            if p not in ("online", "offline")
+        }
+        for mid, pid, raw, value, name in fixtures:
+            with self.subTest(mid=mid, pid=pid):
+                config, retained = messages[
+                    "homeassistant/sensor/"
+                    f"bluefire_coach_j1587_{mid}_{pid}/config"
+                ]
+                self.assertTrue(retained)
+                self.assertEqual(config["name"], name)
+                self.assertEqual(config["suggested_display_precision"], 2)
+                self.assertEqual(
+                    config["unique_id"],
+                    f"bluefire_coach_j1587_{mid}_{pid}",
+                )
+                state, retained = messages[config["state_topic"]]
+                self.assertFalse(retained)
+                self.assertEqual(state["value"], value)
+                self.assertEqual(state["mid"], mid)
+                self.assertEqual(state["pid"], pid)
+
+    async def test_restored_names_distinguish_unknown_controllers(self):
+        restored = MqttBridge(
+            "coach", self.publish,
+            known_j1587=[[128, 110], [191, 110], [253, 110]],
+        )
+        await restored.async_rediscover()
+        configs = {
+            json.loads(p)["name"]: json.loads(p)
+            for _, p, _ in self.messages()
+        }
+        self.assertEqual(set(configs), {
+            "Engine: Coolant temperature",
+            "Controller 191: Coolant temperature",
+            "Controller 253: Coolant temperature",
+        })
+        for config in configs.values():
+            self.assertEqual(config["suggested_display_precision"], 1)
+            self.assertIn("mid", config["json_attributes_template"])
+            self.assertIn("pid", config["json_attributes_template"])
+        self.assertTrue(all(t.endswith("/config") and retained
+                            for t, _, retained in self.messages()))
 
     async def test_fault_discovery_replace_clear_and_unavailable_values(self):
         for data in (bytes((91, 0x23)), b""):
@@ -345,6 +405,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         ]
         config, = configs
         self.assertNotIn("unit_of_measurement", config)
+        self.assertNotIn("suggested_display_precision", config)
         self.assertEqual(config["entity_category"], "diagnostic")
 
     async def test_separate_protocol_freshness_and_recovery(self):

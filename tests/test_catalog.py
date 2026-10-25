@@ -251,9 +251,11 @@ class AnnotationPublishingTests(unittest.IsolatedAsyncioTestCase):
             ]
             self.assertTrue(retain)
             self.assertEqual(config["unit_of_measurement"], signal.unit)
-            self.assertEqual(
-                config["name"], f"{signal.name} - Engine (0)"
-            )
+            name = {
+                168: "Supply voltage", 167: "Charging voltage",
+            }.get(signal.spn, signal.name).removeprefix("Engine ")
+            self.assertEqual(config["name"],
+                             f"Engine: {name[0].upper()}{name[1:]}")
             self.assertIn("description", config["json_attributes_template"])
             self.assertEqual(
                 config["unique_id"], f"bluefire_coach_0_{signal.spn}"
