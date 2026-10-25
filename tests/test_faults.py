@@ -186,7 +186,7 @@ class DiagnosticPublishingTests(unittest.IsolatedAsyncioTestCase):
         publish.reset_mock()
         restored = MqttBridge("coach", publish, known_signals=identities)
         await restored.async_rediscover()
-        self.assertEqual(publish.await_count, 8)
+        self.assertEqual(publish.await_count, 10)
         self.assertTrue(all(
             call.args[0].endswith("/config")
             for call in publish.await_args_list
@@ -197,7 +197,7 @@ class DiagnosticPublishingTests(unittest.IsolatedAsyncioTestCase):
             payload == "" for _, payload, _ in (
                 call.args for call in publish.await_args_list
             )
-        ), 8)
+        ), 10)
 
     async def test_fault_clear_and_na_replace_state(self):
         publish, save = AsyncMock(), AsyncMock()

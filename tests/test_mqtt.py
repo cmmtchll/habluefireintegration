@@ -144,6 +144,15 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
             call.args == ("vehicle/coach/j1939/availability", "", True)
             for call in self.publish.await_args_list
         ))
+        for protocol in ("j1939", "j1587"):
+            self.publish.assert_any_await(
+                "homeassistant/binary_sensor/"
+                f"bluefire_coach_{protocol}_connectivity/config", "", True,
+            )
+            self.assertNotIn(
+                "custom/binary_sensor/"
+                f"bluefire_coach_{protocol}_connectivity/config", topics,
+            )
 
     async def test_removal_survives_restart_without_runtime_bridge(self):
         self.disk = {"entry": record()}
@@ -158,6 +167,11 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.publish.assert_any_await(
             "vehicle/coach/j1939/availability", "", True
         )
+        for protocol in ("j1939", "j1587"):
+            self.publish.assert_any_await(
+                "homeassistant/binary_sensor/"
+                f"bluefire_coach_{protocol}_connectivity/config", "", True,
+            )
 
     async def test_fault_ownership_survives_restart_and_prefix_change(self):
         self.disk = {
@@ -245,7 +259,11 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
             if call.args[1] == "" and call.args[0].endswith("/config")
         ]
         self.assertEqual(deleted, [
-            "homeassistant/sensor/bluefire_coach_0_190/config"
+            "homeassistant/binary_sensor/"
+            "bluefire_coach_j1939_connectivity/config",
+            "homeassistant/sensor/bluefire_coach_0_190/config",
+            "homeassistant/binary_sensor/"
+            "bluefire_coach_j1587_connectivity/config",
         ])
 
 

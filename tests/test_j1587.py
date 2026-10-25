@@ -396,7 +396,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         await restored.async_rediscover()
         configs = {
             json.loads(p)["name"]: json.loads(p)
-            for _, p, _ in self.messages()
+            for topic, p, _ in self.messages() if "/sensor/" in topic
         }
         self.assertEqual(set(configs), {
             "Engine: Coolant temperature",
@@ -476,8 +476,11 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             save_j1587=self.save,
         )
         await restored.async_rediscover()
-        self.assertEqual(len(self.messages()), 1)
-        self.assertTrue(self.messages()[0][0].endswith("/config"))
+        self.assertEqual(len(self.messages()), 3)
+        self.assertTrue(all(
+            topic.endswith("/config") and retain
+            for topic, _, retain in self.messages()
+        ))
         self.publish.reset_mock()
         await restored.async_remove_discovery()
         self.publish.assert_any_await(

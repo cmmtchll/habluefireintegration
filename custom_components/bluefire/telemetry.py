@@ -202,10 +202,41 @@ class MqttBridge:
     async def async_rediscover(self) -> None:
         """Replay definitions, not cached readings, on MQTT/HA restart."""
         async with self._frame_lock:
+            topic, payload = self._connectivity_discovery_message()
+            await self.publish(topic, payload, True)
             for topic, payload in self.discovery.items():
                 await self.publish(topic, payload, True)
         if self.j1587 is not None:
             await self.j1587.async_rediscover()
+
+    def _connectivity_discovery_message(self) -> tuple[str, str]:
+        unique_id = (
+            f"bluefire_{self.vehicle_id}_{self.protocol}_connectivity"
+        )
+        return (
+            f"{self.discovery_prefix}/binary_sensor/{unique_id}/config",
+            json.dumps({
+                "name": f"{self.protocol.upper()} telemetry connectivity",
+                "unique_id": unique_id,
+                "state_topic": self.availability_topic,
+                "payload_on": "online",
+                "payload_off": "offline",
+                "device_class": "connectivity",
+                "entity_category": "diagnostic",
+                # Offline is a state here, not entity unavailability.
+                "device": {
+                    "identifiers": [f"bluefire_{self.vehicle_id}"],
+                    "name": self.device_name,
+                    "manufacturer": "BlueFire",
+                },
+                "origin": {
+                    "name": "BlueFire",
+                    "support_url": (
+                        "https://github.com/cmmtchll/habluefireintegration"
+                    ),
+                },
+            }),
+        )
 
     def _discovery_message(
         self, source: int,
@@ -518,6 +549,8 @@ class MqttBridge:
 
     async def _async_remove_definitions(self) -> None:
         async with self._frame_lock:
+            topic, _ = self._connectivity_discovery_message()
+            await self.publish(topic, "", True)
             for source, spn in sorted(self._known_signals):
                 signal = next(
                     item for item in self.entities if item.spn == spn

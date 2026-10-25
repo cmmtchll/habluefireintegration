@@ -419,7 +419,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receiver_tasks, ["BlueFire BLE receiver"])
         entries = self.hass.config_entries
         entries.async_forward_entry_setups.assert_awaited_once()
-        self.assertEqual(self.mqtt.async_publish.await_count, 2)
+        self.assertEqual(self.mqtt.async_publish.await_count, 4)
         self.mqtt.async_publish.assert_any_await(
             self.hass, "vehicle/coach/j1939/availability", "offline",
             qos=1, retain=True,
@@ -455,7 +455,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tasks, [])
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
-        self.assertEqual(self.mqtt.async_publish.await_count, 2)
+        self.assertEqual(self.mqtt.async_publish.await_count, 4)
 
     async def test_reconnect_replays_definitions_but_no_state(self):
         await async_setup_entry(self.hass, self.entry)
@@ -465,9 +465,12 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
         calls = self.mqtt.async_publish.await_args_list
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(calls[0].args[2], "offline")
-        self.assertEqual(calls[2].args[1], "homeassistant/sensor/test/config")
+        self.assertEqual(calls[3].args[1], "homeassistant/sensor/test/config")
+        self.assertEqual(sum(
+            "/binary_sensor/" in call.args[1] for call in calls
+        ), 2)
 
     async def test_j1587_runtime_persists_and_rediscoveries_use_ha_mqtt(self):
         from custom_components.bluefire.protocol import J1587Report
@@ -485,7 +488,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
         calls = self.mqtt.async_publish.await_args_list
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(calls[-1].args[1],
                          "homeassistant/sensor/"
                          "bluefire_coach_j1587_128_190/config")
@@ -592,7 +595,8 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         await self.birth[0][1](SimpleNamespace(payload="online"))
         self.mqtt.async_publish.assert_not_awaited()
         await self.birth[0][1](SimpleNamespace(payload="up"))
-        self.mqtt.async_publish.assert_awaited_once_with(
+        self.assertEqual(self.mqtt.async_publish.await_count, 3)
+        self.mqtt.async_publish.assert_any_await(
             self.hass, "custom/ha/sensor/test/config", "{}",
             qos=1, retain=True,
         )
