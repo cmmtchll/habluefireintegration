@@ -161,6 +161,7 @@ LAMP_FLASH = {
     0: "Slow flash", 1: "Fast flash", 2: "Reserved", 3: "Unavailable",
 }
 COMMANDS = {
+    7: "J1708 availability",
     151: "J1939 parameter group report", 154: "J1587 parameter report",
     169: "Authentication", 174: "OBD report",
     177: "Firmware/build date response (app-version dependent)",

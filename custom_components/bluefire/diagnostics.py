@@ -54,6 +54,10 @@ async def async_get_config_entry_diagnostics(hass, entry):
             runtime.receiver.startup_diagnostics()
             if runtime.receiver is not None else None
         ),
+        "receiver_before_capture": (
+            runtime.receiver.connection_diagnostics()
+            if runtime.receiver is not None else None
+        ),
     }
     if not address:
         result["capture"] = {"status": "skipped", "reason": "No address"}
@@ -64,19 +68,22 @@ async def async_get_config_entry_diagnostics(hass, entry):
         }
     else:
         runtime.inspecting = True
-        paused = False
         try:
             if runtime.receiver is not None:
-                await runtime.receiver.async_pause()
-                paused = True
-            result["capture"] = await async_capture_report(
-                hass, address, runtime.health, CAPTURE_SECONDS
-            )
+                result["capture"] = await runtime.receiver.async_capture(
+                    CAPTURE_SECONDS
+                )
+            else:
+                result["capture"] = await async_capture_report(
+                    hass, address, runtime.health, CAPTURE_SECONDS
+                )
         except HomeAssistantError as err:
             result["capture"] = {"status": "failed", "error": str(err)}
         finally:
-            if runtime.receiver is not None and paused:
-                runtime.receiver.async_resume()
             runtime.inspecting = False
+    result["receiver"] = (
+        runtime.receiver.connection_diagnostics()
+        if runtime.receiver is not None else None
+    )
     result["health"] = runtime.health.as_dict()
     return result
