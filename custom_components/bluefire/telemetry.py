@@ -14,7 +14,9 @@ import re
 from time import monotonic
 
 from .catalog import CATALOG_VERSION, lookup, source_name
-from .const import TELEMETRY_TIMEOUT
+from .const import (
+    J1708_POLL_TIMEOUT, J1708_READ_ACTIONS, TELEMETRY_TIMEOUT,
+)
 from .faults import DIAGNOSTICS, Diagnostic, decode_diagnostics
 from .j1587 import (
     ENTITIES as J1587_ENTITIES,
@@ -122,6 +124,7 @@ class MqttBridge:
         clock: Callable[[], float] = monotonic,
         known_j1587: list[list[int]] | None = None,
         save_j1587: SaveDiscovery | None = None,
+        j1708_polling: bool = False,
     ) -> None:
         if not valid_vehicle_id(vehicle_id):
             raise ValueError("Invalid vehicle identifier")
@@ -136,6 +139,12 @@ class MqttBridge:
         self._clock = clock
         self._last_frame: float | None = None
         self._online = False
+        self._j1708_polling = j1708_polling
+        self._availability_timeout = (
+            J1708_POLL_TIMEOUT
+            if self.protocol == "j1587" and j1708_polling
+            else TELEMETRY_TIMEOUT
+        )
         self._frame_lock = asyncio.Lock()
         catalog = {signal.spn: signal for signal in self.entities}
         for source, spn in self.validate_ids(known_signals):
@@ -147,6 +156,7 @@ class MqttBridge:
                 vehicle_id, publish, discovery_prefix=discovery_prefix,
                 device_name=self.device_name, known_signals=known_j1587,
                 save_discovery=save_j1587, clock=clock,
+                j1708_polling=j1708_polling,
             ) if self.protocol == "j1939" else None
         )
 
@@ -193,7 +203,8 @@ class MqttBridge:
         async with self._frame_lock:
             if (
                 self._last_frame is not None
-                and self._clock() - self._last_frame >= TELEMETRY_TIMEOUT
+                and self._clock() - self._last_frame
+                >= self._availability_timeout
             ):
                 self._last_frame = None
                 self._online = False
@@ -267,7 +278,12 @@ class MqttBridge:
             "availability_topic": self.availability_topic,
             "payload_available": "online",
             "payload_not_available": "offline",
-            "expire_after": TELEMETRY_TIMEOUT,
+            "expire_after": (
+                J1708_POLL_TIMEOUT
+                if self.protocol == "j1587" and self._j1708_polling
+                and signal.spn in J1708_READ_ACTIONS.values()
+                else TELEMETRY_TIMEOUT
+            ),
             "device": {
                 "identifiers": [f"bluefire_{self.vehicle_id}"],
                 "name": self.device_name,

@@ -30,7 +30,7 @@
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "vehicle_id": "1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
           "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; otherwise leave blank to ignore J1587 PIDData.",
-          "j1708_startup": "Send version, unsecured authentication, passive PID subscriptions and report-start commands. Does not change adapter settings, request vehicle data, reset security or upgrade firmware. Secured adapters are not supported."
+          "j1708_startup": "Send version, unsecured authentication, passive subscriptions and report-start commands, then actively request fuel level, diagnostic codes, odometer, engine hours and total fuel used every minute. Does not change adapter settings, clear faults, reset security or upgrade firmware. Secured adapters are not supported."
         }
       },
       "reconfigure": {
@@ -45,7 +45,7 @@
         "data_description": {
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; firmware 3.23.0 uses Extended (3.19+).",
-          "j1708_startup": "Opt in to unsecured authentication and passive J1708 PID monitoring. Disabled entries remain receive-only. Does not change security, bus settings or firmware."
+          "j1708_startup": "Opt in to unsecured authentication, passive monitoring and one-minute active reads of fuel level, diagnostics, odometer, engine hours and total fuel used, with failure backoff. Disabled entries remain receive-only. Does not clear faults or change security, bus settings or firmware."
         }
       }
     },
@@ -66,6 +66,56 @@
     }
   },
   "services": {
+    "read_odometer": {
+      "name": "Read odometer",
+      "description": "Send a one-shot J1708 PID 245 request and collect reports for five seconds. Updates existing MQTT total-distance sensors and returns kilometres per responding controller. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter to request total vehicle distance from."
+        }
+      }
+    },
+    "read_engine_hours": {
+      "name": "Read engine hours",
+      "description": "Send a one-shot J1708 PID 247 request and collect reports for five seconds. Updates existing MQTT total-engine-hours sensors and returns hours per responding controller. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter to request total engine hours from."
+        }
+      }
+    },
+    "read_total_fuel_used": {
+      "name": "Read total fuel used",
+      "description": "Send a one-shot J1708 PID 250 request and collect reports for five seconds. Updates existing MQTT total-fuel-used sensors and returns litres per responding controller, not fuel remaining. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter to request total fuel used from."
+        }
+      }
+    },
+    "read_fuel_level": {
+      "name": "Read fuel level",
+      "description": "Send a one-shot J1708 fuel-level request and collect reports for five seconds. Updates MQTT fuel sensors and returns percent readings per responding controller. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter to request fuel level from."
+        }
+      }
+    },
+    "read_diagnostic_codes": {
+      "name": "Read diagnostic codes",
+      "description": "Send a one-shot J1708 PID 194 request and collect reported active/inactive faults for five seconds. Updates MQTT diagnostic sensors and returns codes per responding controller. Requires ready, opt-in J1708 startup. Never clears faults; no response is not a clean bill of health.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The connected BlueFire adapter to request diagnostic codes from."
+        }
+      }
+    },
     "inspect_adapter": {
       "name": "Inspect adapter",
       "description": "Connect once and return GATT service/characteristic UUIDs and properties. Does not read telemetry, authenticate, or write BlueFire commands.",

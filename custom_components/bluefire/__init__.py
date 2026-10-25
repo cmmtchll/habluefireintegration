@@ -16,6 +16,7 @@ from .const import (
     CONF_J1587_EXTENDED,
     CONF_J1708_STARTUP,
     DOMAIN,
+    J1708_READ_ACTIONS,
     MQTT_PUBLISH_TIMEOUT,
     STATUS_RECEIVER_ENABLED,
 )
@@ -47,7 +48,7 @@ def CONFIG_SCHEMA(config: dict) -> dict:
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Register an explicit, read-only GATT inspection action."""
+    """Register inspection, capture and explicit J1708 read actions."""
     import voluptuous as vol
 
     from homeassistant.config_entries import ConfigEntryState
@@ -74,7 +75,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 "Select a loaded BlueFire config entry"
             )
         if entry.runtime_data.inspecting:
-            raise ServiceValidationError("Inspection is already running")
+            raise ServiceValidationError(
+                "Another BlueFire action is already running"
+            )
         return entry, entry.runtime_data
 
     async def inspect_adapter(call):
@@ -114,6 +117,28 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             if runtime.receiver is not None and paused:
                 runtime.receiver.async_resume()
             runtime.inspecting = False
+
+    async def read_vehicle(call):
+        _, runtime = loaded_runtime(call)
+        if runtime.receiver is None:
+            raise ServiceValidationError("BlueFire receiver is not running")
+        runtime.inspecting = True
+        try:
+            return await runtime.receiver.async_read(
+                J1708_READ_ACTIONS[call.service]
+            )
+        except HomeAssistantError as err:
+            runtime.health.error("connection_errors", str(err))
+            raise
+        finally:
+            runtime.inspecting = False
+
+    for service in J1708_READ_ACTIONS:
+        hass.services.async_register(
+            DOMAIN, service, read_vehicle,
+            schema=vol.Schema({vol.Required("entry_id"): cv.string}),
+            supports_response=SupportsResponse.ONLY,
+        )
 
     hass.services.async_register(
         DOMAIN,
@@ -202,6 +227,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         save_discovery=save_discovery,
         known_j1587=await ledger.async_get_j1587(entry.entry_id),
         save_j1587=save_j1587,
+        j1708_polling=entry.data.get(CONF_J1708_STARTUP, False),
     )
     receiver = BlueFireReceiver(
         hass,

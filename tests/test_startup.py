@@ -11,6 +11,7 @@ from custom_components.bluefire.startup import (
     J1708Startup,
     StartupError,
     client_packet,
+    pid_subscription,
 )
 
 
@@ -19,6 +20,11 @@ def version_response(major=3, minor=23, patch_version=0):
 
 
 class ClientPacketTests(unittest.TestCase):
+    def test_subscription_rejects_unknown_and_non_integer_pids(self):
+        for pid in (True, "96", 195, -1):
+            with self.subTest(pid=pid), self.assertRaises(StartupError):
+                pid_subscription(pid)
+
     def test_direction_specific_vectors_and_att_limit(self):
         self.assertEqual(client_packet(b"\x00"), bytes.fromhex("000100fe"))
         self.assertEqual(
@@ -39,6 +45,29 @@ class ClientPacketTests(unittest.TestCase):
 
 
 class StartupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_shot_reads_are_allowlisted_and_restore_monitoring(self):
+        startup = self.make_startup()
+        with self.assertRaisesRegex(StartupError, "not ready"):
+            await startup.async_read(96)
+        await startup.run()
+        for pid in (96, 194, 245, 247, 250):
+            await startup.async_read(pid)
+            self.assertEqual(
+                self.sent[-1],
+                b"\x9b\x00" + pid.to_bytes(2, "big")
+                + b"\x01\x01\x00\x00\x00",
+            )
+            await startup.async_read(pid, restore=True)
+            self.assertEqual(
+                self.sent[-1],
+                b"\x9b\x00" + pid.to_bytes(2, "big")
+                + b"\x00\x02\x03\xe8\x00",
+            )
+        for pid in (195, True, "96"):
+            with self.assertRaisesRegex(StartupError, "Only supported J1708"):
+                await startup.async_read(pid)
+        self.assertTrue(startup.ready)
+
     def make_startup(
         self, *, name="BlueFire EZ", extended=True, overrides=None,
     ):

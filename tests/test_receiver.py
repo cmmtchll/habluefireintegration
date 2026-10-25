@@ -19,6 +19,485 @@ def module(name, **attributes):
 
 
 class ReceiverTests(unittest.IsolatedAsyncioTestCase):
+    async def run_poll_cycles(self, cycles, read, *, before_cycle=None):
+        self.configure_read()
+        clock = [0]
+        sleeps = []
+
+        async def sleep(delay):
+            sleeps.append(delay)
+            if len(sleeps) > cycles:
+                raise asyncio.CancelledError
+            clock[0] += delay
+            if before_cycle is not None:
+                before_cycle(len(sleeps))
+
+        self.receiver.async_read = AsyncMock(
+            side_effect=lambda pid: read(pid, clock)
+        )
+        with (
+            patch.object(self.api, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(self.api.asyncio, "sleep", side_effect=sleep),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.receiver._async_poll()
+        return sleeps
+
+    async def test_polling_runs_each_minute_without_read_duration_drift(self):
+        reads = []
+
+        def read(pid, clock):
+            reads.append((clock[0], pid))
+            clock[0] += 5
+
+        sleeps = await self.run_poll_cycles(3, read)
+        self.assertEqual(reads, [
+            (60, 96), (65, 194), (70, 245), (75, 247), (80, 250),
+            (120, 96), (125, 194), (130, 245), (135, 247), (140, 250),
+            (180, 96), (185, 194), (190, 245), (195, 247), (200, 250),
+        ])
+        self.assertEqual(sleeps, [60, 35, 35, 35])
+
+    async def test_slow_poll_round_does_not_burst_to_catch_up(self):
+        reads = []
+
+        def read(pid, clock):
+            reads.append((clock[0], pid))
+            clock[0] += 20
+
+        sleeps = await self.run_poll_cycles(2, read)
+        self.assertEqual(sleeps, [60, 60, 60])
+        self.assertEqual(reads[:5], [
+            (60, 96), (80, 194), (100, 245), (120, 247), (140, 250),
+        ])
+        self.assertEqual(reads[5:], [
+            (220, 96), (240, 194), (260, 245), (280, 247), (300, 250),
+        ])
+
+    async def test_poll_backoff_is_per_pid_capped_and_resets_on_success(self):
+        reads = []
+
+        def read(pid, clock):
+            reads.append((clock[0], pid))
+            if pid == 96 and clock[0] < 1800:
+                raise self.home_assistant_error("No fuel report")
+
+        with self.assertLogs(
+            "custom_components.bluefire.receiver", level="WARNING",
+        ) as logs:
+            await self.run_poll_cycles(31, read)
+        self.assertEqual(
+            [time for time, pid in reads if pid == 96],
+            [60, 180, 420, 900, 1800, 1860],
+        )
+        for successful_pid in (194, 245, 247, 250):
+            self.assertEqual(
+                [time for time, pid in reads if pid == successful_pid],
+                list(range(60, 1861, 60)),
+            )
+        self.assertEqual(self.receiver.health.counters["connection_errors"], 4)
+        self.assertIn("retrying in 900 seconds", logs.output[-1])
+
+    async def test_polling_skips_busy_read_and_retries_next_minute(self):
+        reads = []
+        waiter = asyncio.get_running_loop().create_future()
+
+        def before_cycle(cycle):
+            self.receiver._read_waiter = waiter if cycle == 1 else None
+
+        await self.run_poll_cycles(
+            2, lambda pid, clock: reads.append((clock[0], pid)),
+            before_cycle=before_cycle,
+        )
+        waiter.cancel()
+        self.assertEqual(reads, [
+            (120, 96), (120, 194), (120, 245), (120, 247), (120, 250),
+        ])
+
+    async def test_polling_stops_if_connection_is_not_ready(self):
+        for state in ("closed", "paused", "missing", "not_ready", "reconnect"):
+            with self.subTest(state=state):
+                self.configure_read()
+                self.receiver._closed = state == "closed"
+                self.receiver._paused = state == "paused"
+                if state == "missing":
+                    self.receiver._startup = None
+                elif state == "not_ready":
+                    self.receiver._startup.ready = False
+                if state == "reconnect":
+                    self.receiver._reconnect_event.set()
+                self.receiver.async_read = AsyncMock()
+                with patch.object(self.api.asyncio, "sleep", new=AsyncMock()):
+                    await self.receiver._async_poll()
+                self.receiver.async_read.assert_not_awaited()
+
+    async def test_poll_task_starts_after_startup_and_is_cancelled_per_session(
+        self,
+    ):
+        self.configure_startup_session()
+        self.bridge.async_process_j1587.side_effect = None
+        poll_started = asyncio.Event()
+        poll_stopped = asyncio.Event()
+
+        async def poll():
+            self.assertTrue(self.receiver._startup.ready)
+            poll_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                poll_stopped.set()
+
+        self.receiver._async_poll = AsyncMock(side_effect=poll)
+        for _ in range(2):
+            self.client.is_connected = True
+            poll_started.clear()
+            poll_stopped.clear()
+            task = asyncio.create_task(self.receiver._async_receive_session())
+            await asyncio.wait_for(poll_started.wait(), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(poll_stopped.is_set())
+        self.assertEqual(self.receiver._async_poll.await_count, 2)
+        self.assertEqual(self.client.disconnect.await_count, 2)
+
+    async def test_poll_task_failure_is_not_silently_lost(self):
+        self.configure_startup_session()
+        self.bridge.async_process_j1587.side_effect = None
+        self.receiver._async_poll = AsyncMock(
+            side_effect=RuntimeError("poll worker failed")
+        )
+        with self.assertRaisesRegex(RuntimeError, "poll worker failed"):
+            await asyncio.wait_for(self.receiver._async_receive_session(), 1)
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_keepalive_and_polling_serialize_ble_writes(self):
+        self.configure_startup_session()
+        self.bridge.async_process_j1587.side_effect = None
+        original_write = self.client.write_gatt_char.side_effect
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+        read_started = asyncio.Event()
+        read_completed = asyncio.Event()
+        active_writes = 0
+        max_active_writes = 0
+
+        async def write(characteristic, packet, *, response):
+            nonlocal active_writes, max_active_writes
+            active_writes += 1
+            max_active_writes = max(max_active_writes, active_writes)
+            try:
+                body = packet[2:-1]
+                if body == b"\x07" and self.receiver._startup.ready:
+                    probe_started.set()
+                    await release_probe.wait()
+                await original_write(characteristic, packet, response=response)
+                if body == bytes.fromhex("9b 00 00 60 01 01 00 00 00"):
+                    self.receiver._notification_received(
+                        None, self.packet(bytes.fromhex("9a 80 60 01 64"))
+                    )
+            finally:
+                active_writes -= 1
+
+        async def poll():
+            await probe_started.wait()
+            read_started.set()
+            result = await self.receiver.async_read(96)
+            self.assertEqual(result["reports"][0]["signals"][0]["value"], 50)
+            read_completed.set()
+            await asyncio.Future()
+
+        self.client.write_gatt_char.side_effect = write
+        self.receiver._async_poll = AsyncMock(side_effect=poll)
+        with (
+            patch(
+                "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
+            ),
+            patch.object(self.api, "READ_WINDOW_SECONDS", 0.02),
+        ):
+            task = asyncio.create_task(self.receiver.async_run())
+            try:
+                await asyncio.wait_for(read_started.wait(), 1)
+                await asyncio.sleep(0)
+                self.assertEqual(active_writes, 1)
+                self.assertIsNotNone(self.receiver._read_waiter)
+                self.assertFalse(any(
+                    body[0] == 155 and body[4] == 1
+                    for body in self.startup_bodies
+                ))
+                release_probe.set()
+                await asyncio.wait_for(read_completed.wait(), 1)
+                self.assertGreater(
+                    self.receiver._startup.keepalive_responses, 0
+                )
+                self.assertEqual(max_active_writes, 1)
+            finally:
+                release_probe.set()
+                self.receiver.stop()
+                await asyncio.wait_for(task, 1)
+        self.assertIsNone(self.receiver._read_waiter)
+        self.assertIsNone(self.receiver._startup._response)
+
+    async def test_automatic_poll_sends_reads_and_restores_passive_wire_modes(
+        self,
+    ):
+        self.configure_startup_session()
+        self.bridge.async_process_j1587.side_effect = None
+        completed = asyncio.Event()
+        original_write = self.client.write_gatt_char.side_effect
+        report_bodies = {
+            96: bytes.fromhex("9a 80 60 01 64"),
+            194: bytes.fromhex("9a 80 c2 00"),
+            245: bytes.fromhex("9a 80 f5 04 64 00 00 00"),
+            247: bytes.fromhex("9a 80 f7 04 64 00 00 00"),
+            250: bytes.fromhex("9a 80 fa 04 64 00 00 00"),
+        }
+
+        async def write(characteristic, packet, *, response):
+            await original_write(characteristic, packet, response=response)
+            body = packet[2:-1]
+            if body[0] == 155 and body[4] == 1:
+                pid = int.from_bytes(body[2:4], "big")
+                self.receiver._notification_received(
+                    None, self.packet(report_bodies[pid])
+                )
+            elif body == bytes.fromhex("9b 00 00 fa 00 02 03 e8 00"):
+                if any(b[4] == 1 for b in self.startup_bodies if b[0] == 155):
+                    completed.set()
+
+        self.client.write_gatt_char.side_effect = write
+        with (
+            patch.object(self.api, "J1708_POLL_INTERVAL", 0.05),
+            patch.object(self.api, "READ_WINDOW_SECONDS", 0.01),
+        ):
+            task = asyncio.create_task(self.receiver._async_receive_session())
+            try:
+                await asyncio.wait_for(completed.wait(), 1)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        self.assertEqual(self.startup_bodies[-10:], [
+            b"\x9b\x00" + pid.to_bytes(2, "big") + mode
+            for pid in (96, 194, 245, 247, 250)
+            for mode in (
+                b"\x01\x01\x00\x00\x00", b"\x00\x02\x03\xe8\x00",
+            )
+        ])
+        reports = [
+            call.args[0] for call in
+            self.bridge.async_process_j1587.await_args_list
+        ]
+        self.assertTrue(any(
+            r.pid == 96 and r.data == b"\x64" for r in reports
+        ))
+        self.assertTrue(any(r.pid == 194 and r.data == b"" for r in reports))
+        for pid in (245, 247, 250):
+            self.assertTrue(any(
+                r.pid == pid and r.data == bytes.fromhex("64 00 00 00")
+                for r in reports
+            ))
+
+    def configure_read(self):
+        self.receiver.j1708_startup = True
+        self.receiver.j1587_extended = True
+        self.read_started = asyncio.Event()
+
+        async def read(pid, *, restore=False):
+            if not restore:
+                self.read_started.set()
+
+        self.receiver._startup = SimpleNamespace(
+            ready=True, async_read=AsyncMock(side_effect=read),
+            disconnected=Mock(),
+        )
+        timer = patch.object(self.api, "READ_WINDOW_SECONDS", 0.02)
+        timer.start()
+        self.addCleanup(timer.stop)
+
+    async def test_fuel_read_collects_sources_and_updates_existing_mqtt(self):
+        self.configure_read()
+        published = []
+
+        async def publish(topic, payload, retain):
+            if payload not in ("online", "offline"):
+                published.append((topic, json.loads(payload)))
+
+        self.receiver.bridge = MqttBridge("coach", publish)
+        task = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        for body in (
+            "9a 80 60 01 64", "9a 82 60 01 96",
+            "9a 80 60 01 78", "9a 83 60 01 ff",
+            "9a 80 be 02 34 12",
+        ):
+            await self.receiver._async_process_body(bytes.fromhex(body))
+        result = await task
+        self.assertEqual(result["pid"], 96)
+        self.assertEqual(
+            [(r["mid"], r["signals"][0]["value"])
+             for r in result["reports"]],
+            [(128, 60), (130, 75), (131, None)],
+        )
+        self.assertTrue(any(
+            topic.endswith("/128/pid/96") and data["value"] == 60
+            for topic, data in published
+        ))
+        self.receiver._startup.async_read.assert_awaited_with(96, restore=True)
+        self.assertIsNone(self.receiver._read_waiter)
+
+    async def test_diagnostic_read_distinguishes_faults_and_empty_report(self):
+        self.configure_read()
+        task = asyncio.create_task(self.receiver.async_read(194))
+        await self.read_started.wait()
+        await self.receiver._async_process_body(
+            bytes.fromhex("9a 80 c2 02 64 23")
+        )
+        await self.receiver._async_process_body(
+            bytes.fromhex("9a 82 c2 00")
+        )
+        result = await task
+        engine, transmission = result["reports"]
+        self.assertEqual(engine["diagnostics"]["faults"][0]["code"], 100)
+        self.assertEqual(transmission["diagnostics"]["faults"], [])
+        self.assertEqual(self.bridge.async_process_j1587.await_count, 2)
+        self.receiver._startup.async_read.assert_awaited_with(
+            194, restore=True
+        )
+
+    async def test_counter_reads_reuse_mqtt_identities_units_and_nulls(self):
+        self.configure_read()
+        published = []
+
+        async def publish(topic, payload, retain):
+            if payload not in ("online", "offline"):
+                published.append((topic, json.loads(payload)))
+
+        self.receiver.bridge = MqttBridge(
+            "coach", publish, j1708_polling=True
+        )
+        for pid, unit, value in (
+            (245, "km", 16.09344), (247, "h", 5), (250, "L", 47.317647),
+        ):
+            for data, expected in (
+                (bytes.fromhex("64 00 00 00"), value), (b"\xff" * 4, None),
+            ):
+                self.read_started.clear()
+                task = asyncio.create_task(self.receiver.async_read(pid))
+                await self.read_started.wait()
+                await self.receiver._async_process_body(
+                    bytes((154, 128, pid, 4)) + data
+                )
+                result = await task
+                self.assertEqual(result["pid"], pid)
+                self.assertEqual(
+                    result["reports"][0]["signals"][0]["value"], expected
+                )
+                states = [
+                    payload for topic, payload in published
+                    if topic == f"vehicle/coach/j1587/128/pid/{pid}"
+                ]
+                self.assertEqual(states[-1]["value"], expected)
+                self.assertEqual(states[-1]["unit"], unit)
+            config, = [
+                payload for topic, payload in published
+                if topic == (
+                    "homeassistant/sensor/"
+                    f"bluefire_coach_j1587_128_{pid}/config"
+                )
+            ]
+            self.assertEqual(config["state_class"], "total_increasing")
+            self.assertEqual(config["expire_after"], 180)
+
+    async def test_read_timeout_is_not_an_empty_or_cached_fault_list(self):
+        self.configure_read()
+        for pid in (96, 194, 245, 247, 250):
+            with self.assertRaisesRegex(
+                self.home_assistant_error, "No J1708 PID",
+            ):
+                await self.receiver.async_read(pid)
+            self.receiver._startup.async_read.assert_awaited_with(
+                pid, restore=True
+            )
+            self.assertIsNone(self.receiver._read_waiter)
+
+    async def test_reads_require_ready_enabled_session_and_allowed_pid(self):
+        with self.assertRaisesRegex(self.home_assistant_error, "Enable J1708"):
+            await self.receiver.async_read(96)
+        self.configure_read()
+        for attribute in ("_closed", "_paused"):
+            setattr(self.receiver, attribute, True)
+            with self.assertRaises(self.home_assistant_error):
+                await self.receiver.async_read(96)
+            setattr(self.receiver, attribute, False)
+        self.receiver._startup.ready = False
+        with self.assertRaises(self.home_assistant_error):
+            await self.receiver.async_read(96)
+        self.receiver._startup.ready = True
+        for pid in (195, True, "96"):
+            with self.assertRaisesRegex(
+                self.home_assistant_error, "Only supported J1708",
+            ):
+                await self.receiver.async_read(pid)
+        self.receiver._startup.async_read.assert_not_awaited()
+
+    async def test_concurrent_read_rejected_and_cancellation_restores(self):
+        self.configure_read()
+        task = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        with self.assertRaisesRegex(self.home_assistant_error, "already"):
+            await self.receiver.async_read(194)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.receiver._startup.async_read.assert_awaited_with(96, restore=True)
+        self.assertIsNone(self.receiver._read_waiter)
+
+    async def test_read_write_and_restore_failures_are_explicit(self):
+        self.configure_read()
+        self.receiver._startup.async_read.side_effect = [
+            self.bleak_error("write failed"), None,
+        ]
+        with self.assertRaisesRegex(self.home_assistant_error, "write failed"):
+            await self.receiver.async_read(96)
+        self.receiver._startup.async_read.side_effect = [
+            None, self.bleak_error("restore failed"),
+        ]
+        with self.assertRaisesRegex(
+            self.home_assistant_error, "Unable to restore passive",
+        ):
+            await self.receiver.async_read(96)
+        self.assertTrue(self.receiver._reconnect_event.is_set())
+        self.assertIsNone(self.receiver._read_waiter)
+        with self.assertRaisesRegex(self.home_assistant_error, "Enable J1708"):
+            await self.receiver.async_read(96)
+
+    async def test_disconnect_aborts_read_without_old_session_writer(self):
+        self.configure_read()
+        task = asyncio.create_task(self.receiver.async_read(194))
+        await self.read_started.wait()
+        self.receiver._startup.ready = False
+        # Exercise the real session-finally disconnect path.
+        self.client.services = []
+        with self.assertRaises(self.home_assistant_error):
+            await self.receiver._async_receive_session()
+        with self.assertRaisesRegex(self.home_assistant_error, "disconnected"):
+            await task
+        self.receiver._startup.async_read.assert_awaited_once_with(194)
+        self.assertIsNone(self.receiver._read_waiter)
+
+    async def test_restore_failure_wakes_live_session_for_reconnection(self):
+        self.configure_startup_session()
+        ready = asyncio.Event()
+        self.bridge.async_process_j1587.side_effect = lambda _: ready.set()
+        task = asyncio.create_task(self.receiver._async_receive_session())
+        await asyncio.wait_for(ready.wait(), 1)
+        self.receiver._reconnect_event.set()
+        with self.assertRaisesRegex(self.bleak_error, "restore failed"):
+            await asyncio.wait_for(task, 1)
+        self.assertFalse(self.receiver._startup.ready)
+        self.client.disconnect.assert_awaited_once()
+
     def setUp(self):
         self.bridge = SimpleNamespace(
             async_disconnected=AsyncMock(),

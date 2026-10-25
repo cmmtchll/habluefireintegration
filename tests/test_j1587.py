@@ -271,6 +271,53 @@ class ReplayTests(unittest.TestCase):
 
 
 class PublishingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_polling_extends_only_selected_reading_expiry(self):
+        bridge = MqttBridge(
+            "coach", self.publish, clock=self.clock, j1708_polling=True,
+        )
+        for pid, data in (
+            (96, b"\x64"), (194, b""), (190, bytes(2)),
+            (245, bytes(4)), (247, bytes(4)), (250, bytes(4)),
+        ):
+            await bridge.async_process_j1587(J1587Report(128, pid, data))
+        await bridge.async_process_frame(Frame(
+            (6 << 26) | (65276 << 8), bytes(8)
+        ))
+        configs = {
+            topic: json.loads(payload)
+            for topic, payload, _ in self.messages()
+            if topic.endswith("/config")
+        }
+        for pid, expiry in (
+            (96, 180), (194, 180), (245, 180), (247, 180), (250, 180),
+            (190, 60),
+        ):
+            self.assertEqual(
+                configs["homeassistant/sensor/"
+                        f"bluefire_coach_j1587_128_{pid}/config"]
+                ["expire_after"],
+                expiry,
+            )
+        self.assertEqual(
+            configs["homeassistant/sensor/bluefire_coach_0_96/config"]
+            ["expire_after"],
+            60,
+        )
+        self.clock.return_value = 160
+        await bridge.async_check_stale()
+        self.assertTrue(bridge.j1587._online)
+        self.assertFalse(bridge._online)
+        self.clock.return_value = 279
+        await bridge.async_check_stale()
+        self.assertTrue(bridge.j1587._online)
+        self.clock.return_value = 280
+        await bridge.async_check_stale()
+        self.assertFalse(bridge.j1587._online)
+        await bridge.async_process_j1587(J1587Report(128, 96, b"\x64"))
+        self.assertTrue(bridge.j1587._online)
+        await bridge.async_disconnected()
+        self.assertFalse(bridge.j1587._online)
+
     async def asyncSetUp(self):
         self.publish, self.save = AsyncMock(), AsyncMock()
         self.clock = Mock(return_value=100)

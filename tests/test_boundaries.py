@@ -56,6 +56,7 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.receiver = SimpleNamespace(
             async_pause=AsyncMock(), async_resume=Mock(),
+            async_read=AsyncMock(return_value={"pid": 96, "reports": []}),
             startup_diagnostics=Mock(return_value={"stage": "disabled"}),
         )
         self.runtime.receiver = self.receiver
@@ -122,6 +123,75 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         await async_setup(self.hass, {})
         self.inspect = self.services["inspect_adapter"]
         self.capture = self.services["capture_notifications"]
+
+    async def test_vehicle_read_actions_delegate_and_release_busy_flag(self):
+        for service, pid in (
+            ("read_fuel_level", 96), ("read_diagnostic_codes", 194),
+            ("read_odometer", 245), ("read_engine_hours", 247),
+            ("read_total_fuel_used", 250),
+        ):
+            result = await self.services[service](SimpleNamespace(
+                service=service, data={"entry_id": "entry"},
+            ))
+            self.receiver.async_read.assert_awaited_with(pid)
+            self.assertEqual(result, {"pid": 96, "reports": []})
+            self.assertFalse(self.runtime.inspecting)
+        self.receiver.async_pause.assert_not_awaited()
+        self.receiver.async_resume.assert_not_called()
+
+    def test_read_action_metadata_matches_registered_actions(self):
+        import json
+        from pathlib import Path
+
+        import yaml
+
+        from custom_components.bluefire.const import J1708_READ_ACTIONS
+
+        self.assertEqual(J1708_READ_ACTIONS, {
+            "read_fuel_level": 96, "read_diagnostic_codes": 194,
+            "read_odometer": 245, "read_engine_hours": 247,
+            "read_total_fuel_used": 250,
+        })
+        folder = (
+            Path(__file__).resolve().parents[1]
+            / "custom_components" / "bluefire"
+        )
+        definitions = yaml.safe_load(
+            (folder / "services.yaml").read_text(encoding="utf-8")
+        )
+        strings = json.loads(
+            (folder / "strings.json").read_text(encoding="utf-8")
+        )
+        english = json.loads(
+            (folder / "translations" / "en.json").read_text(encoding="utf-8")
+        )
+        for action in J1708_READ_ACTIONS:
+            self.assertIn(action, self.services)
+            self.assertTrue(
+                definitions[action]["fields"]["entry_id"]["required"]
+            )
+            self.assertEqual(
+                strings["services"][action], english["services"][action]
+            )
+
+    async def test_vehicle_reads_surface_errors_and_reject_busy_entries(self):
+        action = self.services["read_fuel_level"]
+        call = SimpleNamespace(
+            service="read_fuel_level", data={"entry_id": "entry"},
+        )
+        self.runtime.inspecting = True
+        with self.assertRaisesRegex(BoundaryError, "already running"):
+            await action(call)
+        self.runtime.inspecting = False
+        self.runtime.receiver = None
+        with self.assertRaisesRegex(BoundaryError, "not running"):
+            await action(call)
+        self.runtime.receiver = self.receiver
+        self.receiver.async_read.side_effect = ConnectionFailure("no reports")
+        with self.assertRaisesRegex(ConnectionFailure, "no reports"):
+            await action(call)
+        self.assertFalse(self.runtime.inspecting)
+        self.assertEqual(self.runtime.health.counters["connection_errors"], 1)
 
     async def test_inspection_returns_metadata_and_clears_busy_flag(self):
         result = await self.inspect(
@@ -438,6 +508,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await async_setup_entry(self.hass, self.entry))
         self.assertTrue(self.receiver_instances[0].kwargs["j1708_startup"])
         self.assertTrue(self.receiver_instances[0].kwargs["j1587_extended"])
+        self.assertTrue(self.entry.runtime_data.bridge.j1587._j1708_polling)
+        self.assertEqual(
+            self.entry.runtime_data.bridge.j1587._availability_timeout, 180
+        )
 
     async def test_missing_mqtt_client_is_retryable(self):
         self.mqtt.async_wait_for_mqtt_client.return_value = False
