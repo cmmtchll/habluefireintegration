@@ -172,6 +172,18 @@ compatibility.
    duplicate MQTT YAML sensors or assume HA merges devices across config entries.
    MAC corrections do not change MQTT topics or unique IDs.
 
+The MQTT-owned device also includes read-only **J1939 telemetry connectivity**
+and **J1587 telemetry connectivity** diagnostic binary sensors, discovered even
+before measurements arrive. They use the existing retained protocol availability
+topics: `online` means **Connected** (`on`) and `offline` means **Disconnected**
+(`off`). These are status indicators for dashboards and automations, not
+controllable switches. Each protocol becomes connected only after valid telemetry
+arrives and disconnected on transport loss or after 60 seconds without data.
+They indicate telemetry freshness, not just a Bluetooth connection; an unused
+protocol remains disconnected. Unlike measurement entities, these sensors stay
+readable as disconnected when their telemetry is offline. Reload BlueFire after
+upgrading to create them under **Settings → Devices & services → MQTT**.
+
 Sensor names put the reporting controller first, for example **Engine: Coolant
 temperature** or **Brakes: Supply voltage**. Known controllers do not include
 numeric IDs in their names; unknown sources use **Controller 253** (for example)
