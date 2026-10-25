@@ -206,6 +206,56 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                 ("vehicle/coach/j1587/availability", "offline", True),
                 ("vehicle/coach/j1939/availability", "offline", True)])
 
+    async def test_connectivity_discovered_before_measurements(self):
+        bridge = MqttBridge(
+            "coach", self.publish, discovery_prefix="ha/custom",
+            device_name="Coach adapter",
+        )
+        await bridge.async_disconnected()
+        await bridge.async_rediscover()
+        messages = self.messages()
+        self.assertEqual(len(messages), 4)
+        for topic, payload, retain in messages[2:]:
+            config = json.loads(payload)
+            protocol = config["state_topic"].split("/")[-2]
+            unique_id = f"bluefire_coach_{protocol}_connectivity"
+            self.assertEqual(
+                topic, f"ha/custom/binary_sensor/{unique_id}/config"
+            )
+            self.assertTrue(retain)
+            self.assertEqual(config["unique_id"], unique_id)
+            self.assertEqual(
+                config["name"],
+                f"{protocol.upper()} telemetry connectivity",
+            )
+            self.assertEqual(config["device_class"], "connectivity")
+            self.assertEqual(config["entity_category"], "diagnostic")
+            self.assertEqual(config["payload_on"], "online")
+            self.assertEqual(config["payload_off"], "offline")
+            self.assertIn(
+                (config["state_topic"], config["payload_off"], True),
+                messages,
+            )
+            self.assertEqual(config["device"]["identifiers"],
+                             ["bluefire_coach"])
+            self.assertEqual(config["device"]["name"], "Coach adapter")
+            self.assertNotIn("availability_topic", config)
+            self.assertNotIn("expire_after", config)
+            self.assertNotIn("command_topic", config)
+
+    async def test_connectivity_discovery_failure_is_retryable(self):
+        self.publish.side_effect = OSError("broker unavailable")
+        with self.assertRaises(OSError):
+            await self.bridge.async_rediscover()
+        self.publish.side_effect = None
+        self.publish.reset_mock()
+        await self.bridge.async_rediscover()
+        self.assertEqual(len(self.messages()), 2)
+        self.assertTrue(all(
+            "/binary_sensor/" in topic and retain
+            for topic, _, retain in self.messages()
+        ))
+
     async def test_vendor_reports_cannot_enter_the_can_frame_contract(self):
         for report in (
             PgnReport(0, 61444, 6, 0, bytes(8)),
@@ -321,8 +371,10 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             130: "Controller 130: Supply voltage",
             131: "Controller 131: Supply voltage",
         }
-        self.assertEqual(len(self.messages()), len(names))
+        self.assertEqual(len(self.messages()), len(names) + 2)
         for topic, payload, retained in self.messages():
+            if "/binary_sensor/" in topic:
+                continue
             config = json.loads(payload)
             source = int(config["unique_id"].split("_")[-2])
             self.assertEqual(config["name"], names[source])
@@ -418,7 +470,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.publish.reset_mock()
         await self.bridge.async_rediscover()
-        self.assertEqual(len(self.messages()), 2)
+        self.assertEqual(len(self.messages()), 4)
         self.assertTrue(all(topic.endswith("/config")
                         and retain for topic, _, retain in self.messages()))
 
@@ -536,7 +588,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         )
         await restored.async_disconnected()
         await restored.async_rediscover()
-        self.assertEqual(len(self.messages()), 4)
+        self.assertEqual(len(self.messages()), 6)
         self.assertEqual(self.messages()[0][1], "offline")
         for topic, payload, retain in self.messages()[2:]:
             self.assertTrue(topic.endswith("/config"))
@@ -564,7 +616,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             known_signals=[[0, 190], [3, 190]], save_discovery=save,
         )
         await bridge.async_remove_discovery()
-        self.assertEqual(len(self.messages()), 4)
+        self.assertEqual(len(self.messages()), 6)
         self.assertTrue(all(
             payload == "" and retain
             for _, payload, retain in self.messages()[2:]

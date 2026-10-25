@@ -4,7 +4,7 @@ rules:
     comment: Inspection, notification capture and explicit J1708 fuel/fault/distance/hours/total-fuel read actions are registered in custom_components/bluefire/__init__.py and described in custom_components/bluefire/services.yaml.
   appropriate-polling:
     status: done
-    comment: Opt-in J1708 startup enables sequential one-minute polling of PIDs 96, 194, 245, 247 and 250 in custom_components/bluefire/receiver.py with per-PID backoff capped at 15 minutes, busy-read exclusion, no catch-up bursts and session-bound cancellation. Polled sensors expire at 180 seconds; other sensors retain 60-second expiry. Diagnostic sensors read in-memory counters every 15 seconds.
+    comment: After opt-in startup, custom_components/bluefire/startup.py sends bounded liveness queries every 10 seconds while custom_components/bluefire/receiver.py sequentially polls PIDs 96, 194, 245, 247 and 250 each minute with independent backoff capped at 15 minutes, busy-read exclusion and no catch-up bursts. BLE writes are serialized and both tasks stop with the session. Polled sensors expire at 180 seconds; other sensors retain 60-second expiry. Diagnostic sensors read in-memory counters every 15 seconds.
   brands:
     status: done
     comment: The integration provides a local HACS brand icon at custom_components/bluefire/brand/icon.png.

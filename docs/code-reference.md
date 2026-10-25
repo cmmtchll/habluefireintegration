@@ -310,6 +310,7 @@ These FMI values apply to J1939. J1587 uses the separate four-bit table below.
 
 | Code / ID | Label string | Unit | Description | Reference |
 | --- | --- | --- | --- | --- |
+| 7 | J1708 availability | - | J1708 availability | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 151 | J1939 parameter group report | - | J1939 parameter group report | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 154 | J1587 parameter report | - | J1587 parameter report | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |
 | 169 | Authentication | - | Authentication | Local static inspection: Android 9.7.5/11.2.3 and Windows 12.5.6; J1939/J1708 enums and FaultDescriptions namespace boundaries. Default source roles are hints, not ECU identity verification. |

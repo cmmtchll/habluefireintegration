@@ -2,7 +2,7 @@
 
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from custom_components.bluefire.j1587 import ENTITIES
 from custom_components.bluefire.protocol import AdapterMessage
@@ -33,6 +33,7 @@ class ClientPacketTests(unittest.TestCase):
         self.assertEqual(
             client_packet(b"\x99\x01"), bytes.fromhex("0002990163")
         )
+        self.assertEqual(client_packet(b"\x07"), bytes.fromhex("000107f7"))
         self.assertEqual(len(client_packet(bytes(17))), 20)
         # End-around carry, not a modulo-256 checksum.
         self.assertEqual(client_packet(b"\xff\xff")[-1], 253)
@@ -132,6 +133,11 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
             "expected_command": None, "j1708_available": True,
             "subscriptions_sent": len(ENTITIES), "discarded_reports": 0,
             "error": None,
+            "keepalive": {
+                "interval_s": 10, "requests": 0, "responses": 0,
+                "timeouts": 0, "consecutive_timeouts": 0, "max_misses": 3,
+                "last_j1708_available": None,
+            },
         })
         # No security writes, reset, bus settings, SendPID or fault clearing.
         self.assertFalse(
@@ -292,3 +298,107 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(StartupError, "Unexpected start_reports"):
             await startup.run()
         self.assertFalse(startup.ready)
+
+    async def test_keepalive_requires_successful_startup(self):
+        startup = self.make_startup()
+        with self.assertRaisesRegex(StartupError, "before startup"):
+            await startup.keepalive()
+
+    async def test_keepalive_is_read_only_and_accepts_unavailable_bus(self):
+        startup = self.make_startup()
+        await startup.run()
+        self.sent.clear()
+        self.responses[7] = b"\x00"
+        sleep = AsyncMock(side_effect=[None, None, asyncio.CancelledError])
+        with patch(
+            "custom_components.bluefire.startup.asyncio.sleep", new=sleep
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await startup.keepalive()
+        self.assertEqual(self.sent, [b"\x07", b"\x07"])
+        self.assertTrue(startup.ready)
+        self.assertTrue(startup.j1708_available)
+        self.assertEqual(startup.keepalive_requests, 2)
+        self.assertEqual(startup.keepalive_responses, 2)
+        self.assertFalse(startup.last_keepalive_available)
+        self.assertIsNone(startup.expected_command)
+        self.assertEqual([call.args for call in sleep.await_args_list],
+                         [(10,), (10,), (10,)])
+
+    async def test_keepalive_rejects_malformed_and_missing_replies(self):
+        for response, error in (
+            (b"\x02", "Malformed J1708 keepalive"),
+            (None, "Timed out during J1708 keepalive"),
+        ):
+            with self.subTest(response=response):
+                startup = self.make_startup()
+                await startup.run()
+                self.responses[7] = response
+                with patch(
+                    "custom_components.bluefire.startup.KEEPALIVE_INTERVAL",
+                    0,
+                ), patch(
+                    "custom_components.bluefire.startup.STEP_TIMEOUT", 0.01
+                ):
+                    with self.assertRaisesRegex(StartupError, error):
+                        await startup.keepalive()
+                self.assertEqual(
+                    startup.keepalive_requests, 3 if response is None else 1
+                )
+                self.assertEqual(startup.keepalive_responses, 0)
+                self.assertIsNone(startup._response)
+
+    async def test_missing_probes_tolerate_traffic_and_reset_after_reply(self):
+        startup = self.make_startup()
+        await startup.run()
+        startup._is_receiving = lambda: True
+        request = AsyncMock(side_effect=[
+            TimeoutError, TimeoutError, TimeoutError, TimeoutError, b"\x01",
+        ])
+        sleep = AsyncMock(side_effect=[None] * 5 + [asyncio.CancelledError])
+        with patch.object(startup, "_request", new=request), patch(
+            "custom_components.bluefire.startup.asyncio.sleep", new=sleep
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await startup.keepalive()
+        self.assertTrue(startup.ready)
+        self.assertEqual(startup.keepalive_requests, 5)
+        self.assertEqual(startup.keepalive_responses, 1)
+        self.assertEqual(startup.keepalive_timeouts, 4)
+        self.assertEqual(startup.keepalive_consecutive_timeouts, 0)
+        self.assertIsNone(startup.error)
+        self.assertTrue(all(call.args == ("ready", b"\x07")
+                            for call in request.await_args_list))
+
+    async def test_probe_write_timeout_remains_fatal(self):
+        startup = self.make_startup()
+        await startup.run()
+        startup._write = AsyncMock(side_effect=TimeoutError)
+        startup._is_receiving = lambda: True
+        with patch(
+            "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0
+        ):
+            with self.assertRaisesRegex(StartupError, "BLE write timed out"):
+                await startup.keepalive()
+        self.assertEqual(startup.keepalive_requests, 1)
+        self.assertEqual(startup.keepalive_timeouts, 0)
+        self.assertIsNone(startup._response)
+
+    async def test_cancellation_during_keepalive_clears_pending_response(self):
+        startup = self.make_startup()
+        await startup.run()
+        self.responses[7] = None
+        with patch(
+            "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0
+        ):
+            task = asyncio.create_task(startup.keepalive())
+            try:
+                async with asyncio.timeout(1):
+                    while startup.expected_command != 7:
+                        await asyncio.sleep(0)
+                self.assertTrue(startup.ready)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        self.assertIsNone(startup._response)

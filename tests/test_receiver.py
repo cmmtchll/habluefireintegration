@@ -171,6 +171,73 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.receiver._async_receive_session(), 1)
         self.client.disconnect.assert_awaited_once()
 
+    async def test_keepalive_and_polling_serialize_ble_writes(self):
+        self.configure_startup_session()
+        self.bridge.async_process_j1587.side_effect = None
+        original_write = self.client.write_gatt_char.side_effect
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+        read_started = asyncio.Event()
+        read_completed = asyncio.Event()
+        active_writes = 0
+        max_active_writes = 0
+
+        async def write(characteristic, packet, *, response):
+            nonlocal active_writes, max_active_writes
+            active_writes += 1
+            max_active_writes = max(max_active_writes, active_writes)
+            try:
+                body = packet[2:-1]
+                if body == b"\x07" and self.receiver._startup.ready:
+                    probe_started.set()
+                    await release_probe.wait()
+                await original_write(characteristic, packet, response=response)
+                if body == bytes.fromhex("9b 00 00 60 01 01 00 00 00"):
+                    self.receiver._notification_received(
+                        None, self.packet(bytes.fromhex("9a 80 60 01 64"))
+                    )
+            finally:
+                active_writes -= 1
+
+        async def poll():
+            await probe_started.wait()
+            read_started.set()
+            result = await self.receiver.async_read(96)
+            self.assertEqual(result["reports"][0]["signals"][0]["value"], 50)
+            read_completed.set()
+            await asyncio.Future()
+
+        self.client.write_gatt_char.side_effect = write
+        self.receiver._async_poll = AsyncMock(side_effect=poll)
+        with (
+            patch(
+                "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
+            ),
+            patch.object(self.api, "READ_WINDOW_SECONDS", 0.02),
+        ):
+            task = asyncio.create_task(self.receiver.async_run())
+            try:
+                await asyncio.wait_for(read_started.wait(), 1)
+                await asyncio.sleep(0)
+                self.assertEqual(active_writes, 1)
+                self.assertIsNotNone(self.receiver._read_waiter)
+                self.assertFalse(any(
+                    body[0] == 155 and body[4] == 1
+                    for body in self.startup_bodies
+                ))
+                release_probe.set()
+                await asyncio.wait_for(read_completed.wait(), 1)
+                self.assertGreater(
+                    self.receiver._startup.keepalive_responses, 0
+                )
+                self.assertEqual(max_active_writes, 1)
+            finally:
+                release_probe.set()
+                self.receiver.stop()
+                await asyncio.wait_for(task, 1)
+        self.assertIsNone(self.receiver._read_waiter)
+        self.assertIsNone(self.receiver._startup._response)
+
     async def test_automatic_poll_sends_reads_and_restores_passive_wire_modes(
         self,
     ):
@@ -575,6 +642,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             await self.receiver._async_receive_session()
         self.client.start_notify.assert_awaited_once()
         self.client.stop_notify.assert_awaited_once()
+        self.client.write_gatt_char.assert_not_awaited()
 
     async def test_indicate_characteristics_are_supported(self):
         service = SimpleNamespace(
@@ -698,6 +766,24 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
         self.assertEqual(self.receiver.health.counters["connection_errors"], 1)
 
+    async def test_healthy_session_resets_backoff_after_startup_failures(self):
+        async def session():
+            attempt = self.receiver._async_receive_session.await_count
+            self.receiver._session_healthy = attempt == 4
+            if attempt == 6:
+                self.receiver.stop()
+            raise self.bleak_error("disconnected")
+
+        self.receiver._async_receive_session = AsyncMock(side_effect=session)
+        with patch.object(self.api.asyncio, "sleep", new=AsyncMock()) as sleep:
+            await self.receiver.async_run()
+        self.assertEqual(
+            [call.args[0] for call in sleep.await_args_list], [2, 4, 8, 2, 4]
+        )
+        events = self.receiver.connection_diagnostics()["events"]
+        self.assertEqual(events[-1]["event"], "disconnected")
+        self.assertEqual(events[-1]["reason"], "disconnected")
+
     async def test_malformed_frame_increments_framing_error_once(self):
         characteristic = SimpleNamespace(
             uuid=self.api.EZ_RECEIVE, properties=["notify"]
@@ -714,6 +800,12 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.client.start_notify.side_effect = (
             lambda char, callback: callback(char, malformed)
         )
+        cleanup_snapshots = []
+
+        async def stop_notify(_characteristic):
+            cleanup_snapshots.append(self.receiver.connection_diagnostics())
+
+        self.client.stop_notify.side_effect = stop_notify
 
         async def stop_after_failure(_delay):
             self.receiver.stop()
@@ -721,10 +813,228 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "custom_components.bluefire.receiver.asyncio.sleep",
             new=AsyncMock(side_effect=stop_after_failure),
+        ), patch.object(
+            self.api, "RECEIVE_ERROR_LIMIT", 1,
         ):
             await self.receiver.async_run()
 
         self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
+        history = self.receiver.connection_diagnostics()["connection_history"]
+        self.assertEqual(len(history), 1)
+        record = history[0]
+        self.assertIn("Too many malformed", record["reason"])
+        self.assertIsNotNone(record["connected_at"])
+        self.assertIsNotNone(record["ended_at"])
+        self.assertIsNone(record["ready_at"])
+        self.assertEqual(record["context"]["exception_type"], "BleakError")
+        self.assertEqual(record["context"]["counters"]["framing_errors"], 1)
+        cleanup_record = cleanup_snapshots[0]["connection_history"][0]
+        self.assertEqual(cleanup_record["reason"], record["reason"])
+        self.assertEqual(
+            cleanup_record["context"]["exception_type"], "BleakError"
+        )
+        self.assertIsNotNone(cleanup_record["ended_at"])
+        self.assertEqual(
+            record["context"]["recent_notifications"][0]["hex"],
+            malformed.hex(),
+        )
+
+    async def test_history_retains_last_ten_attempts_with_separate_counters(
+        self,
+    ):
+        async def session():
+            self.receiver.health.count("notifications")
+            if self.receiver._async_receive_session.await_count == 12:
+                self.receiver.stop()
+            raise self.bleak_error("link lost")
+
+        self.receiver._async_receive_session = AsyncMock(side_effect=session)
+        with patch.object(self.api.asyncio, "sleep", new=AsyncMock()):
+            await self.receiver.async_run()
+        history = self.receiver.connection_diagnostics()["connection_history"]
+        self.assertEqual(len(history), 10)
+        self.assertEqual([item["attempt"] for item in history],
+                         list(range(3, 13)))
+        self.assertEqual(history[0]["retry_delay_s"], 8)
+        self.assertIsNone(history[-1]["retry_delay_s"])
+        for record in history:
+            self.assertEqual(record["end_event"], "disconnected")
+            self.assertEqual(record["reason"], "link lost")
+            self.assertEqual(record["context"]["counters"]["notifications"], 1)
+            self.assertEqual(
+                record["context"]["counters"]["connection_errors"], 1
+            )
+            self.assertIsNone(record["connected_at"])
+            self.assertEqual(
+                record["context"]["exception_type"], "BleakError"
+            )
+
+    def test_notification_history_is_bounded_and_excludes_authentication(self):
+        self.receiver._connection_event("connecting")
+        self.receiver._startup = SimpleNamespace(ready=False)
+        self.receiver._notification_received(None, b"authentication")
+        self.assertEqual(len(self.receiver._recent_notifications), 0)
+        self.receiver._startup = None
+        characteristic = SimpleNamespace(uuid=self.api.EZ_RECEIVE, handle=16)
+        for value in range(12):
+            self.receiver._notification_received(
+                characteristic, bytes((value,)) * 600
+            )
+        self.receiver._connection_event("disconnected", "test")
+        record = self.receiver.connection_diagnostics()[
+            "connection_history"
+        ][0]
+        notifications = record["context"]["recent_notifications"]
+        self.assertEqual(len(notifications), 10)
+        self.assertEqual(notifications[0]["hex"], (b"\x02" * 512).hex())
+        self.assertTrue(notifications[0]["truncated"])
+        self.assertEqual(notifications[0]["length"], 600)
+        self.assertEqual(notifications[0]["characteristic"],
+                         self.api.EZ_RECEIVE)
+        self.assertEqual(notifications[0]["handle"], 16)
+        notifications[0]["hex"] = "changed by caller"
+        self.receiver._connection_event("connecting")
+        self.receiver._connection_event("disconnected", "another test")
+        history = self.receiver.connection_diagnostics()["connection_history"]
+        self.assertEqual(history[0]["context"]["recent_notifications"][0][
+            "hex"
+        ], (b"\x02" * 512).hex())
+        self.assertEqual(history[1]["context"]["recent_notifications"], [])
+
+    def test_disconnect_context_records_queue_fragments_and_bluetooth(self):
+        self.receiver._connection_event("connecting")
+        self.receiver._decoder.feed(b"\x00")
+        self.receiver._control_decoder.feed(b"\x00\x01")
+        self.receiver._queue = asyncio.Queue(maxsize=1)
+        self.receiver._queue.put_nowait(b"queued")
+        self.receiver._overflow.set()
+        self.receiver.health.advertisement(-76, "scanner")
+        self.receiver.health.data_seen()
+        self.receiver._last_write = {
+            "time": "write time", "command": 7, "length": 4,
+        }
+        self.receiver._connection_event("disconnected", "stream failed")
+        context = self.receiver.connection_diagnostics()[
+            "connection_history"
+        ][0]["context"]
+        self.assertEqual(context["pending_bytes"], 1)
+        self.assertEqual(context["control_pending_bytes"], 2)
+        self.assertEqual(context["queue_depth"], 1)
+        self.assertEqual(context["queue_capacity"], 1)
+        self.assertTrue(context["queue_overflow"])
+        self.assertEqual(context["bluetooth"]["rssi"], -76)
+        self.assertEqual(context["bluetooth"]["source"], "scanner")
+        self.assertIsNotNone(context["bluetooth"]["last_advertisement"])
+        self.assertIsNotNone(context["last_data"])
+        self.assertEqual(context["last_write"]["command"], 7)
+        self.assertGreaterEqual(context["duration_s"], 0)
+
+    def test_connection_history_without_health(self):
+        self.receiver.health = None
+        self.receiver._connection_event("connecting")
+        self.receiver._connection_event("disconnected", "test")
+        context = self.receiver.connection_diagnostics()[
+            "connection_history"
+        ][0]["context"]
+        self.assertIsNone(context["bluetooth"])
+        self.assertIsNone(context["last_data"])
+        self.assertEqual(context["counters"], {})
+
+    async def test_isolated_corruption_recovers_without_reconnecting(self):
+        characteristic = SimpleNamespace(
+            uuid=self.api.EZ_RECEIVE, properties=["notify"]
+        )
+        self.client.services = [SimpleNamespace(
+            uuid=self.api.EZ_SERVICE, characteristics=[characteristic],
+        )]
+        self.client.is_connected = True
+        self.receiver.j1587_extended = True
+        report = self.packet(bytes.fromhex("9a 80 be 02 a0 0f"))
+        chunk = report + b"\x00\x05\x05" + report + self.packet(b"\xff")
+        self.client.start_notify.side_effect = (
+            lambda char, callback: callback(char, chunk)
+        )
+        received = asyncio.Event()
+
+        async def publish(_report):
+            if self.bridge.async_process_j1587.await_count == 2:
+                received.set()
+
+        self.bridge.async_process_j1587.side_effect = publish
+        task = asyncio.create_task(self.receiver.async_run())
+        try:
+            await asyncio.wait_for(received.wait(), 1)
+            self.assertFalse(task.done())
+            self.client.disconnect.assert_not_awaited()
+            self.assertEqual(self.connect.await_count, 1)
+            self.assertEqual(self.receiver.health.counters["framing_errors"],
+                             1)
+            self.assertEqual(
+                self.receiver.health.counters["connection_errors"], 0
+            )
+            stream = self.receiver.connection_diagnostics()["receive_stream"]
+            self.assertEqual(stream["resynchronizations"], 1)
+            self.assertFalse(stream["resynchronizing"])
+            self.assertTrue(self.receiver._receive_is_recent())
+        finally:
+            self.receiver.stop()
+            await asyncio.wait_for(task, 1)
+
+    def test_corruption_budget_is_bounded_and_old_errors_expire(self):
+        chunk = b"\x7f\x00\x00" + self.packet(b"\xff") * 2
+        with patch.object(self.api, "monotonic", return_value=0):
+            for _ in range(9):
+                self.receiver._decoder.feed(chunk)
+                self.receiver._record_stream_errors()
+            self.assertEqual(self.receiver.health.counters["framing_errors"],
+                             9)
+            self.receiver._decoder.feed(chunk)
+            with self.assertRaisesRegex(self.bleak_error, "10 in 10 seconds"):
+                self.receiver._record_stream_errors()
+        with patch.object(self.api, "monotonic", return_value=11):
+            self.receiver._decoder.feed(chunk)
+            self.receiver._record_stream_errors()
+            stream = self.receiver.connection_diagnostics()["receive_stream"]
+            self.assertEqual(stream["recent_framing_errors"], 1)
+
+    def test_startup_corruption_remains_fatal(self):
+        self.receiver._startup = SimpleNamespace(ready=False)
+        self.receiver._decoder.feed(b"\x7f\x00\x00")
+        with self.assertRaisesRegex(self.api.ProtocolError, "length XOR"):
+            self.receiver._record_stream_errors()
+
+    async def test_persistent_corruption_without_valid_packets_times_out(self):
+        characteristic = SimpleNamespace(
+            uuid=self.api.EZ_RECEIVE, properties=["notify"]
+        )
+        self.client.services = [SimpleNamespace(
+            uuid=self.api.EZ_SERVICE, characteristics=[characteristic],
+        )]
+        self.client.is_connected = True
+        self.client.start_notify.side_effect = (
+            lambda char, callback: callback(char, bytes(128))
+        )
+        with patch.object(self.api, "RECEIVE_SILENCE_TIMEOUT", 0.01):
+            with self.assertRaisesRegex(
+                self.bleak_error, "No valid BlueFire receive packets"
+            ):
+                await asyncio.wait_for(
+                    self.receiver._async_receive_session(), 2
+                )
+        self.client.disconnect.assert_awaited_once()
+        self.assertIsNone(self.receiver._last_valid_packet)
+        self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
+
+    def test_receive_activity_requires_valid_packets_and_expires(self):
+        with patch.object(self.api, "monotonic", return_value=0):
+            self.receiver._notification_received(None, bytes(128))
+            self.assertFalse(self.receiver._receive_is_recent())
+            self.receiver._notification_received(
+                None, self.packet(b"\xff") * 2
+            )
+            self.assertTrue(self.receiver._receive_is_recent())
+        with patch.object(self.api, "monotonic", return_value=30):
+            self.assertFalse(self.receiver._receive_is_recent())
 
     async def test_connected_session_is_not_limited_by_connect_timeout(self):
         characteristic = SimpleNamespace(
@@ -1000,7 +1310,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_timeout_is_visible_and_disconnects(self):
         self.configure_startup_session(overrides={0: None})
         with patch(
-            "custom_components.bluefire.startup.STEP_TIMEOUT", 0.01
+            "custom_components.bluefire.startup.STEP_TIMEOUT", 0.2
         ):
             with self.assertRaisesRegex(
                 self.home_assistant_error, "Timed out during version"
@@ -1050,6 +1360,312 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.receiver.stop()
             await asyncio.wait_for(task, 1)
+
+    async def test_periodic_probes_keep_telemetry_flowing_without_reauth(self):
+        self.configure_startup_session()
+        probed = asyncio.Event()
+        write = self.client.write_gatt_char.side_effect
+
+        async def probe(*args, **kwargs):
+            if args[1][2:-1] == b"\x07" and self.receiver._startup.ready:
+                self.receiver._notification_received(
+                    None, self.packet(bytes.fromhex("9a 80 be 02 a0 0f"))
+                )
+            await write(*args, **kwargs)
+            if args[1][2:-1] == b"\x07" and self.receiver._startup.ready:
+                if self.startup_bodies.count(b"\x07") >= 4:
+                    probed.set()
+
+        self.client.write_gatt_char.side_effect = probe
+        self.bridge.async_process_j1587.side_effect = None
+        with patch(
+            "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
+        ):
+            task = asyncio.create_task(self.receiver.async_run())
+            try:
+                await asyncio.wait_for(probed.wait(), 2)
+                async with asyncio.timeout(1):
+                    while (
+                        self.bridge.async_process_j1587.await_count < 4
+                        or self.receiver._startup.keepalive_responses < 3
+                    ):
+                        await asyncio.sleep(0)
+                self.assertTrue(self.receiver._startup.ready)
+                self.assertEqual(self.startup_bodies.count(b"\x00"), 1)
+                self.assertEqual(self.startup_bodies.count(b"\x82\x00"), 1)
+                self.assertEqual(self.startup_bodies.count(b"\x99\x01"), 1)
+                self.assertGreaterEqual(
+                    self.receiver._startup.keepalive_responses, 3
+                )
+            finally:
+                self.receiver.stop()
+                await asyncio.wait_for(task, 1)
+        sent = self.client.write_gatt_char.await_count
+        await asyncio.sleep(0.02)
+        self.assertEqual(self.client.write_gatt_char.await_count, sent)
+        self.assertIsNone(self.receiver._startup._response)
+
+    async def test_keepalive_timeout_is_recorded_and_disconnects(self):
+        self.configure_startup_session(report_on_start=False)
+        write = self.client.write_gatt_char.side_effect
+
+        async def ignore_probe(*args, **kwargs):
+            if args[1][2:-1] == b"\x07" and self.receiver._startup.ready:
+                return
+            await write(*args, **kwargs)
+
+        self.client.write_gatt_char.side_effect = ignore_probe
+        with patch(
+            "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
+        ), patch(
+            "custom_components.bluefire.startup.STEP_TIMEOUT", 0.2
+        ), patch.object(
+            self.receiver, "_receive_is_recent", return_value=False,
+        ):
+            with self.assertRaisesRegex(
+                self.home_assistant_error, "Timed out during J1708 keepalive"
+            ):
+                await asyncio.wait_for(
+                    self.receiver._async_receive_session(), 2
+                )
+        self.assertEqual(self.receiver._startup.stage, "failed")
+        self.client.disconnect.assert_awaited_once()
+        self.assertFalse(self.receiver.connection_diagnostics()["connected"])
+
+    async def test_missing_probe_replies_keep_receiving_session_open(self):
+        self.configure_startup_session(report_on_start=False)
+        write = self.client.write_gatt_char.side_effect
+        ignore = True
+
+        async def probe(*args, **kwargs):
+            if (
+                ignore and args[1][2:-1] == b"\x07"
+                and self.receiver._startup.ready
+            ):
+                self.receiver._notification_received(
+                    None, self.packet(b"\xff")
+                )
+                return
+            await write(*args, **kwargs)
+
+        self.client.write_gatt_char.side_effect = probe
+        with patch(
+            "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
+        ), patch(
+            "custom_components.bluefire.startup.STEP_TIMEOUT", 0.2
+        ):
+            task = asyncio.create_task(self.receiver.async_run())
+            try:
+                async with asyncio.timeout(2):
+                    while (
+                        self.receiver._startup is None
+                        or self.receiver._startup.keepalive_timeouts < 3
+                    ):
+                        await asyncio.sleep(0.01)
+                self.assertFalse(task.done())
+                self.assertTrue(self.receiver._connected)
+                self.client.disconnect.assert_not_awaited()
+                self.assertEqual(self.connect.await_count, 1)
+                ignore = False
+                async with asyncio.timeout(1):
+                    while not self.receiver._startup.keepalive_responses:
+                        await asyncio.sleep(0.01)
+                self.assertEqual(
+                    self.receiver._startup.keepalive_consecutive_timeouts, 0
+                )
+            finally:
+                self.receiver.stop()
+                await asyncio.wait_for(task, 1)
+
+    async def test_probe_write_failure_reaches_health_and_offline_state(self):
+        self.configure_startup_session(report_on_start=False)
+        write = self.client.write_gatt_char.side_effect
+
+        async def fail_probe(*args, **kwargs):
+            if args[1][2:-1] == b"\x07" and self.receiver._startup.ready:
+                raise self.bleak_error("probe write failed")
+            await write(*args, **kwargs)
+
+        self.client.write_gatt_char.side_effect = fail_probe
+        self.receiver.health.add_listener(self.receiver.stop)
+        with patch(
+            "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
+        ):
+            await asyncio.wait_for(self.receiver.async_run(), 2)
+        self.assertEqual(self.receiver.health.counters["connection_errors"], 1)
+        self.assertIn("probe write failed", self.receiver.health.last_error)
+        self.assertEqual(self.receiver._startup.stage, "failed")
+        self.assertEqual(self.receiver._startup.error, "probe write failed")
+        self.bridge.async_disconnected.assert_awaited_once()
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_probe_sends_independently_of_mqtt_publication(self):
+        self.configure_startup_session()
+        publishing = asyncio.Event()
+        release = asyncio.Event()
+        probed = asyncio.Event()
+        write = self.client.write_gatt_char.side_effect
+
+        async def publish(_report):
+            publishing.set()
+            await release.wait()
+
+        async def probe(*args, **kwargs):
+            if args[1][2:-1] == b"\x07" and self.receiver._startup.ready:
+                self.startup_bodies.append(b"\x07")
+                reply = self.packet(b"\x07\x01")
+                for fragment in (reply[:2], reply[2:4], reply[4:]):
+                    self.receiver._notification_received(None, fragment)
+                probed.set()
+            else:
+                await write(*args, **kwargs)
+
+        self.bridge.async_process_j1587.side_effect = publish
+        self.client.write_gatt_char.side_effect = probe
+        with patch(
+            "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
+        ), patch(
+            "custom_components.bluefire.startup.STEP_TIMEOUT", 0.05
+        ):
+            task = asyncio.create_task(self.receiver.async_run())
+            try:
+                await asyncio.wait_for(publishing.wait(), 1)
+                await asyncio.wait_for(probed.wait(), 1)
+                await asyncio.sleep(0.1)
+                self.assertFalse(release.is_set())
+                self.assertTrue(self.receiver._startup.ready)
+                self.assertGreaterEqual(
+                    self.receiver._startup.keepalive_responses, 3
+                )
+                release.set()
+                async with asyncio.timeout(1):
+                    while not self.receiver._startup.keepalive_responses:
+                        await asyncio.sleep(0)
+            finally:
+                release.set()
+                self.receiver.stop()
+                await asyncio.wait_for(task, 1)
+
+    async def test_pause_cancels_pending_probe_before_releasing_ble(self):
+        self.configure_startup_session(report_on_start=False)
+        waiting = asyncio.Event()
+        write = self.client.write_gatt_char.side_effect
+
+        async def ignore_probe(*args, **kwargs):
+            if args[1][2:-1] == b"\x07" and self.receiver._startup.ready:
+                waiting.set()
+                return
+            await write(*args, **kwargs)
+
+        self.client.write_gatt_char.side_effect = ignore_probe
+        with patch(
+            "custom_components.bluefire.startup.KEEPALIVE_INTERVAL", 0.01
+        ):
+            task = asyncio.create_task(self.receiver.async_run())
+            try:
+                await asyncio.wait_for(waiting.wait(), 1)
+                await self.receiver.async_pause()
+                self.assertIsNone(self.receiver._startup._response)
+                sent = self.client.write_gatt_char.await_count
+                await asyncio.sleep(0.03)
+                self.assertEqual(self.client.write_gatt_char.await_count, sent)
+                self.client.disconnect.assert_awaited_once()
+                self.bridge.async_disconnected.assert_not_awaited()
+                history = self.receiver.connection_diagnostics()[
+                    "connection_history"
+                ]
+                self.assertEqual(history[-1]["end_event"], "paused")
+                self.assertEqual(
+                    history[-1]["reason"], "Diagnostic inspection requested"
+                )
+                context = history[-1]["context"]
+                self.assertEqual(context["startup"]["stage"], "ready")
+                self.assertEqual(context["startup"]["expected_command"], 7)
+                self.assertEqual(context["startup"]["keepalive"]["requests"],
+                                 1)
+                self.assertEqual(context["last_write"]["command"], 7)
+                self.assertIsNotNone(history[-1]["ready_at"])
+            finally:
+                self.receiver.stop()
+                await asyncio.wait_for(task, 1)
+
+    async def test_live_capture_keeps_session_open_and_counts_once(self):
+        self.configure_startup_session(report_on_start=False)
+        task = asyncio.create_task(self.receiver._async_receive_session())
+        capture = None
+        try:
+            async with asyncio.timeout(1):
+                while not (
+                    self.receiver._startup and self.receiver._startup.ready
+                ):
+                    await asyncio.sleep(0)
+            before = dict(self.receiver.health.counters)
+            capture = asyncio.create_task(self.receiver.async_capture(0.03))
+            await asyncio.sleep(0)
+            characteristic = SimpleNamespace(
+                uuid=self.api.EZ_RECEIVE, handle=16
+            )
+            self.receiver._notification_received(
+                characteristic, self.packet(b"\xff")
+            )
+            result = await capture
+            self.assertEqual(result["mode"], "live")
+            self.assertFalse(result["connection_lost"])
+            self.assertEqual(result["received_notifications"], 1)
+            self.assertEqual(result["notifications"][0]["handle"], 16)
+            self.assertEqual(result["notifications"][0]["hex"],
+                             self.packet(b"\xff").hex())
+            self.assertEqual(self.receiver.health.counters["notifications"],
+                             before["notifications"] + 1)
+            self.assertEqual(self.receiver.health.counters["heartbeats"],
+                             before["heartbeats"] + 1)
+            self.assertEqual(self.receiver.health.counters["captures"], 1)
+            self.client.disconnect.assert_not_awaited()
+            self.assertFalse(task.done())
+        finally:
+            if capture is not None and not capture.done():
+                capture.cancel()
+                await asyncio.gather(capture, return_exceptions=True)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+    async def test_live_capture_is_bounded_and_stops_at_session_boundary(self):
+        self.receiver._connected = True
+        self.receiver._session_ended = asyncio.Event()
+        with patch.object(self.api, "MAX_CAPTURE_NOTIFICATIONS", 1):
+            task = asyncio.create_task(self.receiver.async_capture(20))
+            await asyncio.sleep(0)
+            with self.assertRaisesRegex(
+                self.home_assistant_error, "already running"
+            ):
+                await self.receiver.async_capture(0)
+            for _ in range(3):
+                self.receiver._notification_received(
+                    None, self.packet(b"\xff")
+                )
+            self.receiver._session_ended.set()
+            result = await asyncio.wait_for(task, 1)
+        self.assertTrue(result["connection_lost"])
+        self.assertEqual(result["received_notifications"], 3)
+        self.assertEqual(result["dropped_notifications"], 2)
+        self.assertEqual(len(result["notifications"]), 1)
+        self.assertEqual(self.receiver.health.counters["notifications"], 3)
+        self.assertIsNone(self.receiver._capture_callback)
+
+    async def test_live_capture_skips_offline_and_cleans_up_on_cancel(self):
+        result = await self.receiver.async_capture(20)
+        self.assertEqual(result["status"], "skipped")
+        self.connect.assert_not_awaited()
+        self.receiver._connected = True
+        self.receiver._session_ended = asyncio.Event()
+        task = asyncio.create_task(self.receiver.async_capture(20))
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIsNone(self.receiver._capture_callback)
+        self.assertEqual(self.receiver.health.counters["captures"], 0)
 
     async def test_failed_write_aborts_startup_and_disconnects(self):
         self.configure_startup_session()

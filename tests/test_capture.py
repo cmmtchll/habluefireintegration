@@ -37,7 +37,7 @@ class CaptureAnalysisTests(unittest.TestCase):
             note(2.0, packet(bytes([154, 128]))),
             note(2.5, packet(bytes([174, 0, 1, 1, 0, 12, 2, 1, 2]))),
             note(3.0, packet(bytes([0xFF]))),
-            note(3.5, packet(bytes([7]))),
+            note(3.5, packet(bytes([42]))),
         ]
         analysis = analyze_notifications(notifications)
         stream = analysis["characteristics"]["j1939#12"]["framing"]["stream"]

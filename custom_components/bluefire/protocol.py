@@ -2,7 +2,8 @@
 
 Based on static observations of Android 9.7.5/11.2.3 and Windows 12.5.6.
 All formats remain hardware-unverified.
-No authentication, writes, automatic resynchronization, or CAN-ID fabrication.
+No authentication, writes, or CAN-ID fabrication. Offline decoding is strict;
+the live receiver explicitly opts into bounded stream recovery.
 """
 
 from dataclasses import dataclass
@@ -27,6 +28,16 @@ def receive_checksum(body: bytes) -> int:
     while total > 255:
         total = (total & 255) + (total >> 8)
     return 255 - total
+
+
+def _receive_length(header: bytes | bytearray) -> int:
+    high, low, check = header
+    if check != high ^ low:
+        raise ProtocolError("Invalid receive length XOR")
+    length = (high << 8) | low
+    if not 1 <= length <= MAX_BODY_SIZE:
+        raise ProtocolError("Receive length outside analysis limit")
+    return length
 
 
 class ReceiveDecoder:
@@ -83,14 +94,7 @@ class ReceiveDecoder:
                 offset = end
                 if len(self._buffer) < 3:
                     continue
-                high, low, check = self._buffer[:3]
-                if check != high ^ low:
-                    raise ProtocolError("Invalid receive length XOR")
-                length = (high << 8) | low
-                if not 1 <= length <= MAX_BODY_SIZE:
-                    raise ProtocolError(
-                        "Receive length outside analysis limit"
-                    )
+                length = _receive_length(self._buffer[:3])
                 if len(self._buffer) < length + 4:
                     continue
                 body = bytes(self._buffer[3:-1])
@@ -105,6 +109,100 @@ class ReceiveDecoder:
         except ProtocolError:
             self.reset()
             raise
+        return tuple(bodies)
+
+
+class RecoveringReceiveDecoder(ReceiveDecoder):
+    """Live stream decoder requiring two adjacent valid packets to recover.
+
+    Corrupt data is never returned. Recovery checks both length headers and
+    payload checksums, including across notifications, and buffers at most two
+    maximum-sized packets. Strict offline and padded decoding stay unchanged.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reset()
+
+    def reset(self) -> None:
+        super().reset()
+        self.resynchronizing = False
+        self.resynchronizations = 0
+        self.framing_errors: tuple[str, ...] = ()
+
+    def _packet_end(self, offset: int) -> int | None:
+        try:
+            length = _receive_length(self._buffer[offset:offset + 3])
+        except ProtocolError:
+            return None
+        end = offset + length + 4
+        if end > len(self._buffer):
+            # Keep plausible fragmented candidates until more bytes arrive.
+            return end
+        body = bytes(self._buffer[offset + 3:end - 1])
+        return end if receive_checksum(body) == self._buffer[end - 1] else None
+
+    def _recover(self) -> tuple[bytes, ...]:
+        keep = max(0, len(self._buffer) - 2)
+        for offset in range(keep):
+            first = self._packet_end(offset)
+            if first is None:
+                continue
+            if first > len(self._buffer) or len(self._buffer) - first < 3:
+                keep = min(keep, offset)
+                continue
+            second = self._packet_end(first)
+            if second is None:
+                continue
+            if second > len(self._buffer):
+                keep = min(keep, offset)
+                continue
+            bodies = (
+                bytes(self._buffer[offset + 3:first - 1]),
+                bytes(self._buffer[first + 3:second - 1]),
+            )
+            del self._buffer[:second]
+            self.resynchronizing = False
+            self.resynchronizations += 1
+            return bodies
+        del self._buffer[:keep]
+        return ()
+
+    def feed(self, chunk: bytes) -> tuple[bytes, ...]:
+        if not isinstance(chunk, bytes):
+            self.reset()
+            raise ProtocolError("Expected immutable receive bytes")
+        bodies = []
+        errors = []
+        offset = 0
+        while offset < len(chunk):
+            end = min(
+                len(chunk), offset + MAX_PACKET_SIZE * 2 - len(self._buffer)
+            )
+            self._buffer.extend(chunk[offset:end])
+            offset = end
+            while self._buffer:
+                if self.resynchronizing:
+                    recovered = self._recover()
+                    if not recovered:
+                        break
+                    bodies.extend(recovered)
+                    continue
+                if len(self._buffer) < 3:
+                    break
+                try:
+                    length = _receive_length(self._buffer[:3])
+                    if len(self._buffer) < length + 4:
+                        break
+                    body = bytes(self._buffer[3:length + 3])
+                    if receive_checksum(body) != self._buffer[length + 3]:
+                        raise ProtocolError("Invalid receive payload checksum")
+                    bodies.append(body)
+                    del self._buffer[:length + 4]
+                except ProtocolError as err:
+                    errors.append(str(err))
+                    self.resynchronizing = True
+        self.framing_errors = tuple(errors)
         return tuple(bodies)
 
 

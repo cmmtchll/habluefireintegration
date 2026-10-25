@@ -352,6 +352,12 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 receiver.startup_diagnostics = Mock(return_value={
                     "stage": "disabled",
                 })
+                receiver.connection_diagnostics = Mock(return_value={
+                    "connected": False, "events": [],
+                })
+                receiver.async_capture = AsyncMock(return_value={
+                    "status": "skipped", "mode": "live",
+                })
                 self.receiver_instances.append(receiver)
 
             async def async_run(receiver):
@@ -483,7 +489,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receiver_tasks, ["BlueFire BLE receiver"])
         entries = self.hass.config_entries
         entries.async_forward_entry_setups.assert_awaited_once()
-        self.assertEqual(self.mqtt.async_publish.await_count, 2)
+        self.assertEqual(self.mqtt.async_publish.await_count, 4)
         self.mqtt.async_publish.assert_any_await(
             self.hass, "vehicle/coach/j1939/availability", "offline",
             qos=1, retain=True,
@@ -523,7 +529,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tasks, [])
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
-        self.assertEqual(self.mqtt.async_publish.await_count, 2)
+        self.assertEqual(self.mqtt.async_publish.await_count, 4)
 
     async def test_reconnect_replays_definitions_but_no_state(self):
         await async_setup_entry(self.hass, self.entry)
@@ -533,9 +539,12 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
         calls = self.mqtt.async_publish.await_args_list
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(calls[0].args[2], "offline")
-        self.assertEqual(calls[2].args[1], "homeassistant/sensor/test/config")
+        self.assertEqual(calls[3].args[1], "homeassistant/sensor/test/config")
+        self.assertEqual(sum(
+            "/binary_sensor/" in call.args[1] for call in calls
+        ), 2)
 
     async def test_j1587_runtime_persists_and_rediscoveries_use_ha_mqtt(self):
         from custom_components.bluefire.protocol import J1587Report
@@ -553,7 +562,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
         calls = self.mqtt.async_publish.await_args_list
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(calls[-1].args[1],
                          "homeassistant/sensor/"
                          "bluefire_coach_j1587_128_190/config")
@@ -660,7 +669,8 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         await self.birth[0][1](SimpleNamespace(payload="online"))
         self.mqtt.async_publish.assert_not_awaited()
         await self.birth[0][1](SimpleNamespace(payload="up"))
-        self.mqtt.async_publish.assert_awaited_once_with(
+        self.assertEqual(self.mqtt.async_publish.await_count, 3)
+        self.mqtt.async_publish.assert_any_await(
             self.hass, "custom/ha/sensor/test/config", "{}",
             qos=1, retain=True,
         )
@@ -898,6 +908,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         api = importlib.import_module("custom_components.bluefire.diagnostics")
         self.ble_entry()
         await async_setup_entry(self.hass, self.entry)
+        self.entry.runtime_data.receiver = None
         pgn = packet(bytes([151, 0, 0xF0, 0x04, 3, 0, 8]) + bytes(8))
         self.notify_client([
             ("j1939", packet(b"\xff")), ("j1939", pgn),
@@ -911,7 +922,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                          "AA:BB:CC:DD:EE:FF")
         self.assertEqual(result["integration_version"], "0.4.0")
         self.assertEqual(
-            result["startup_before_capture"], {"stage": "disabled"}
+            result["startup_before_capture"], None
         )
         self.assertTrue(result["mqtt"]["connected"])
         self.assertEqual(
@@ -932,7 +943,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream["packets"], 3)
         self.assertEqual(stream["heartbeats"], 1)
         self.assertEqual(stream["pgn_reports"], 1)
-        self.assertEqual(stream["unknown_commands"], 1)
+        self.assertEqual(stream["unknown_commands"], 0)
         self.assertEqual(stream["framing_errors"], 1)
         counters = result["health"]["counters"]
         self.assertEqual(counters["notifications"], 4)
@@ -942,6 +953,43 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(self.entry.runtime_data.inspecting)
         self.assertNotIn("data", capture["notifications"][0])
+
+    async def test_diagnostics_observe_receiver_without_reconnecting(
+        self,
+    ):
+        api = importlib.import_module("custom_components.bluefire.diagnostics")
+        self.ble_entry()
+        await async_setup_entry(self.hass, self.entry)
+        receiver = self.entry.runtime_data.receiver
+        receiver.async_capture.return_value = {
+            "status": "completed", "mode": "live",
+            "received_notifications": 4,
+        }
+        result = await api.async_get_config_entry_diagnostics(
+            self.hass, self.entry
+        )
+        self.assertEqual(result["capture"]["mode"], "live")
+        self.assertEqual(result["startup_before_capture"]["stage"], "disabled")
+        self.assertEqual(result["receiver_before_capture"]["events"], [])
+        self.assertEqual(result["receiver"]["events"], [])
+        receiver.async_capture.assert_awaited_once_with(api.CAPTURE_SECONDS)
+        receiver.async_pause.assert_not_awaited()
+        receiver.async_resume.assert_not_called()
+        self.connect.assert_not_awaited()
+        self.assertFalse(self.entry.runtime_data.inspecting)
+
+    async def test_live_diagnostic_failure_releases_busy_flag(self):
+        api = importlib.import_module("custom_components.bluefire.diagnostics")
+        self.ble_entry()
+        await async_setup_entry(self.hass, self.entry)
+        receiver = self.entry.runtime_data.receiver
+        receiver.async_capture.side_effect = BoundaryError("capture busy")
+        result = await api.async_get_config_entry_diagnostics(
+            self.hass, self.entry
+        )
+        self.assertEqual(result["capture"]["status"], "failed")
+        self.assertFalse(self.entry.runtime_data.inspecting)
+        receiver.async_pause.assert_not_awaited()
 
     async def test_diagnostics_report_busy_failed_and_missing_address(self):
         api = importlib.import_module("custom_components.bluefire.diagnostics")
@@ -955,6 +1003,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["bluetooth"])
         self.assertEqual(result["capture"]["status"], "skipped")
         self.ble_entry()
+        self.entry.runtime_data.receiver = None
         self.service_info = None
         self.entry.runtime_data.inspecting = True
         result = await api.async_get_config_entry_diagnostics(
