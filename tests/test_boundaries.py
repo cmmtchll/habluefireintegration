@@ -143,6 +143,55 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         self.receiver.async_pause.assert_not_awaited()
         self.receiver.async_resume.assert_not_called()
 
+    async def test_mqtt_cleanup_defaults_to_preview_and_checks_connection(
+        self,
+    ):
+        bridge = SimpleNamespace(
+            async_cleanup_unobserved=AsyncMock(
+                return_value={"dry_run": True, "count": 0, "entities": []}
+            ),
+        )
+        self.runtime.bridge = bridge
+        connected = Mock(return_value=False)
+        confirm = AsyncMock()
+        with (
+            patch.dict(sys.modules, {
+                "homeassistant.components": module(
+                    "homeassistant.components",
+                    mqtt=SimpleNamespace(is_connected=connected),
+                ),
+            }),
+            patch("custom_components.bluefire.mqtt.async_confirm_removal",
+                  new=confirm),
+        ):
+            action = self.services["cleanup_mqtt"]
+            call = SimpleNamespace(data={"entry_id": "entry"})
+            result = await action(call)
+            self.assertTrue(result["dry_run"])
+            self.assertTrue(
+                bridge.async_cleanup_unobserved.call_args.kwargs["dry_run"]
+            )
+            call.data["dry_run"] = False
+            with self.assertRaisesRegex(BoundaryError, "MQTT must"):
+                await action(call)
+            connected.return_value = True
+
+            async def cleanup(remove, *, dry_run):
+                self.assertTrue(self.runtime.inspecting)
+                self.assertFalse(dry_run)
+                await remove("owned/topic")
+                return {"count": 1}
+
+            bridge.async_cleanup_unobserved.side_effect = cleanup
+            self.assertEqual(await action(call), {"count": 1})
+            confirm.assert_awaited_once_with(self.hass, "owned/topic")
+            bridge.async_cleanup_unobserved.side_effect = TimeoutError
+            with self.assertRaisesRegex(ConnectionFailure, "not confirmed"):
+                await action(call)
+            self.assertFalse(self.runtime.inspecting)
+            self.assertEqual(self.runtime.health.counters["mqtt_errors"], 1)
+            self.receiver.async_pause.assert_not_awaited()
+
     def test_read_action_metadata_matches_registered_actions(self):
         import json
         from pathlib import Path
@@ -181,6 +230,12 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
                 strings["services"][action], english["services"][action]
             )
             self.assertIn("mid", definitions[action]["fields"])
+        self.assertIn("cleanup_mqtt", self.services)
+        self.assertTrue(
+            definitions["cleanup_mqtt"]["fields"]["dry_run"]["default"]
+        )
+        self.assertEqual(strings["services"]["cleanup_mqtt"],
+                         english["services"]["cleanup_mqtt"])
 
     async def test_parameter_read_schema_targets_and_rejects_control_pids(
         self,
@@ -437,7 +492,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             ),
             "homeassistant.const": module(
                 "homeassistant.const",
-                Platform=SimpleNamespace(SENSOR="sensor"),
+                Platform=SimpleNamespace(
+                    SENSOR="sensor", BINARY_SENSOR="binary_sensor",
+                ),
                 EVENT_HOMEASSISTANT_STOP="homeassistant_stop",
             ),
             "homeassistant.core": module(

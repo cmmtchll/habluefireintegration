@@ -189,6 +189,8 @@ class MqttBridge:
         self.device_name = device_name or f"{vehicle_id} vehicle telemetry"
         self.discovery: dict[str, str] = {}
         self._known_signals: set[tuple[int, int]] = set()
+        self._observed_signals: set[tuple[int, int]] = set()
+        self._last_received: float | None = None
         self._save_discovery = save_discovery
         self._clock = clock
         self._last_frame: float | None = None
@@ -244,6 +246,15 @@ class MqttBridge:
     @property
     def availability_topic(self) -> str:
         return f"{self.prefix}/availability"
+
+    @property
+    def telemetry_connected(self) -> bool:
+        """Report receive freshness independently of MQTT delivery."""
+        return (
+            self._last_received is not None
+            and self._clock() - self._last_received
+            < self._availability_timeout
+        )
 
     @property
     def identification_reports(self) -> list[dict]:
@@ -302,11 +313,15 @@ class MqttBridge:
 
     async def async_disconnected(
         self, *, clear_identification: bool = False,
+        reset_receive: bool = True,
     ) -> None:
         """Invalidate freshness and withdraw retained online state."""
+        if reset_receive:
+            self._last_received = None
         if self.j1587 is not None:
             await self.j1587.async_disconnected(
-                clear_identification=clear_identification
+                clear_identification=clear_identification,
+                reset_receive=reset_receive,
             )
         async with self._frame_lock:
             self._last_frame = None
@@ -592,6 +607,13 @@ class MqttBridge:
             raise ValueError("Expected a parsed vendor PGN report")
         async with self._frame_lock:
             timestamp = datetime.now(timezone.utc).isoformat()
+            if report.source_address < 254 and report.data:
+                self._last_received = self._clock()
+                if report.data_page == 0 and len(report.data) == 8:
+                    self._observed_signals.update(
+                        (report.source_address, item.spn)
+                        for item in self.entities if item.pgn == report.pgn
+                    )
             common = {
                 "schema_version": 1,
                 "protocol": "j1939",
@@ -696,6 +718,11 @@ class MqttBridge:
                 frame.pgn, frame.data, source=frame.source_address
             ) if diagnostic else None
         )
+        self._last_received = self._clock()
+        self._observed_signals.update(
+            (frame.source_address, item.spn)
+            for item in self.entities if item.pgn == frame.pgn
+        )
         timestamp = datetime.now(timezone.utc).isoformat()
         common = {
             "schema_version": 1,
@@ -755,6 +782,67 @@ class MqttBridge:
             )
         # A transport connection alone is not evidence of usable vehicle data.
         await self._async_data_seen(timestamp)
+
+    async def async_cleanup_unobserved(
+        self, confirm_removal, *, dry_run: bool = True,
+    ) -> dict:
+        """Withdraw only owned entities not received since this load."""
+        entities = []
+        async with self._frame_lock:
+            candidates = self._known_signals - self._observed_signals
+            catalog = {item.spn: item for item in self.entities}
+            for source, code in sorted(candidates):
+                signal = catalog[code]
+                topic, _ = self._discovery_message(source, signal)
+                namespace = "pid" if self.protocol == "j1587" else "spn"
+                state_topic = (
+                    f"{self.prefix}/{source}/{namespace}/{code}"
+                    if last_known_entity(signal) else None
+                )
+                entities.append({
+                    "protocol": self.protocol, "controller": source,
+                    namespace: code, "name": signal.name,
+                    "discovery_topic": topic,
+                    "retained_state_topic": state_topic,
+                })
+                if not dry_run:
+                    await confirm_removal(topic)
+                    if state_topic is not None:
+                        await confirm_removal(state_topic)
+            if not dry_run and candidates:
+                identification = [
+                    report for report in self.identification_reports
+                    if (report["mid"], report["pid"]) not in candidates
+                ]
+                if (
+                    self.protocol == "j1587"
+                    and self._save_identification is not None
+                ):
+                    await self._save_identification(
+                        validated_identification(identification)
+                    )
+                remaining = self._known_signals - candidates
+                if self._save_discovery is not None:
+                    await self._save_discovery([
+                        list(item) for item in sorted(remaining)
+                    ])
+                self._known_signals = remaining
+                for entity in entities:
+                    self.discovery.pop(entity["discovery_topic"], None)
+                for mid, pid in candidates:
+                    parameters = self._identification.get(mid, {})
+                    parameters.pop(pid, None)
+                    if not parameters:
+                        self._identification.pop(mid, None)
+                self._identification_changed()
+        if self.j1587 is not None:
+            result = await self.j1587.async_cleanup_unobserved(
+                confirm_removal, dry_run=dry_run,
+            )
+            entities.extend(result["entities"])
+        return {
+            "dry_run": dry_run, "count": len(entities), "entities": entities,
+        }
 
     async def async_remove_discovery(
         self, *, clear_retained: bool = True,
@@ -829,6 +917,8 @@ class J1587MqttBridge(MqttBridge):
             profile=self.diagnostic_profile if report.mid == 128 else None,
         )
         async with self._frame_lock:
+            self._last_received = self._clock()
+            self._observed_signals.add((report.mid, report.pid))
             common = self._j1587_metadata(
                 report, datetime.now(timezone.utc).isoformat()
             )

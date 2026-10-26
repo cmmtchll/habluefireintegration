@@ -155,6 +155,28 @@ definitions known before a restart, and queues retained identity/counter-state
 deletion. Prefix changes withdraw the previous prefix's definitions.
 Ordinary unload/reload retains discovery but marks telemetry offline.
 
+### Remove old entities without removing the adapter
+
+Use **Developer tools -> Actions -> BlueFire: Clean up old MQTT entities**
+(`bluefire.cleanup_mqtt`) with the adapter's config entry and **Preview only**
+enabled (the default). The response lists only owned measurement, status,
+fault, and identification definitions **not received since the current
+BlueFire load/reload**. It does not scan or delete other MQTT devices.
+
+Let the vehicle report normally before reviewing the preview, including
+periodic reads and any identification requests you want to keep. An unseen
+entity is not necessarily invalid: a switched-off vehicle or a rarely reported
+parameter can produce legitimate candidates. Reloading resets this observation
+window; Bluetooth/MQTT reconnects do not.
+
+Run the action again with `dry_run: false` to remove the remaining candidates.
+Anything received in the meantime is protected. MQTT must be connected;
+discovery and any retained last-known state are deleted with broker-echo
+confirmation before ownership is forgotten. Unconfirmed ownership remains
+available for another attempt. Received entities, protocol connectivity, and
+last-data diagnostics are untouched. A later report can rediscover a removed
+entity. Cleanup is manual, never an automatic age-based purge.
+
 Ownership and pending cleanup are durable. If MQTT is down, cleanup and offline
 availability work are retried on reconnect while HA is running. If HA restarts
 with no BlueFire entries, cleanup resumes when BlueFire is next set up.

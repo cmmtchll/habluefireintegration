@@ -203,6 +203,11 @@ class BlueFireReceiver:
             "connection_history": deepcopy(list(self._connection_history)),
         }
 
+    @property
+    def connected(self) -> bool:
+        """Whether the live BLE notification subscriptions are active."""
+        return self._connected
+
     def _connection_event(self, event: str, reason: str | None = None) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self._connection_events.append({
@@ -325,15 +330,18 @@ class BlueFireReceiver:
             "silence_timeout_s": RECEIVE_SILENCE_TIMEOUT,
         }
 
-    def _record_stream_errors(self) -> None:
+    def _record_stream_errors(self, *, recovered: bool = False) -> None:
         errors = self._decoder.framing_errors
-        if not errors:
-            return
         now = monotonic()
         for error in errors:
             self._framing_error_times.append(now)
             self._health_error("framing_errors", error)
             _LOGGER.warning("BlueFire receive stream recovering: %s", error)
+        if recovered:
+            # Recovered packets are progress, not a reason to restart a
+            # working session and repeat authentication.
+            self._framing_error_times.clear()
+            return
         if sum(
             now - observed < RECEIVE_ERROR_WINDOW
             for observed in self._framing_error_times
@@ -767,7 +775,7 @@ class BlueFireReceiver:
                     continue
                 chunk = get_chunk.result()
                 bodies = self._decoder.feed(chunk)
-                self._record_stream_errors()
+                self._record_stream_errors(recovered=bool(bodies))
                 for body in bodies:
                     try:
                         await self._async_process_body(body)

@@ -58,6 +58,10 @@ integration and broker, and **Bluetooth with a connectable scanner or proxy**.
 **[Full installation and configuration guide →](docs/getting-started.md)**
 
 `receiver_enabled` means the receiver is enabled, not that telemetry is flowing.
+The native BlueFire device has **Bluetooth connectivity**, **J1708 telemetry
+connectivity**, and **J1939 telemetry connectivity** diagnostic binary sensors.
+These distinguish an active BLE link from fresh vehicle data without opening
+the separate MQTT device.
 Measurement entities appear only after supported reports arrive; MQTT telemetry
 availability stays offline until valid data is received.
 

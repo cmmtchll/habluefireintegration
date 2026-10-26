@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from test_boundaries import module
 from custom_components.bluefire.protocol import J1587Report
-from custom_components.bluefire.telemetry import MqttBridge
+from custom_components.bluefire.telemetry import Frame, MqttBridge
 
 
 class SensorTests(unittest.IsolatedAsyncioTestCase):
@@ -21,6 +21,13 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         self.modules = patch.dict(sys.modules, {
             "homeassistant": module("homeassistant"),
             "homeassistant.components": module("homeassistant.components"),
+            "homeassistant.components.binary_sensor": module(
+                "homeassistant.components.binary_sensor",
+                BinarySensorDeviceClass=SimpleNamespace(
+                    CONNECTIVITY="connectivity",
+                ),
+                BinarySensorEntity=type("BinarySensorEntity", (), {}),
+            ),
             "homeassistant.components.sensor": module(
                 "homeassistant.components.sensor",
                 SensorDeviceClass=SimpleNamespace(
@@ -67,6 +74,10 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         sys.modules.pop(self.module_name, None)
         self.addCleanup(sys.modules.pop, self.module_name, None)
         self.api = importlib.import_module(self.module_name)
+        binary_module = "custom_components.bluefire.binary_sensor"
+        sys.modules.pop(binary_module, None)
+        self.addCleanup(sys.modules.pop, binary_module, None)
+        self.binary_api = importlib.import_module(binary_module)
         from custom_components.bluefire.health import Health
 
         self.health = Health(
@@ -80,7 +91,8 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
             unique_id="AA:BB:CC:DD:EE:01",
             title="Coach adapter",
             runtime_data=SimpleNamespace(
-                health=self.health, bridge=self.bridge
+                health=self.health, bridge=self.bridge,
+                receiver=SimpleNamespace(connected=False),
             ),
             async_on_unload=self.unloaders.append,
         )
@@ -119,6 +131,43 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sensors["framing_errors"]._attr_state_class, "total_increasing"
         )
+
+    async def test_native_connectivity_separates_ble_and_vehicle_protocols(
+        self,
+    ):
+        added = Mock()
+        await self.binary_api.async_setup_entry(
+            object(), self.entry, added,
+        )
+        ble, j1708, j1939 = added.call_args.args[0]
+        for sensor in (ble, j1708, j1939):
+            self.assertEqual(sensor._attr_device_class, "connectivity")
+            self.assertEqual(sensor._attr_entity_category, "diagnostic")
+            self.assertTrue(sensor._attr_should_poll)
+            self.assertEqual(
+                sensor._attr_device_info["identifiers"],
+                {("bluefire", "stable-entry-id")},
+            )
+            self.assertFalse(sensor.is_on)
+        self.assertEqual(j1708._attr_unique_id,
+                         "stable-entry-id_j1708_connectivity")
+        self.entry.runtime_data.receiver.connected = True
+        self.assertTrue(ble.is_on)
+        self.assertFalse(j1708.is_on)
+        self.assertFalse(j1939.is_on)
+        await self.bridge.async_process_j1587(
+            J1587Report(128, 190, bytes(2))
+        )
+        self.assertTrue(j1708.is_on)
+        self.assertFalse(j1939.is_on)
+        await self.bridge.async_process_frame(
+            Frame((6 << 26) | (61444 << 8), bytes(8))
+        )
+        self.assertTrue(j1939.is_on)
+        self.entry.runtime_data.receiver.connected = False
+        self.assertFalse(ble.is_on)
+        self.assertFalse(j1708.is_on)
+        self.assertFalse(j1939.is_on)
 
     async def test_health_sensor_values_and_attributes(self):
         sensors = await self.sensors()

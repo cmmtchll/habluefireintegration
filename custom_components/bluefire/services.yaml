@@ -1,3 +1,15 @@
+cleanup_mqtt:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
+    dry_run:
+      required: false
+      default: true
+      selector:
+        boolean:
 read_odometer:
   fields:
     entry_id:
