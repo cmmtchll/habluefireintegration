@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 import sys
 from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
@@ -528,7 +529,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receiver_tasks, ["BlueFire BLE receiver"])
         entries = self.hass.config_entries
         entries.async_forward_entry_setups.assert_awaited_once()
-        self.assertEqual(self.mqtt.async_publish.await_count, 4)
+        self.assertEqual(self.mqtt.async_publish.await_count, 6)
         self.mqtt.async_publish.assert_any_await(
             self.hass, "vehicle/coach/j1939/availability", "offline",
             qos=1, retain=True,
@@ -576,7 +577,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tasks, [])
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
-        self.assertEqual(self.mqtt.async_publish.await_count, 4)
+        self.assertEqual(self.mqtt.async_publish.await_count, 6)
 
     async def test_reconnect_replays_definitions_but_no_state(self):
         await async_setup_entry(self.hass, self.entry)
@@ -586,9 +587,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
         calls = self.mqtt.async_publish.await_args_list
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 7)
         self.assertEqual(calls[0].args[2], "offline")
-        self.assertEqual(calls[3].args[1], "homeassistant/sensor/test/config")
+        self.assertEqual(calls[4].args[1], "homeassistant/sensor/test/config")
         self.assertEqual(sum(
             "/binary_sensor/" in call.args[1] for call in calls
         ), 2)
@@ -609,7 +610,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.callbacks[-1](True)
         await asyncio.gather(*self.tasks)
         calls = self.mqtt.async_publish.await_args_list
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 7)
         self.assertEqual(calls[-1].args[1],
                          "homeassistant/sensor/"
                          "bluefire_coach_j1587_128_190/config")
@@ -716,7 +717,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         await self.birth[0][1](SimpleNamespace(payload="online"))
         self.mqtt.async_publish.assert_not_awaited()
         await self.birth[0][1](SimpleNamespace(payload="up"))
-        self.assertEqual(self.mqtt.async_publish.await_count, 3)
+        self.assertEqual(self.mqtt.async_publish.await_count, 5)
         self.mqtt.async_publish.assert_any_await(
             self.hass, "custom/ha/sensor/test/config", "{}",
             qos=1, retain=True,
@@ -748,14 +749,49 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             "EXAMPLE ENGINE",
         )
         changed.assert_not_called()
+        state, = [
+            call for call in self.mqtt.async_publish.await_args_list
+            if "/pid/" in call.args[1]
+        ]
+        self.assertTrue(state.kwargs["retain"])
+        self.assertEqual(json.loads(state.args[2])["value"], "EXAMPLE ENGINE")
+        await bridge.async_disconnected()
+        self.assertEqual(bridge.j1587.identification_report(128, 243)["value"],
+                         "EXAMPLE ENGINE")
+        changed.assert_not_called()
+        remove()
+
+    async def test_restart_restores_identity_without_claiming_live_data(self):
+        from copy import deepcopy
+        from custom_components.bluefire.protocol import J1587Report
+
+        await async_setup_entry(self.hass, self.entry)
+        bridge = self.entry.runtime_data.bridge
+        await bridge.async_process_j1587(
+            J1587Report(128, 234, b"EXAMPLE SOFTWARE")
+        )
+        original = bridge.j1587.identification_report(128, 234)
+        disk = deepcopy(self.store.async_save.await_args.args[0])
+        self.store.async_load.return_value = disk
+        self.hass.data.clear()
+        self.mqtt.async_publish.reset_mock()
+        await async_setup_entry(self.hass, self.entry)
+        restored = self.entry.runtime_data.bridge
+        self.assertEqual(
+            restored.j1587.identification_report(128, 234), original
+        )
+        self.assertFalse(restored.j1587._online)
+        self.assertIsNone(restored.j1587._last_frame)
+        state, = [
+            call for call in self.mqtt.async_publish.await_args_list
+            if call.args[1] == "vehicle/coach/j1587/128/pid/234"
+        ]
+        self.assertEqual(json.loads(state.args[2]), original)
+        self.assertTrue(state.kwargs["retain"])
         self.assertFalse(any(
-            "/pid/" in call.args[1]
+            call.args[2] == "online"
             for call in self.mqtt.async_publish.await_args_list
         ))
-        await bridge.async_disconnected()
-        self.assertIsNone(bridge.j1587.identification_report(128, 243))
-        changed.assert_called_once_with()
-        remove()
 
     async def test_shutdown_withdraws_availability(self):
         await async_setup_entry(self.hass, self.entry)

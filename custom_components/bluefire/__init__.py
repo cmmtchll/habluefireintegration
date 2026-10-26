@@ -230,7 +230,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     settings = mqtt_settings(hass)
     ledger = await async_get_ledger(hass)
     signals = await ledger.async_prepare(
-        entry.entry_id, entry.data[CONF_VEHICLE_ID], settings.discovery_prefix
+        entry.entry_id, entry.data[CONF_VEHICLE_ID], settings.discovery_prefix,
     )
 
     async def save_discovery(known_signals):
@@ -240,6 +240,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await ledger.async_save_signals(
             entry.entry_id, known_signals, j1587=True
         )
+
+    async def save_identification(reports):
+        await ledger.async_save_identification(entry.entry_id, reports)
 
     bridge = MqttBridge(
         entry.data[CONF_VEHICLE_ID], publish,
@@ -251,6 +254,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         save_j1587=save_j1587,
         j1708_polling=entry.data.get(CONF_J1708_STARTUP, False),
         engine_profile=entry.data.get(CONF_ENGINE_PROFILE, "generic"),
+        known_identification=await ledger.async_get_identification(
+            entry.entry_id
+        ),
+        save_identification=save_identification,
     )
     receiver = BlueFireReceiver(
         hass,

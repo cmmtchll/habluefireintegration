@@ -206,6 +206,154 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                 ("vehicle/coach/j1587/availability", "offline", True),
                 ("vehicle/coach/j1939/availability", "offline", True)])
 
+    async def test_last_data_discovery_is_retained_and_independent_of_online(
+        self,
+    ):
+        await self.bridge.async_rediscover()
+        configs = {
+            topic: json.loads(payload)
+            for topic, payload, retained in self.messages()
+            if topic.endswith("_last_data/config") and retained
+        }
+        self.assertEqual(len(configs), 2)
+        for protocol in ("j1939", "j1587"):
+            unique_id = f"bluefire_coach_{protocol}_last_data"
+            config = configs[f"homeassistant/sensor/{unique_id}/config"]
+            self.assertEqual(config["unique_id"], unique_id)
+            self.assertEqual(config["device_class"], "timestamp")
+            self.assertEqual(config["entity_category"], "diagnostic")
+            self.assertEqual(config["device"]["identifiers"],
+                             ["bluefire_coach"])
+            self.assertEqual(config["state_topic"],
+                             f"vehicle/coach/{protocol}/last_data")
+            self.assertEqual(config["value_template"],
+                             "{{ value_json.timestamp }}")
+            self.assertNotIn("availability_topic", config)
+            self.assertNotIn("expire_after", config)
+        self.assertFalse(any(
+            topic.endswith("/last_data") for topic, _, _ in self.messages()
+        ))
+
+    async def test_last_data_updates_are_bounded_and_flushed_on_disconnect(
+        self,
+    ):
+        clock = Mock(return_value=100)
+        bridge = MqttBridge("coach", self.publish, clock=clock)
+        sample = frame(61444, "ff ff 7d 40 1f ff ff ff")
+        await bridge.async_process_frame(sample)
+        first = bridge.diagnostics()["last_data"]
+        self.assertEqual(json.loads(next(
+            payload for topic, payload, _ in self.messages()
+            if topic.endswith("/last_data")
+        ))["timestamp"], first)
+        self.publish.reset_mock()
+        clock.return_value = 114
+        await bridge.async_process_frame(sample)
+        self.assertFalse(any(
+            topic.endswith("/last_data") for topic, _, _ in self.messages()
+        ))
+        clock.return_value = 115
+        await bridge.async_process_frame(sample)
+        updates = [(json.loads(payload)["timestamp"], retained)
+                   for topic, payload, retained in self.messages()
+                   if topic.endswith("/last_data")]
+        self.assertEqual(updates, [(bridge.diagnostics()["last_data"], True)])
+        clock.return_value = 116
+        await bridge.async_process_frame(sample)
+        latest = bridge.diagnostics()["last_data"]
+        self.publish.reset_mock()
+        await bridge.async_disconnected()
+        self.assertIn((
+            "vehicle/coach/j1939/last_data",
+            json.dumps({"timestamp": latest}), True,
+        ), self.messages())
+        self.assertFalse(bridge._online)
+        self.assertEqual(bridge.diagnostics()["last_data"], latest)
+        self.publish.reset_mock()
+        await bridge.async_disconnected()
+        await bridge.async_rediscover()
+        self.assertFalse(any(
+            topic.endswith("/last_data") for topic, _, _ in self.messages()
+        ))
+
+    async def test_last_data_stale_flush_and_publish_failure_are_retryable(
+        self,
+    ):
+        clock = Mock(return_value=100)
+        bridge = MqttBridge("coach", self.publish, clock=clock)
+        sample = frame(61444, "ff ff 7d 40 1f ff ff ff")
+        self.publish.side_effect = OSError("broker offline")
+        with self.assertRaises(OSError):
+            await bridge._async_data_seen("2026-01-01T00:00:00+00:00")
+        self.assertIsNone(bridge._last_data_published)
+        self.publish.side_effect = None
+        await bridge.async_process_frame(sample)
+        clock.return_value = 101
+        await bridge.async_process_frame(sample)
+        latest = bridge.diagnostics()["last_data"]
+        self.publish.reset_mock()
+        clock.return_value = 161
+        await bridge.async_check_stale()
+        self.assertIn((
+            "vehicle/coach/j1939/last_data",
+            json.dumps({"timestamp": latest}), True,
+        ), self.messages())
+        self.assertFalse(bridge._online)
+        self.assertIsNone(bridge._last_frame)
+
+    async def test_j1939_counter_retention_covers_both_frame_and_vendor_input(
+        self,
+    ):
+        for vendor in (False, True):
+            with self.subTest(vendor=vendor):
+                self.publish.reset_mock()
+                bridge = MqttBridge("coach", self.publish)
+                for signal in SIGNALS:
+                    if signal.state_class != "total_increasing":
+                        continue
+
+                    async def process(data):
+                        if vendor:
+                            await bridge.async_process_pgn_report(PgnReport(
+                                3, signal.pgn, 6, 0, data,
+                            ))
+                        else:
+                            await bridge.async_process_frame(Frame(
+                                (6 << 26) | (signal.pgn << 8) | 3, data,
+                            ))
+
+                    await process(bytes(8))
+                    topic = f"vehicle/coach/j1939/3/spn/{signal.spn}"
+                    state, retained = next(
+                        (json.loads(payload), retained)
+                        for name, payload, retained in self.messages()
+                        if name == topic
+                    )
+                    self.assertTrue(retained)
+                    self.assertEqual(state["last_observed"],
+                                     state["timestamp"])
+                    config = json.loads(bridge.discovery[
+                        "homeassistant/sensor/"
+                        f"bluefire_coach_3_{signal.spn}/config"
+                    ])
+                    self.assertNotIn("availability_topic", config)
+                    self.assertNotIn("expire_after", config)
+                    self.assertIn("'last_observed': value_json.last_observed",
+                                  config["json_attributes_template"])
+                    self.publish.reset_mock()
+                    await process(b"\xff" * 8)
+                    self.assertFalse(any(
+                        name == topic for name, _, _ in self.messages()
+                    ))
+                self.publish.reset_mock()
+                await bridge.async_remove_discovery()
+                for signal in SIGNALS:
+                    if signal.state_class == "total_increasing":
+                        self.assertIn((
+                            f"vehicle/coach/j1939/3/spn/{signal.spn}",
+                            "", True,
+                        ), self.messages())
+
     async def test_connectivity_discovered_before_measurements(self):
         bridge = MqttBridge(
             "coach", self.publish, discovery_prefix="ha/custom",
@@ -214,8 +362,10 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         await bridge.async_disconnected()
         await bridge.async_rediscover()
         messages = self.messages()
-        self.assertEqual(len(messages), 4)
+        self.assertEqual(len(messages), 6)
         for topic, payload, retain in messages[2:]:
+            if "/binary_sensor/" not in topic:
+                continue
             config = json.loads(payload)
             protocol = config["state_topic"].split("/")[-2]
             unique_id = f"bluefire_coach_{protocol}_connectivity"
@@ -250,9 +400,9 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         self.publish.side_effect = None
         self.publish.reset_mock()
         await self.bridge.async_rediscover()
-        self.assertEqual(len(self.messages()), 2)
+        self.assertEqual(len(self.messages()), 4)
         self.assertTrue(all(
-            "/binary_sensor/" in topic and retain
+            topic.endswith("/config") and retain
             for topic, _, retain in self.messages()
         ))
 
@@ -371,9 +521,12 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             130: "Controller 130: Supply voltage",
             131: "Controller 131: Supply voltage",
         }
-        self.assertEqual(len(self.messages()), len(names) + 2)
+        self.assertEqual(len(self.messages()), len(names) + 4)
         for topic, payload, retained in self.messages():
-            if "/binary_sensor/" in topic:
+            if (
+                "/binary_sensor/" in topic
+                or topic.endswith("_last_data/config")
+            ):
                 continue
             config = json.loads(payload)
             source = int(config["unique_id"].split("_")[-2])
@@ -395,7 +548,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             frame(65000, "01 02 03 04 05 06 07 08")
         )
         messages = self.messages()
-        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(messages), 3)
         raw = json.loads(messages[0][1])
         self.assertEqual(raw["data"], "0102030405060708")
         self.assertEqual(raw["pgn"], 65000)
@@ -470,7 +623,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.publish.reset_mock()
         await self.bridge.async_rediscover()
-        self.assertEqual(len(self.messages()), 4)
+        self.assertEqual(len(self.messages()), 6)
         self.assertTrue(all(topic.endswith("/config")
                         and retain for topic, _, retain in self.messages()))
 
@@ -529,7 +682,9 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
                 )
                 payload, retain = messages[config["state_topic"]]
                 state = json.loads(payload)
-                self.assertFalse(retain)
+                self.assertEqual(
+                    retain, signal.state_class == "total_increasing"
+                )
                 self.assertEqual(state["value"], signal.offset)
                 self.assertEqual(state["pgn"], signal.pgn)
                 self.assertEqual(state["source_address"], 3)
@@ -545,9 +700,8 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(availability, [("online", True)])
         await self.bridge.async_disconnected()
-        self.assertEqual(
-            self.messages()[-1],
-            (self.bridge.availability_topic, "offline", True),
+        self.assertIn(
+            (self.bridge.availability_topic, "offline", True), self.messages()
         )
 
     async def test_watchdog_expires_stream_and_new_frame_restores_online(self):
@@ -588,7 +742,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         )
         await restored.async_disconnected()
         await restored.async_rediscover()
-        self.assertEqual(len(self.messages()), 6)
+        self.assertEqual(len(self.messages()), 8)
         self.assertEqual(self.messages()[0][1], "offline")
         for topic, payload, retain in self.messages()[2:]:
             self.assertTrue(topic.endswith("/config"))
@@ -616,7 +770,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             known_signals=[[0, 190], [3, 190]], save_discovery=save,
         )
         await bridge.async_remove_discovery()
-        self.assertEqual(len(self.messages()), 6)
+        self.assertEqual(len(self.messages()), 10)
         self.assertTrue(all(
             payload == "" and retain
             for _, payload, retain in self.messages()[2:]

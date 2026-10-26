@@ -422,7 +422,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             194, restore=True
         )
 
-    async def test_counter_reads_reuse_mqtt_identities_units_and_nulls(self):
+    async def test_counter_reads_preserve_last_known_mqtt_on_unavailable(self):
         self.configure_read()
         published = []
 
@@ -454,8 +454,10 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                     payload for topic, payload in published
                     if topic == f"vehicle/coach/j1587/128/pid/{pid}"
                 ]
-                self.assertEqual(states[-1]["value"], expected)
+                self.assertEqual(states[-1]["value"], value)
                 self.assertEqual(states[-1]["unit"], unit)
+                self.assertEqual(states[-1]["value_basis"], "last_observed")
+                self.assertEqual(len(states), 1)
             config, = [
                 payload for topic, payload in published
                 if topic == (
@@ -464,7 +466,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
             self.assertEqual(config["state_class"], "total_increasing")
-            self.assertEqual(config["expire_after"], 180)
+            self.assertNotIn("expire_after", config)
+            self.assertNotIn("availability_topic", config)
 
     async def test_read_timeout_is_not_an_empty_or_cached_fault_list(self):
         self.configure_read()
@@ -1174,10 +1177,19 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             stream = self.receiver.connection_diagnostics()["receive_stream"]
             self.assertEqual(stream["recent_framing_errors"], 1)
 
-    def test_startup_corruption_remains_fatal(self):
+    def test_startup_corruption_uses_the_same_bounded_recovery(self):
         self.receiver._startup = SimpleNamespace(ready=False)
         self.receiver._decoder.feed(b"\x7f\x00\x00")
-        with self.assertRaisesRegex(self.api.ProtocolError, "length XOR"):
+        self.receiver._record_stream_errors()
+        self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
+        self.assertTrue(self.receiver._decoder.resynchronizing)
+        for _ in range(self.api.RECEIVE_ERROR_LIMIT - 2):
+            self.receiver._decoder.feed(self.packet(b"\xff") * 2)
+            self.receiver._decoder.feed(b"\x7f\x00\x00")
+            self.receiver._record_stream_errors()
+        self.receiver._decoder.feed(self.packet(b"\xff") * 2)
+        self.receiver._decoder.feed(b"\x7f\x00\x00")
+        with self.assertRaisesRegex(self.bleak_error, "Too many malformed"):
             self.receiver._record_stream_errors()
 
     async def test_persistent_corruption_without_valid_packets_times_out(self):
@@ -1386,6 +1398,55 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.disconnect.await_count, 2)
         self.assertEqual(self.receiver._decoder.pending_bytes, 0)
 
+    async def test_startup_recovers_initial_fragment_and_negotiation_noise(
+        self,
+    ):
+        for command in (None, 0, 9, 130, 153):
+            with self.subTest(command=command):
+                self.configure_startup_session()
+                original_subscribe = self.client.start_notify.side_effect
+                original_write = self.client.write_gatt_char.side_effect
+                errors_before = self.receiver.health.counters["framing_errors"]
+                injected = False
+
+                def noise():
+                    nonlocal injected
+                    injected = True
+                    self.receiver._notification_received(
+                        None, b"\x7f\x00\x00" + self.packet(b"\xff") * 2
+                    )
+
+                async def subscribe(characteristic, callback):
+                    if command is None and not injected:
+                        noise()
+                    await original_subscribe(characteristic, callback)
+
+                async def write(characteristic, packet, *, response):
+                    if command == packet[2] and not injected:
+                        noise()
+                    await original_write(
+                        characteristic, packet, response=response
+                    )
+
+                self.client.start_notify.side_effect = subscribe
+                self.client.write_gatt_char.side_effect = write
+                self.bridge.async_process_j1587.reset_mock()
+                with self.assertRaisesRegex(
+                    self.bleak_error, "Bluetooth connection lost"
+                ):
+                    await asyncio.wait_for(
+                        self.receiver._async_receive_session(), 2
+                    )
+                self.assertTrue(injected)
+                self.assertEqual(
+                    self.receiver.health.counters["framing_errors"],
+                    errors_before + 1,
+                )
+                self.assertEqual(self.startup_bodies.count(b"\x99\x01"), 1)
+                self.bridge.async_process_j1587.assert_awaited_once()
+        self.assertEqual(self.client.disconnect.await_count, 5)
+        self.assertEqual(self.receiver._decoder.pending_bytes, 0)
+
     async def test_authentication_rejection_is_visible_and_never_starts_data(
         self,
     ):
@@ -1474,7 +1535,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                         payload, retain = messages[
                             f"vehicle/coach/j1587/{mid}/pid/{pid}"
                         ]
-                        self.assertFalse(retain)
+                        self.assertTrue(retain)
                         state = json.loads(payload)
                         self.assertEqual(state["value"], text.decode("ascii"))
                         self.assertEqual(state["identity_basis"],

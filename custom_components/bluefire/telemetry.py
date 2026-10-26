@@ -41,6 +41,7 @@ _DISPLAY_PRECISION = {
     "%": 1, "°C": 1, "rpm": 2, "kPa": 2, "km/h": 2,
     "L/h": 2, "h": 2, "km": 2, "V": 2, "L": 2, "km/L": 2,
 }
+LAST_DATA_PUBLISH_INTERVAL = 15
 
 
 def valid_vehicle_id(value: str) -> bool:
@@ -79,6 +80,47 @@ class Frame:
 # topic, JSON/string payload, retain. Inject Home Assistant's MQTT publisher.
 Publish = Callable[[str, str, bool], Awaitable[None]]
 SaveDiscovery = Callable[[list[list[int]]], Awaitable[None]]
+SaveIdentification = Callable[[list[dict]], Awaitable[None]]
+
+
+def last_known_entity(signal) -> bool:
+    """Static identities and cumulative counters are not live measurements."""
+    return (
+        isinstance(signal, IdentificationParameter)
+        or getattr(signal, "state_class", None) == "total_increasing"
+    )
+
+
+def validated_identification(value) -> list[dict]:
+    """Restore bounded, decodable identity bytes, never stored metadata."""
+    if not isinstance(value, list):
+        return []
+    records = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        mid, pid = item.get("mid"), item.get("pid")
+        data, timestamp = item.get("data"), item.get("timestamp")
+        if (
+            type(mid) is not int or not 128 <= mid <= 255
+            or type(pid) is not int or pid not in (234, 237, 243)
+            or not isinstance(data, str) or len(data) > 510
+            or not isinstance(timestamp, str)
+        ):
+            continue
+        try:
+            observed = datetime.fromisoformat(timestamp)
+            report = J1587Report(mid, pid, bytes.fromhex(data))
+            decoded = decode_report(report)["identification"]
+        except ValueError:
+            continue
+        if observed.tzinfo is None or decoded["value"] is None:
+            continue
+        records[mid, pid] = {
+            "mid": mid, "pid": pid, "data": report.data.hex(),
+            "timestamp": observed.isoformat(),
+        }
+    return [records[key] for key in sorted(records)]
 
 
 def validated_signal_ids(value) -> list[list[int]]:
@@ -106,7 +148,7 @@ def _validated_ids(value, entities, minimum, maximum) -> list[list[int]]:
 class MqttBridge:
     """Publish protocol-separated, unit-explicit measurements and diagnostics.
 
-    This is a receiver sink, not a BLE decoder. Live state is never retained.
+    Live state is never retained; identity and counters are last-known values.
     Call async_disconnected on every transport loss and before reconnecting.
     """
 
@@ -128,6 +170,8 @@ class MqttBridge:
         save_j1587: SaveDiscovery | None = None,
         j1708_polling: bool = False,
         engine_profile: str = "generic",
+        known_identification: list[dict] | None = None,
+        save_identification: SaveIdentification | None = None,
     ) -> None:
         if not valid_vehicle_id(vehicle_id):
             raise ValueError("Invalid vehicle identifier")
@@ -148,8 +192,12 @@ class MqttBridge:
         self._save_discovery = save_discovery
         self._clock = clock
         self._last_frame: float | None = None
+        self._last_data: str | None = None
+        self._last_data_published: str | None = None
+        self._last_data_publish_time: float | None = None
         self._online = False
         self._identification: dict[int, dict[int, dict]] = {}
+        self._save_identification = save_identification
         self._identification_listeners: list[Callable[[], None]] = []
         self._j1708_polling = j1708_polling
         self._availability_timeout = (
@@ -163,6 +211,24 @@ class MqttBridge:
             self._known_signals.add((source, spn))
             topic, payload = self._discovery_message(source, catalog[spn])
             self.discovery[topic] = payload
+        if self.protocol == "j1587":
+            for record in validated_identification(known_identification):
+                report = J1587Report(
+                    record["mid"], record["pid"], bytes.fromhex(record["data"])
+                )
+                self._identification.setdefault(report.mid, {})[
+                    report.pid
+                ] = {
+                    **self._j1587_metadata(report, record["timestamp"]),
+                    **decode_report(report)["identification"],
+                    "value_basis": "last_observed",
+                    "last_observed": record["timestamp"],
+                }
+                self._known_signals.add((report.mid, report.pid))
+                topic, payload = self._discovery_message(
+                    report.mid, catalog[report.pid]
+                )
+                self.discovery[topic] = payload
         self.j1587 = (
             J1587MqttBridge(
                 vehicle_id, publish, discovery_prefix=discovery_prefix,
@@ -170,6 +236,8 @@ class MqttBridge:
                 save_discovery=save_j1587, clock=clock,
                 j1708_polling=j1708_polling,
                 engine_profile=engine_profile,
+                known_identification=known_identification,
+                save_identification=save_identification,
             ) if self.protocol == "j1939" else None
         )
 
@@ -209,6 +277,7 @@ class MqttBridge:
             "discovery_prefix": self.discovery_prefix,
             "device_name": self.device_name,
             "online": self._online,
+            "last_data": self._last_data,
             "last_frame_age_s": (
                 None if self._last_frame is None
                 else round(self._clock() - self._last_frame, 3)
@@ -232,7 +301,7 @@ class MqttBridge:
         return result
 
     async def async_disconnected(
-        self, *, clear_identification: bool = True,
+        self, *, clear_identification: bool = False,
     ) -> None:
         """Invalidate freshness and withdraw retained online state."""
         if self.j1587 is not None:
@@ -246,6 +315,7 @@ class MqttBridge:
                 self._identification.clear()
                 self._identification_changed()
             await self.publish(self.availability_topic, "offline", True)
+            await self._async_publish_last_data()
 
     async def async_check_stale(self) -> None:
         """Expire device availability without replaying old measurements."""
@@ -260,16 +330,68 @@ class MqttBridge:
                 self._last_frame = None
                 self._online = False
                 await self.publish(self.availability_topic, "offline", True)
+                await self._async_publish_last_data()
 
     async def async_rediscover(self) -> None:
-        """Replay definitions, not cached readings, on MQTT/HA restart."""
+        """Replay definitions and static identities, never live readings."""
         async with self._frame_lock:
             topic, payload = self._connectivity_discovery_message()
             await self.publish(topic, payload, True)
+            topic, payload = self._last_data_discovery_message()
+            await self.publish(topic, payload, True)
             for topic, payload in self.discovery.items():
                 await self.publish(topic, payload, True)
+            for report in self.identification_reports:
+                if report["value"] is not None:
+                    await self.publish(
+                        f"{self.prefix}/{report['mid']}/pid/{report['pid']}",
+                        json.dumps(report), True,
+                    )
         if self.j1587 is not None:
             await self.j1587.async_rediscover()
+
+    def _last_data_discovery_message(self) -> tuple[str, str]:
+        _, payload = self._connectivity_discovery_message()
+        config = json.loads(payload)
+        unique_id = f"bluefire_{self.vehicle_id}_{self.protocol}_last_data"
+        for key in ("payload_on", "payload_off"):
+            del config[key]
+        config.update(
+            name=f"{self.protocol.upper()} last data seen",
+            unique_id=unique_id,
+            state_topic=f"{self.prefix}/last_data",
+            device_class="timestamp",
+            value_template="{{ value_json.timestamp }}",
+        )
+        return (
+            f"{self.discovery_prefix}/sensor/{unique_id}/config",
+            json.dumps(config),
+        )
+
+    async def _async_publish_last_data(self) -> None:
+        if (
+            self._last_data is not None
+            and self._last_data != self._last_data_published
+        ):
+            await self.publish(
+                f"{self.prefix}/last_data",
+                json.dumps({"timestamp": self._last_data}), True,
+            )
+            self._last_data_published = self._last_data
+            self._last_data_publish_time = self._clock()
+
+    async def _async_data_seen(self, timestamp: str) -> None:
+        self._last_frame = self._clock()
+        self._last_data = timestamp
+        if (
+            self._last_data_publish_time is None
+            or self._last_frame - self._last_data_publish_time
+            >= LAST_DATA_PUBLISH_INTERVAL
+        ):
+            await self._async_publish_last_data()
+        if not self._online:
+            await self.publish(self.availability_topic, "online", True)
+            self._online = True
 
     def _connectivity_discovery_message(self) -> tuple[str, str]:
         unique_id = (
@@ -369,7 +491,6 @@ class MqttBridge:
         elif isinstance(signal, IdentificationParameter):
             config["entity_category"] = "diagnostic"
             config["json_attributes_topic"] = config["state_topic"]
-            del config["expire_after"]
         elif isinstance(signal, StatusParameter):
             config["json_attributes_topic"] = config["state_topic"]
         else:
@@ -394,8 +515,39 @@ class MqttBridge:
                 )
             if signal.device_class:
                 config["device_class"] = signal.device_class
+        if last_known_entity(signal):
+            for key in (
+                "expire_after", "availability_topic",
+                "payload_available", "payload_not_available",
+            ):
+                del config[key]
+            if "json_attributes_template" in config:
+                config["json_attributes_template"] = (
+                    config["json_attributes_template"].replace(
+                        "} | tojson",
+                        ", 'last_observed': value_json.last_observed, "
+                        "'value_basis': value_json.value_basis} | tojson",
+                    )
+                )
         topic = f"{self.discovery_prefix}/sensor/{unique_id}/config"
         return topic, json.dumps(config)
+
+    async def _async_publish_value(
+        self, source: int, signal, state: dict,
+    ) -> None:
+        retained = last_known_entity(signal)
+        if retained:
+            if state["value"] is None:
+                return
+            state = {
+                **state, "value_basis": "last_observed",
+                "last_observed": state["timestamp"],
+            }
+        namespace = "pid" if self.protocol == "j1587" else "spn"
+        await self.publish(
+            f"{self.prefix}/{source}/{namespace}/{signal.spn}",
+            json.dumps(state), retained,
+        )
 
     async def _async_remember(self, source: int, spn: int) -> None:
         """Persist ownership before creating retained broker configuration."""
@@ -476,17 +628,12 @@ class MqttBridge:
                         )
                         await self.publish(topic, payload, True)
                         self.discovery[topic] = payload
-                    await self.publish(
-                        (
-                            f"{self.prefix}/{report.source_address}"
-                            f"/spn/{signal.spn}"
-                        ),
-                        json.dumps({
+                    await self._async_publish_value(
+                        report.source_address, signal, {
                             **common,
                             **signal.metadata(),
                             "value": signal.decode(report.data),
-                        }),
-                        False,
+                        },
                     )
                 diagnostic = next(
                     (
@@ -518,12 +665,7 @@ class MqttBridge:
                         False,
                     )
             if report.source_address < 254 and report.data:
-                self._last_frame = self._clock()
-                if not self._online:
-                    await self.publish(
-                        self.availability_topic, "online", True
-                    )
-                    self._online = True
+                await self._async_data_seen(timestamp)
 
     async def async_process_obd_report(self, report: ObdReport) -> None:
         """Preserve OBD reports separately without relabeling them."""
@@ -583,9 +725,6 @@ class MqttBridge:
         for signal in SIGNALS:
             if signal.pgn != frame.pgn:
                 continue
-            state_topic = (
-                f"{self.prefix}/{frame.source_address}/spn/{signal.spn}"
-            )
             discovery_topic, payload = self._discovery_message(
                 frame.source_address, signal
             )
@@ -593,14 +732,12 @@ class MqttBridge:
                 await self._async_remember(frame.source_address, signal.spn)
                 await self.publish(discovery_topic, payload, True)
                 self.discovery[discovery_topic] = payload
-            await self.publish(
-                state_topic,
-                json.dumps({
+            await self._async_publish_value(
+                frame.source_address, signal, {
                     **common,
                     **signal.metadata(),
                     "value": signal.decode(frame.data),
-                }),
-                False,
+                },
             )
         if diagnostic is not None:
             discovery_topic, payload = self._discovery_message(
@@ -617,28 +754,40 @@ class MqttBridge:
                 json.dumps({**common, **faults}), False,
             )
         # A transport connection alone is not evidence of usable vehicle data.
-        self._last_frame = self._clock()
-        if not self._online:
-            await self.publish(self.availability_topic, "online", True)
-            self._online = True
+        await self._async_data_seen(timestamp)
 
-    async def async_remove_discovery(self) -> None:
+    async def async_remove_discovery(
+        self, *, clear_retained: bool = True,
+    ) -> None:
         """Remove definitions including those restored from storage."""
-        await self.async_disconnected()
-        await self._async_remove_definitions()
+        await self.async_disconnected(clear_identification=True)
+        await self._async_remove_definitions(clear_retained=clear_retained)
         if self.j1587 is not None:
-            await self.j1587._async_remove_definitions()
+            await self.j1587._async_remove_definitions(
+                clear_retained=clear_retained
+            )
 
-    async def _async_remove_definitions(self) -> None:
+    async def _async_remove_definitions(
+        self, *, clear_retained: bool = True,
+    ) -> None:
         async with self._frame_lock:
             topic, _ = self._connectivity_discovery_message()
             await self.publish(topic, "", True)
+            topic, _ = self._last_data_discovery_message()
+            await self.publish(topic, "", True)
+            if clear_retained:
+                await self.publish(f"{self.prefix}/last_data", "", True)
             for source, spn in sorted(self._known_signals):
                 signal = next(
                     item for item in self.entities if item.spn == spn
                 )
                 topic, _ = self._discovery_message(source, signal)
                 await self.publish(topic, "", True)
+                if clear_retained and last_known_entity(signal):
+                    namespace = "pid" if self.protocol == "j1587" else "spn"
+                    await self.publish(
+                        f"{self.prefix}/{source}/{namespace}/{spn}", "", True
+                    )
             if self._save_discovery is not None:
                 await self._save_discovery([])
             self._known_signals.clear()
@@ -652,6 +801,25 @@ class J1587MqttBridge(MqttBridge):
     entities = J1587_ENTITIES
     validate_ids = staticmethod(validated_j1587_ids)
 
+    def _j1587_metadata(self, report: J1587Report, timestamp: str) -> dict:
+        common = {
+            "schema_version": 1, "protocol": "j1587",
+            "datalink": "j1708", "vehicle_id": self.vehicle_id,
+            "mid": report.mid, "pid": report.pid,
+            "source_name": source_name(report.mid, j1587=True),
+            "source_name_basis": "conventional_mid_not_verified_identity",
+            "catalog_version": CATALOG_VERSION,
+            "timestamp": timestamp,
+        }
+        if report.mid == 128 and self.diagnostic_profile is not None:
+            common.update(
+                source_name=ENGINE_PROFILES[self.engine_profile],
+                source_name_basis="configured_official_equipment_labels",
+                engine_profile=self.engine_profile,
+                diagnostic_profile=self.diagnostic_profile,
+            )
+        return common
+
     async def async_process_frame(self, frame: Frame) -> None:
         raise ValueError("J1587 accepts parameter reports, not CAN frames")
 
@@ -661,28 +829,29 @@ class J1587MqttBridge(MqttBridge):
             profile=self.diagnostic_profile if report.mid == 128 else None,
         )
         async with self._frame_lock:
-            common = {
-                "schema_version": 1, "protocol": "j1587",
-                "datalink": "j1708", "vehicle_id": self.vehicle_id,
-                "mid": report.mid, "pid": report.pid,
-                "source_name": source_name(report.mid, j1587=True),
-                "source_name_basis": "conventional_mid_not_verified_identity",
-                "catalog_version": CATALOG_VERSION,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            if report.mid == 128 and self.diagnostic_profile is not None:
-                common.update(
-                    source_name=ENGINE_PROFILES[self.engine_profile],
-                    source_name_basis="configured_official_equipment_labels",
-                    engine_profile=self.engine_profile,
-                    diagnostic_profile=self.diagnostic_profile,
-                )
+            common = self._j1587_metadata(
+                report, datetime.now(timezone.utc).isoformat()
+            )
             identification = decoded.get("identification")
             if identification is not None:
-                self._identification.setdefault(report.mid, {})[
-                    report.pid
-                ] = {**common, **identification}
-                self._identification_changed()
+                previous = self.identification_report(report.mid, report.pid)
+                if (
+                    identification["value"] is not None or previous is None
+                    or previous["value"] is None
+                ):
+                    self._identification.setdefault(report.mid, {})[
+                        report.pid
+                    ] = {
+                        **common, **identification,
+                        "value_basis": "last_observed",
+                        "last_observed": common["timestamp"],
+                    }
+                    self._identification_changed()
+                if self._save_identification is not None:
+                    await self._async_remember(report.mid, report.pid)
+                    await self._save_identification(validated_identification(
+                        self.identification_reports
+                    ))
             await self.publish(
                 f"{self.prefix}/{report.mid}/report",
                 json.dumps({
@@ -706,12 +875,13 @@ class J1587MqttBridge(MqttBridge):
                     else identification if identification is not None
                     else decoded["signals"][0]
                 )
-                kind = "faults" if diagnostic is not None else "pid"
-                await self.publish(
-                    f"{self.prefix}/{report.mid}/{kind}/{report.pid}",
-                    json.dumps({**common, **state}), False,
-                )
-            self._last_frame = self._clock()
-            if not self._online:
-                await self.publish(self.availability_topic, "online", True)
-                self._online = True
+                if diagnostic is not None:
+                    await self.publish(
+                        f"{self.prefix}/{report.mid}/faults/{report.pid}",
+                        json.dumps({**common, **state}), False,
+                    )
+                else:
+                    await self._async_publish_value(
+                        report.mid, entity, {**common, **state},
+                    )
+            await self._async_data_seen(common["timestamp"])
