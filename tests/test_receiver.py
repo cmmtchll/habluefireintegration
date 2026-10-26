@@ -1177,6 +1177,31 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             stream = self.receiver.connection_diagnostics()["receive_stream"]
             self.assertEqual(stream["recent_framing_errors"], 1)
 
+    def test_recovered_traffic_does_not_exhaust_corruption_budget(self):
+        report = self.packet(bytes.fromhex("9a 80 be 02 a0 0f"))
+        chunk = b"\x7f\x00\x00" + report * 2
+        with patch.object(self.api, "monotonic", return_value=0):
+            for _ in range(self.api.RECEIVE_ERROR_LIMIT * 2):
+                bodies = self.receiver._decoder.feed(chunk)
+                self.assertEqual(len(bodies), 2)
+                self.receiver._record_stream_errors(recovered=bool(bodies))
+        self.assertEqual(
+            self.receiver.health.counters["framing_errors"], 20
+        )
+        self.assertEqual(
+            self.receiver.connection_diagnostics()[
+                "receive_stream"
+            ]["recent_framing_errors"], 0,
+        )
+
+    def test_clean_recovery_clears_previous_corruption_budget(self):
+        self.receiver._decoder.feed(b"\x7f\x00\x00")
+        self.receiver._record_stream_errors()
+        bodies = self.receiver._decoder.feed(self.packet(b"\xff") * 2)
+        self.receiver._record_stream_errors(recovered=bool(bodies))
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(list(self.receiver._framing_error_times), [])
+
     def test_startup_corruption_uses_the_same_bounded_recovery(self):
         self.receiver._startup = SimpleNamespace(ready=False)
         self.receiver._decoder.feed(b"\x7f\x00\x00")

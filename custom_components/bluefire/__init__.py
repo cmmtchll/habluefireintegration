@@ -140,6 +140,39 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         finally:
             runtime.inspecting = False
 
+    async def cleanup_mqtt(call):
+        from homeassistant.components import mqtt
+
+        from .mqtt import async_confirm_removal
+
+        _, runtime = loaded_runtime(call)
+        dry_run = call.data.get("dry_run", True)
+        if not dry_run and not mqtt.is_connected(hass):
+            raise ServiceValidationError("MQTT must be connected for cleanup")
+        runtime.inspecting = True
+        try:
+            return await runtime.bridge.async_cleanup_unobserved(
+                lambda topic: async_confirm_removal(hass, topic),
+                dry_run=dry_run,
+            )
+        except (HomeAssistantError, TimeoutError) as err:
+            runtime.health.error("mqtt_errors", f"MQTT cleanup failed: {err}")
+            raise HomeAssistantError(
+                "MQTT cleanup was not confirmed; ownership is retained "
+                "for retry"
+            ) from err
+        finally:
+            runtime.inspecting = False
+
+    hass.services.async_register(
+        DOMAIN, "cleanup_mqtt", cleanup_mqtt,
+        schema=vol.Schema({
+            vol.Required("entry_id"): cv.string,
+            vol.Optional("dry_run", default=True): bool,
+        }),
+        supports_response=SupportsResponse.ONLY,
+    )
+
     from .catalog import lookup
     from .j1587 import READABLE_PIDS
 
@@ -278,7 +311,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def mqtt_ready() -> None:
         await async_flush_removals(hass, ledger)
-        await bridge.async_disconnected(clear_identification=False)
+        await bridge.async_disconnected(reset_receive=False)
         await bridge.async_rediscover()
 
     async def birth_received(message):
@@ -345,7 +378,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if mqtt.is_connected(hass):
         await mqtt_ready()
     await hass.config_entries.async_forward_entry_setups(
-        entry, [Platform.SENSOR]
+        entry, [Platform.SENSOR, Platform.BINARY_SENSOR]
     )
     return True
 
@@ -356,7 +389,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.const import Platform
 
     if not await hass.config_entries.async_unload_platforms(
-        entry, [Platform.SENSOR]
+        entry, [Platform.SENSOR, Platform.BINARY_SENSOR]
     ):
         return False
     from homeassistant.exceptions import HomeAssistantError

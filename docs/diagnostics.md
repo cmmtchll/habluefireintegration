@@ -91,8 +91,12 @@ packets with valid length headers and payload checksums** before resuming a
 damaged stream. It preserves intact packets across notification boundaries and
 buffers at most **528 bytes**.
 
-Ten framing errors within ten seconds trigger reconnect. So do **30 seconds
-without any checksum-valid packet**, even if malformed notifications continue.
+Ten framing errors within ten seconds **without recovered packets** trigger
+reconnect. Recovering checksum-valid packets resets that error budget; all
+framing errors remain counted and logged. This avoids restarting a working
+session just because its recoverable errors accumulate. **30 seconds without
+any checksum-valid packet** still triggers reconnect, even if malformed
+notifications continue.
 Startup keeps its per-exchange deadlines and accepts only checksum-verified
 responses matching the expected command. Explicit authentication/subscription
 rejection, queue overflow, and actual BLE loss remain fail-closed.
@@ -142,6 +146,9 @@ Counters are in-memory `total_increasing` values and reset on HA restart.
 | Entity | Meaning |
 | --- | --- |
 | Protocol status | `receiver_enabled` indicates the receiver is enabled |
+| Bluetooth connectivity | Connected while the live BLE notification subscriptions are active |
+| J1708 telemetry connectivity | Fresh valid J1587 reports over J1708 and an active BLE session; not just startup `ready` or heartbeats |
+| J1939 telemetry connectivity | Fresh J1939 data and an active BLE session; J1708 traffic cannot keep it connected |
 | Last data seen | Last received BLE notification time, not necessarily valid telemetry |
 | Last advertisement | Last passive advertisement; attributes show presence and scanner/proxy |
 | Signal strength | Latest RSSI in dBm, unknown if HA reports unavailable; min/max/mean/spread attributes |
@@ -158,6 +165,11 @@ Counters are in-memory `total_increasing` values and reset on HA restart.
 RSSI and advertisement information come from HA's passive tracking, without
 connecting. Other counters update during reception/capture. Native controller
 identification sensors are described in the [J1708 guide](j1708.md#controller-identification).
+Connectivity binary sensors poll every 15 seconds and read local receive state,
+not MQTT retained messages. Protocol freshness is 60 seconds, or 180 seconds
+for J1708 with polling enabled. Native connectivity remains independent of
+MQTT publish failures. For obsolete MQTT entities, use the
+[manual cleanup preview](mqtt.md#remove-old-entities-without-removing-the-adapter).
 
 ## Report a problem
 

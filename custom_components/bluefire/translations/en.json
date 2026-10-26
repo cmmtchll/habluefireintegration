@@ -71,6 +71,20 @@
     }
   },
   "services": {
+    "cleanup_mqtt": {
+      "name": "Clean up old MQTT entities",
+      "description": "Preview owned MQTT entities not observed since this BlueFire reload. Turn off preview to withdraw their retained discovery and last-known states after broker confirmation. Let the vehicle report first; unseen does not mean invalid. Received entities and protocol diagnostics are preserved.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The loaded BlueFire adapter whose MQTT entities should be reviewed."
+        },
+        "dry_run": {
+          "name": "Preview only",
+          "description": "Enabled by default. Returns candidate topics without deleting anything. Disable to remove entities still unobserved when the action runs."
+        }
+      }
+    },
     "read_odometer": {
       "name": "Read odometer",
       "description": "Send a one-shot J1708 PID 245 request and collect reports for five seconds. Updates existing MQTT total-distance sensors and returns kilometres per responding controller. Requires ready, opt-in J1708 startup. No response is an error; unavailable values remain null.",
