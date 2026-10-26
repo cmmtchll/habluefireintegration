@@ -16,7 +16,7 @@ from custom_components.bluefire.j1587 import (
 )
 from custom_components.bluefire.protocol import J1587Report, ProtocolError
 from custom_components.bluefire.telemetry import (
-    Frame, MqttBridge, validated_j1587_ids,
+    Frame, MqttBridge, validated_identification, validated_j1587_ids,
 )
 from scripts.analyze_bluefire import analyze_capture, analyze_j1708, main
 
@@ -35,6 +35,38 @@ def packet(body):
 
 
 class ParameterTests(unittest.TestCase):
+    def test_persisted_identification_is_validated_and_metadata_rebuilt(self):
+        valid = {
+            "mid": 128, "pid": 234, "data": b"EXAMPLE SOFTWARE".hex(),
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }
+        self.assertEqual(validated_identification(None), [])
+        invalid = [
+            None, [], {}, {**valid, "mid": True}, {**valid, "mid": 127},
+            {**valid, "pid": True}, {**valid, "pid": 190},
+            {**valid, "data": None}, {**valid, "data": "00" * 256},
+            {**valid, "data": "not hex"}, {**valid, "data": "ff"},
+            {**valid, "data": "01"}, {**valid, "timestamp": None},
+            {**valid, "timestamp": "bad date"},
+            {**valid, "timestamp": "2026-01-01"},
+        ]
+        self.assertEqual(validated_identification(invalid), [])
+        self.assertEqual(validated_identification([
+            *invalid, {**valid, "value": "FORGED", "source_name": "FORGED"},
+            valid,
+        ]), [valid])
+        bridge = MqttBridge(
+            "coach", AsyncMock(), known_identification=[valid],
+            engine_profile="detroit_series_60_ddec_iv",
+        )
+        restored = bridge.j1587.identification_report(128, 234)
+        self.assertEqual(restored["value"], "EXAMPLE SOFTWARE")
+        self.assertEqual(restored["source_name"],
+                         "Detroit Diesel Series 60 / DDEC IV")
+        self.assertEqual(restored["last_observed"], valid["timestamp"])
+        self.assertFalse(bridge.j1587._online)
+        self.assertIsNone(bridge.j1587._last_frame)
+
     def test_identification_text_is_reported_not_inferred(self):
         for parameter, data in zip(IDENTIFICATION_PARAMETERS, (
             b"ECU SOFTWARE EXAMPLE*REV A",
@@ -350,6 +382,95 @@ class ReplayTests(unittest.TestCase):
 
 
 class PublishingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_identity_never_erases_last_valid_or_timestamp(self):
+        save = AsyncMock()
+        bridge = MqttBridge(
+            "coach", self.publish, save_identification=save,
+        )
+        await bridge.async_process_j1587(
+            J1587Report(128, 237, b"EXAMPLE VIN")
+        )
+        original = bridge.j1587.identification_report(128, 237)
+        saved = save.await_args.args[0]
+        for data in (b"", b"  ", b"\xff", b"\x01"):
+            self.publish.reset_mock()
+            await bridge.async_process_j1587(J1587Report(128, 237, data))
+            self.assertEqual(bridge.j1587.identification_report(128, 237),
+                             original)
+            self.assertEqual(save.await_args.args[0], saved)
+            self.assertFalse(any(
+                topic.endswith("/pid/237")
+                for topic, _, _ in self.messages()
+            ))
+        await bridge.async_disconnected()
+        self.publish.reset_mock()
+        await bridge.async_rediscover()
+        self.assertIn((
+            "vehicle/coach/j1587/128/pid/237", json.dumps(original), True,
+        ), self.messages())
+        self.assertFalse(bridge.j1587._online)
+        self.assertFalse(any(payload == "online"
+                             for _, payload, _ in self.messages()))
+
+    async def test_identity_storage_failure_is_explicit_and_retried(self):
+        save = AsyncMock(side_effect=OSError("disk unavailable"))
+        bridge = MqttBridge(
+            "coach", self.publish, save_identification=save,
+        )
+        report = J1587Report(128, 234, b"EXAMPLE SOFTWARE")
+        with self.assertRaisesRegex(OSError, "disk unavailable"):
+            await bridge.async_process_j1587(report)
+        self.assertEqual(bridge.j1587.identification_report(128, 234)["value"],
+                         "EXAMPLE SOFTWARE")
+        self.publish.assert_not_awaited()
+        save.side_effect = None
+        await bridge.async_process_j1587(report)
+        restored = MqttBridge(
+            "coach", self.publish,
+            known_identification=save.await_args.args[0],
+        )
+        self.assertEqual(restored.j1587.identification_report(128, 234)[
+            "value"], "EXAMPLE SOFTWARE")
+        self.assertEqual(save.await_count, 2)
+
+    async def test_counters_retained_but_live_values_and_faults_are_not(self):
+        for parameter in PARAMETERS:
+            await self.bridge.async_process_j1587(
+                J1587Report(128, parameter.pid, bytes(parameter.length))
+            )
+        await self.bridge.async_process_j1587(J1587Report(128, 194, b""))
+        messages = {topic: (payload, retained)
+                    for topic, payload, retained in self.messages()}
+        for parameter in PARAMETERS:
+            topic = f"vehicle/coach/j1587/128/pid/{parameter.pid}"
+            payload, retained = messages[topic]
+            config_topic = (
+                "homeassistant/sensor/"
+                f"bluefire_coach_j1587_128_{parameter.pid}/config"
+            )
+            config = json.loads(messages[config_topic][0])
+            expected = parameter.state_class == "total_increasing"
+            self.assertEqual(retained, expected)
+            if expected:
+                self.assertNotIn("expire_after", config)
+                self.assertNotIn("availability_topic", config)
+                state = json.loads(payload)
+                self.assertEqual(state["last_observed"], state["timestamp"])
+                self.assertEqual(state["value_basis"], "last_observed")
+                self.assertIn("'last_observed': value_json.last_observed",
+                              config["json_attributes_template"])
+                self.publish.reset_mock()
+                await self.bridge.async_process_j1587(J1587Report(
+                    128, parameter.pid, b"\xff" * parameter.length,
+                ))
+                self.assertFalse(any(
+                    item[0] == topic for item in self.messages()
+                ))
+            else:
+                self.assertIn("expire_after", config)
+                self.assertIn("availability_topic", config)
+        self.assertFalse(messages["vehicle/coach/j1587/128/faults/194"][1])
+
     async def test_selected_engine_identity_fault_catalog_and_stable_ownership(
         self,
     ):
@@ -434,6 +555,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         restored_configs = [
             json.loads(payload) for topic, payload, _ in self.messages()
             if topic.startswith("homeassistant/sensor/")
+            and not topic.endswith("_last_data/config")
         ]
         self.assertEqual(len(restored_configs), 5)
         self.assertTrue(all(c["expire_after"] == 60 for c in restored_configs))
@@ -441,6 +563,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         await restored.async_remove_discovery()
         self.assertEqual(sum(
             payload == "" and topic.startswith("homeassistant/sensor/")
+            and not topic.endswith("_last_data/config")
             for topic, payload, _ in self.messages()
         ), 5)
 
@@ -468,11 +591,15 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             topic = f"vehicle/coach/j1587/{mid}/pid/{pid}"
             self.assertEqual(config["state_topic"], topic)
             self.assertEqual(config["json_attributes_topic"], topic)
-            _, payload, retain = next(
-                item for item in messages if item[0] == topic
-            )
-            self.assertFalse(retain)
-            self.assertEqual(json.loads(payload)["mid"], mid)
+            self.assertNotIn("availability_topic", config)
+            if mid == 175:
+                self.assertFalse(any(item[0] == topic for item in messages))
+            else:
+                _, payload, retain = next(
+                    item for item in messages if item[0] == topic
+                )
+                self.assertTrue(retain)
+                self.assertEqual(json.loads(payload)["mid"], mid)
         snapshot = self.bridge.diagnostics()["j1587"][
             "controller_identification"
         ]
@@ -497,11 +624,10 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(
             payload == "" and topic.endswith("/config") and retain
             for topic, payload, retain in self.messages()
-        ), 7)
+        ), 9)
         await self.bridge.async_disconnected()
-        self.assertEqual(
-            self.bridge.diagnostics()["j1587"]["controller_identification"], {}
-        )
+        self.assertEqual(self.bridge.diagnostics()["j1587"][
+            "controller_identification"], snapshot)
         self.assertTrue(snapshot["128"]["243"]["value"])
 
     async def test_polling_extends_only_selected_reading_expiry(self):
@@ -521,16 +647,18 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             for topic, payload, _ in self.messages()
             if topic.endswith("/config")
         }
-        for pid, expiry in (
-            (96, 180), (194, 180), (245, 180), (247, 180), (250, 180),
-            (190, 60),
-        ):
+        for pid, expiry in ((96, 180), (194, 180), (190, 60)):
             self.assertEqual(
                 configs["homeassistant/sensor/"
                         f"bluefire_coach_j1587_128_{pid}/config"]
                 ["expire_after"],
                 expiry,
             )
+        for pid in (245, 247, 250):
+            config = configs["homeassistant/sensor/"
+                             f"bluefire_coach_j1587_128_{pid}/config"]
+            self.assertNotIn("expire_after", config)
+            self.assertNotIn("availability_topic", config)
         self.assertEqual(
             configs["homeassistant/sensor/bluefire_coach_0_96/config"]
             ["expire_after"],
@@ -677,6 +805,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         configs = {
             json.loads(p)["name"]: json.loads(p)
             for topic, p, _ in self.messages() if "/sensor/" in topic
+            and not topic.endswith("_last_data/config")
         }
         self.assertEqual(set(configs), {
             "Engine: Coolant temperature",
@@ -756,7 +885,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
             save_j1587=self.save,
         )
         await restored.async_rediscover()
-        self.assertEqual(len(self.messages()), 3)
+        self.assertEqual(len(self.messages()), 5)
         self.assertTrue(all(
             topic.endswith("/config") and retain
             for topic, _, retain in self.messages()
@@ -773,7 +902,7 @@ class PublishingTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.async_process_j1587(
             J1587Report(130, 174, b"\x01\x00")
         )
-        self.assertEqual(len(self.messages()), 2)
+        self.assertEqual(len(self.messages()), 3)
         self.assertTrue(self.messages()[0][0].endswith("/report"))
         self.save.assert_not_awaited()
         self.publish.reset_mock()

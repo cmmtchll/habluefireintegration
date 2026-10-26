@@ -1,4 +1,4 @@
-"""HA MQTT settings and durable discovery ownership (never live readings)."""
+"""HA MQTT settings, discovery ownership and last-known static identity."""
 
 import asyncio
 from dataclasses import dataclass
@@ -7,7 +7,8 @@ from uuid import uuid4
 
 from .const import DOMAIN
 from .telemetry import (
-    MqttBridge, valid_vehicle_id, validated_j1587_ids, validated_signal_ids,
+    MqttBridge, valid_vehicle_id, validated_identification,
+    validated_j1587_ids, validated_signal_ids,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,6 +76,9 @@ class DiscoveryLedger:
                 ),
                 "pending": record.get("pending", False),
                 "pending_offline": record.get("pending_offline") is True,
+                "identification": validated_identification(
+                    record.get("identification", [])
+                ),
             }
         self._loaded = True
 
@@ -96,6 +100,10 @@ class DiscoveryLedger:
                 "j1587_signals": old["j1587_signals"] if old else [],
                 "pending": False,
                 "pending_offline": False,
+                "identification": (
+                    old["identification"] if old
+                    and old["vehicle_id"] == vehicle_id else []
+                ),
             }
             await self.store.async_save(self._records)
             return self._records[entry_id]["signals"]
@@ -105,6 +113,21 @@ class DiscoveryLedger:
         async with self._lock:
             await self._async_load()
             return self._records[entry_id]["j1587_signals"]
+
+    async def async_get_identification(self, entry_id):
+        async with self._lock:
+            await self._async_load()
+            return validated_identification(
+                self._records[entry_id]["identification"]
+            )
+
+    async def async_save_identification(self, entry_id, reports):
+        async with self._lock:
+            await self._async_load()
+            self._records[entry_id]["identification"] = (
+                validated_identification(reports)
+            )
+            await self.store.async_save(self._records)
 
     async def async_save_signals(self, entry_id, signals, *, j1587=False):
         """Write before publishing any new retained discovery definition."""
@@ -130,6 +153,7 @@ class DiscoveryLedger:
             if entry_id in self._records:
                 self._records[entry_id]["pending"] = True
                 self._records[entry_id]["pending_offline"] = False
+                self._records[entry_id]["identification"] = []
                 await self.store.async_save(self._records)
 
     async def async_queue_offline(self, entry_id):
@@ -183,15 +207,17 @@ class DiscoveryLedger:
                     discovery_prefix=record["discovery_prefix"],
                     known_signals=record["signals"],
                     known_j1587=record["j1587_signals"],
+                    known_identification=record["identification"],
                 )
-                await bridge.async_remove_discovery()
                 # A prefix change may leave an active entry on the same state
                 # topics. Its current lifecycle publishes availability.
-                if not any(
+                active = any(
                     not other["pending"]
                     and other["vehicle_id"] == record["vehicle_id"]
                     for other in self._records.values()
-                ):
+                )
+                await bridge.async_remove_discovery(clear_retained=not active)
+                if not active:
                     await publish(bridge.availability_topic, "", True)
                     await publish(bridge.j1587.availability_topic, "", True)
                 del self._records[entry_id]

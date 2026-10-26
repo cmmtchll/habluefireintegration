@@ -272,7 +272,7 @@ class AnnotationPublishingTests(unittest.IsolatedAsyncioTestCase):
             state, retain = messages[
                 f"vehicle/coach/j1939/0/spn/{signal.spn}"
             ]
-            self.assertFalse(retain)
+            self.assertEqual(retain, signal.state_class == "total_increasing")
             for key, value in signal.metadata().items():
                 self.assertEqual(state[key], value)
             self.assertEqual(state["source_name"], "Engine")

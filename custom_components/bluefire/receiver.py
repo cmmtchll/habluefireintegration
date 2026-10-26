@@ -329,8 +329,6 @@ class BlueFireReceiver:
         errors = self._decoder.framing_errors
         if not errors:
             return
-        if self._startup is not None and not self._startup.ready:
-            raise ProtocolError(errors[0])
         now = monotonic()
         for error in errors:
             self._framing_error_times.append(now)

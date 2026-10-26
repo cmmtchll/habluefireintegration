@@ -80,6 +80,7 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.disk["entry"]), {
             "vehicle_id", "discovery_prefix", "signals", "pending",
             "j1587_signals", "pending_offline",
+            "identification",
         })
 
     async def test_j1587_survives_reload_prefix_change_and_entry_removal(self):
@@ -115,6 +116,63 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.publish.assert_any_await(
             "vehicle/coach/j1587/availability", "", True
         )
+
+    async def test_identity_survives_restart_and_prefix_but_not_vehicle_change(
+        self,
+    ):
+        identity = [{
+            "mid": 128, "pid": 237, "data": b"EXAMPLE VIN".hex(),
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }]
+        await self.ledger.async_prepare("entry", "coach", "homeassistant")
+        await self.ledger.async_save_signals(
+            "entry", [[128, 237], [128, 245]], j1587=True
+        )
+        await self.ledger.async_save_identification("entry", identity)
+        restored = DiscoveryLedger(self.store)
+        await restored.async_prepare("entry", "coach", "custom")
+        self.assertEqual(await restored.async_get_identification("entry"),
+                         identity)
+        await restored.async_flush_removals(self.publish)
+        self.assertFalse(any(
+            "/pid/" in call.args[0]
+            for call in self.publish.await_args_list
+        ))
+        await restored.async_prepare("entry", "new_coach", "custom")
+        self.assertEqual(await restored.async_get_identification("entry"), [])
+        self.publish.reset_mock()
+        await restored.async_flush_removals(self.publish)
+        for pid in (237, 245):
+            self.publish.assert_any_await(
+                f"vehicle/coach/j1587/128/pid/{pid}", "", True
+            )
+        self.assertEqual(list(self.disk), ["entry"])
+
+    async def test_retained_state_removal_retries_after_broker_failure(self):
+        await self.ledger.async_prepare("entry", "coach", "homeassistant")
+        await self.ledger.async_save_signals(
+            "entry", [[128, 237], [128, 245]], j1587=True
+        )
+        await self.ledger.async_save_identification("entry", [{
+            "mid": 128, "pid": 237, "data": b"EXAMPLE VIN".hex(),
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }])
+        await self.ledger.async_queue_removal("entry")
+        self.assertEqual(self.disk["entry"]["identification"], [])
+
+        async def publish(topic, payload, retain):
+            if topic.endswith("/pid/245"):
+                raise RuntimeError("broker disconnected")
+
+        with self.assertRaisesRegex(RuntimeError, "broker disconnected"):
+            await self.ledger.async_flush_removals(publish)
+        self.assertTrue(self.disk["entry"]["pending"])
+        await DiscoveryLedger(self.store).async_flush_removals(self.publish)
+        self.assertEqual(self.disk, {})
+        for pid in (237, 245):
+            self.publish.assert_any_await(
+                f"vehicle/coach/j1587/128/pid/{pid}", "", True
+            )
 
     async def test_old_ledger_preserves_protocol_identity_boundaries(self):
         self.disk = {"entry": {
@@ -261,9 +319,11 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deleted, [
             "homeassistant/binary_sensor/"
             "bluefire_coach_j1939_connectivity/config",
+            "homeassistant/sensor/bluefire_coach_j1939_last_data/config",
             "homeassistant/sensor/bluefire_coach_0_190/config",
             "homeassistant/binary_sensor/"
             "bluefire_coach_j1587_connectivity/config",
+            "homeassistant/sensor/bluefire_coach_j1587_last_data/config",
         ])
 
 

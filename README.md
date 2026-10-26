@@ -185,15 +185,21 @@ only for received identification reports, with stable config-entry/MID/PID
 identities and attributes containing provenance, raw bytes and decode status.
 Updates use the shared decoded data before MQTT publication, so no MQTT
 subscription or successful publish is required to update a native sensor.
-MQTT reconnect does not clear these native values. BLE disconnect clears
-the session snapshot and makes existing native identification sensors
-unavailable until new responses arrive; reconnect reuses the same entities.
+MQTT and BLE reconnect do not clear these native values. Valid identities are
+persisted locally per config entry and vehicle and restored after an HA restart,
+without marking telemetry online. Reconnect reuses the same entities.
+Missing, blank, unavailable or unsupported responses never replace a previously
+decoded identity. A new valid response refreshes its value and timestamp.
 The BlueFire device's manufacturer/model metadata is not replaced by engine
 or transmission identification.
 
-Identification states are non-retained and are not replayed on MQTT birth.
-Unlike measurements, these static text sensors have no short expiry timer;
-they use J1587 availability. The diagnostic snapshot is cleared on disconnect.
+Identification states are retained at QoS 1 and replayed on MQTT birth/reconnect.
+These static text sensors have no expiry timer or live-telemetry availability
+gate. They remain visible as last-known information while offline, with
+`value_basis: last_observed` and `last_observed`/`timestamp` attributes.
+Changing the MQTT discovery prefix preserves identity; changing the vehicle
+identifier starts a fresh identity cache. Removing the entry deletes the local
+cache and queues retained identity/counter state deletion for broker delivery.
 An ECU that does not support these PIDs creates no identification sensors.
 Long identities requiring J1587 PID 192 multisection assembly remain
 unsupported unless the adapter delivers a complete normalized identification
@@ -218,17 +224,20 @@ and are disabled in receive-only mode. A successful session resets reconnect
 backoff, so earlier startup failures do not leave later recoveries waiting at
 the maximum delay.
 
-After startup, isolated receive framing/checksum errors are counted and logged
-without immediately disconnecting. The live decoder discards corrupt bytes
+During startup and normal operation, isolated receive framing/checksum errors
+are counted and logged without immediately disconnecting. The live decoder
+discards corrupt bytes
 and requires **two adjacent, complete packets with valid length headers and
 payload checksums** before resuming a damaged stream. It preserves intact
 packets before and after corruption, including across notification boundaries,
 and buffers at most 528 bytes. Ten framing errors within ten seconds trigger
 reconnect; 30 seconds without any checksum-valid packet also triggers recovery,
-even if malformed notifications keep arriving. Authentication/startup framing,
-explicit subscription/authentication rejection, queue overflow and actual BLE
-loss remain fail-closed. Offline capture analysis remains strict, so it still
-shows the original corruption rather than hiding it behind live recovery.
+even if malformed notifications keep arriving. Startup retains its existing
+per-exchange deadlines and accepts only checksum-verified responses matching the
+expected command. Explicit subscription/authentication rejection, queue overflow
+and actual BLE loss remain fail-closed. Offline capture analysis remains strict,
+so it still shows the original corruption rather than hiding it behind live
+recovery.
 
 Checksum-valid J1587 reports are also validated before publishing or updating
 telemetry health. Invalid MIDs, incorrect value widths and truncated PID 194
@@ -490,13 +499,14 @@ Restoration uses the existing `OnRequest=0`, `OnInterval=2`, 1000 ms monitor.
 No vendor binaries or implementation are distributed. Active reads still
 require hardware confirmation; synthetic tests are not vehicle commissioning.
 
-With polling enabled, all five polled J1587 sensor types expire after
-**180 seconds** without their own reports, and J1587 protocol availability uses
-the same grace period. Other J1587 sensors and all J1939 sensors retain their
-60-second expiry. Existing MQTT identities and numeric decoding are reused:
-distance, hours and total fuel remain `total_increasing` counters in km, h and L.
-Disconnect still withdraws availability immediately; the longer expiry does
-not replay cached values or claim the controller responded to a failed poll.
+With polling enabled, fuel level and active faults expire after **180 seconds**
+without their own reports, and J1587 protocol availability uses the same grace
+period. Other live J1587 and J1939 sensors keep their 60-second expiry.
+Distance, hours and total fuel remain `total_increasing` counters in km, h and L,
+but now publish retained last-known totals without an expiry or availability
+gate. Their `last_observed` attribute identifies the actual observation time;
+a failed poll or unavailable value does not overwrite a valid retained total.
+Disconnect still withdraws live telemetry availability immediately.
 
 There is no universal list of request-only measurements: broadcast behavior is
 controller-specific. The inspected vendor client has a J1708 odometer-request
@@ -667,14 +677,28 @@ Null/global source addresses 254/255 do not create transmitter entities.
   into a fresh session. There is no lossless CAN recorder or exactly-once claim.
 - Discovery and availability: **QoS 1, retained**. New subscribers see current
   advertised availability. Consumers must tolerate duplicate delivery.
+- Identification and `total_increasing` counters (distance, hours, trip/lifetime
+  fuel and idle totals): **QoS 1, retained** last-known values. They stay visible
+  while offline and expose `value_basis: last_observed` and `last_observed`
+  timestamps. They do not assert that the vehicle is currently connected.
+  Unavailable samples remain visible in raw reports but do not replace retained
+  values. A persistent MQTT broker preserves these states across broker restarts.
+- Each MQTT vehicle device also has **J1939 last data seen** and **J1587 last data
+  seen** diagnostic timestamp sensors, on `vehicle/{vehicle}/{protocol}/last_data`.
+  The retained JSON payload contains `timestamp`, an ISO 8601 observation time.
+  Updates are limited to once per 15 seconds while receiving, with the latest
+  timestamp flushed on disconnect or freshness expiry. Heartbeats, cached
+  identification replay and MQTT rediscovery do not advance it. It remains
+  visible while offline and is removed with the entry.
 - Availability transitions to `online` only after receiving a complete valid
   frame. Disconnect, reconnect initialization, graceful HA shutdown and unloading
   publish `offline`. Definitions are restored across restarts and republished
   on broker reconnect and the configured HA MQTT birth message.
 - A watchdog checks every 15 seconds and withdraws device availability after
-  60 seconds without a frame (at the next check). Each MQTT sensor independently
-  expires 60 seconds after its last update, even if another SPN keeps arriving.
-  With J1708 polling enabled, J1587 protocol availability and polled entity
+  60 seconds without a frame (at the next check). Each live MQTT sensor
+  independently expires 60 seconds after its last update, even if another SPN
+  keeps arriving.
+  With J1708 polling enabled, J1587 protocol availability and polled live entity
   expiry instead use 180 seconds, as described in the polling section above.
   Device availability alone does not establish measurement freshness.
 - The integration uses HA's shared MQTT client and **cannot set a per-device
@@ -905,11 +929,14 @@ uses the configured official-label selection, never MID 128 alone.
 J1939 and J1587 share the adapter device but never state/entity identities.
 For example, **Engine speed - Engine (128)** is a J1587 sensor, distinct from
 J1939's **Engine speed - Engine (0)**. Unknown PIDs are raw-only.
-States are non-retained QoS 0, discovery/availability retained QoS 1.
+Live states are non-retained QoS 0; discovery, availability, last-data timestamps,
+identification and cumulative last-known counters are retained QoS 1.
 J1587 has an independent freshness watchdog (60 seconds for receive-only entries,
 180 seconds with J1708 polling), plus per-entity expiry;
 J1939 traffic cannot keep J1587 online. Disconnect/shutdown/reconnect invalidates
-both protocols; rediscovery never replays readings. MID/PID ownership is stored
+live availability for both protocols; rediscovery never replays live readings.
+Static identity is restored without claiming a new observation. MID/PID
+ownership is stored
 in a separate `j1587_signals` ledger field, preserving old J1939 records and
 cleaning up both protocols after prefix changes or entry removal.
 

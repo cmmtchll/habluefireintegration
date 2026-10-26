@@ -581,7 +581,7 @@ These require engine MID 128 and the explicit Detroit DDEC III/IV reference prof
 
 ## MQTT mapping
 
-All measurement and diagnostic states are non-retained. Discovery and availability are retained. Each protocol has independent freshness and all discovered sensors expire after 60 seconds. The provisional modern EZ BLE receiver is enabled; adapter compatibility remains hardware-unverified. Opt-in unsecured J1708 startup negotiates firmware compatibility, authenticates, subscribes to passive PID reports and enables report flow. Secured adapters are unsupported.
+Live measurement and fault states are non-retained. Discovery, availability, last-data timestamps, controller identification and cumulative counters are retained. Identification/counters remain visible as timestamped last-known values without a live availability gate; unavailable reports never overwrite valid retained values. Native controller identification is also persisted locally across HA restarts. Each protocol has independent freshness: live sensors expire after 60 seconds, or 180 seconds for polled J1587 fuel/fault readings. MQTT last-data sensors update at most every 15 seconds and flush the latest observation on disconnect/expiry. The provisional modern EZ BLE receiver is enabled; adapter compatibility remains hardware-unverified. Opt-in unsecured J1708 startup negotiates firmware compatibility, authenticates, subscribes to passive PID reports and enables report flow. Secured adapters are unsupported.
 
 | Meaning | Topic pattern |
 | --- | --- |

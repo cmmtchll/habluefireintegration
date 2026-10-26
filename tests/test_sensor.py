@@ -321,10 +321,11 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         self.publish.side_effect = RuntimeError("MQTT unavailable")
         with self.assertRaisesRegex(RuntimeError, "MQTT unavailable"):
             await self.bridge.async_disconnected()
-        self.assertFalse(sensor.available)
-        self.assertIsNone(sensor.native_value)
-        self.assertIsNone(sensor.extra_state_attributes)
-        self.assertIsNone(sensor.writes[-1])
+        self.assertTrue(sensor.available)
+        self.assertEqual(sensor.native_value, "UPDATED ENGINE")
+        self.assertEqual(sensor.extra_state_attributes["value_basis"],
+                         "last_observed")
+        self.assertEqual(sensor.writes[-1], "UPDATED ENGINE")
         self.publish.side_effect = None
         await self.bridge.async_process_j1587(
             J1587Report(128, 243, b"RECONNECTED ENGINE")
@@ -354,5 +355,5 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.async_disconnected()
         sensor.removers, sensor.writes = [], []
         await sensor.async_added_to_hass()
-        self.assertFalse(sensor.available)
-        self.assertEqual(sensor.writes, [None])
+        self.assertTrue(sensor.available)
+        self.assertEqual(sensor.writes, ["EARLY SOFTWARE RESPONSE"])
