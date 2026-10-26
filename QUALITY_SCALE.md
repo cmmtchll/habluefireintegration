@@ -1,5 +1,7 @@
 # Home Assistant integration quality scale
 
+[Home](README.md) · [Development](docs/development.md)
+
 This project tracks the Home Assistant Bronze, Silver, Gold, and Platinum
 integration-quality criteria. It is not currently claiming certification at any
 tier. The provisional EZ receiver and opt-in unsecured J1708 startup have

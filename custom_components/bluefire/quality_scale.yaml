@@ -22,7 +22,7 @@ rules:
     comment: Runtime dependencies and Home Assistant integrations are declared in custom_components/bluefire/manifest.json.
   docs-actions:
     status: done
-    comment: Adapter inspection, notification capture and all nine J1708 read actions, target MID selection, the read allowlist and raw-only PID 174 limit are documented in README.md and docs/code-reference.md. Additional manual actions do not expand the five-PID automatic poll set.
+    comment: Adapter inspection and notification capture are documented in docs/diagnostics.md. All nine J1708 read actions, target MID selection and raw-only PID 174 are documented in docs/j1708.md, with the generated allowlist in docs/code-reference.md. Additional manual actions do not expand the five-PID automatic poll set.
   docs-triggers:
     status: exempt
     comment: BlueFire provides no integration-specific triggers to document.
@@ -37,7 +37,7 @@ rules:
     comment: Manual installation and initial setup instructions are provided in README.md.
   docs-removal-instructions:
     status: done
-    comment: Retained MQTT discovery cleanup on permanent entry removal is documented in README.md.
+    comment: Permanent entry removal is documented in docs/getting-started.md, with retained discovery cleanup and broker-confirmation semantics in docs/mqtt.md.
   entity-event-setup:
     status: done
     comment: Health and native controller-identification sensors register update listeners in async_added_to_hass with async_on_remove in custom_components/bluefire/sensor.py. Dynamic identification discovery registers an entry-unload listener and reuses config-entry/MID/PID identities across reconnects; tests/test_sensor.py covers lifecycle cleanup and MQTT-independent updates.
@@ -67,7 +67,7 @@ rules:
     comment: Entry unload and retained-state cleanup are implemented in custom_components/bluefire/__init__.py and covered by tests/test_boundaries.py.
   docs-configuration-parameters:
     status: done
-    comment: Adapter identity, vehicle identifier constraints, MQTT configuration and the explicit official-label Series 60/DDEC IV engine profile are documented in README.md.
+    comment: Adapter identity, vehicle identifier constraints and MQTT configuration are documented in docs/getting-started.md. The explicit official-label Series 60/DDEC IV engine profile is detailed in docs/telemetry.md.
   docs-installation-parameters:
     status: done
     comment: README.md documents manual installation and states the Home Assistant and MQTT prerequisites.
@@ -103,22 +103,22 @@ rules:
     comment: Nearby adapters can be selected manually, but automatic compatible-device discovery is not implemented.
   docs-data-update:
     status: done
-    comment: The MQTT topics, freshness, availability, and update semantics are documented in README.md.
+    comment: The MQTT topics, freshness, availability and update semantics are documented in docs/mqtt.md, with polling behavior in docs/j1708.md.
   docs-examples:
     status: todo
-    comment: The README has a synthetic payload example but no end-user automation examples yet.
+    comment: docs/mqtt.md has a synthetic payload example and docs/j1708.md has a manual read example, but no end-user automation examples are documented yet.
   docs-known-limitations:
     status: done
-    comment: README.md documents opt-in unsecured J1708 startup, passive monitoring, secured-adapter limitations and outstanding hardware verification.
+    comment: README.md summarizes the experimental status and unsupported adapters. docs/j1708.md documents opt-in startup and passive monitoring; docs/telemetry.md and docs/protocol-investigation.md detail decoding and hardware-verification limits.
   docs-supported-devices:
     status: done
     comment: README.md explains the BlueFire adapter scope and that hardware compatibility is not yet verified.
   docs-supported-functions:
     status: done
-    comment: Implemented setup, opt-in J1708 startup, BLE reception, diagnostics, MQTT behavior and protocol limitations are described in README.md.
+    comment: README.md summarizes supported functions and links to setup in docs/getting-started.md, startup in docs/j1708.md, diagnostics in docs/diagnostics.md, MQTT behavior in docs/mqtt.md and protocol limits in docs/telemetry.md.
   docs-troubleshooting:
     status: done
-    comment: README.md includes guidance for missing BLE devices, MQTT setup, adapter inspection, and offline behavior.
+    comment: docs/diagnostics.md includes symptom-based guidance, adapter inspection, capture and connection-history interpretation. docs/getting-started.md covers Bluetooth and MQTT setup; docs/mqtt.md explains offline behavior.
   docs-use-cases:
     status: todo
     comment: Dedicated end-user use cases are not yet documented.
