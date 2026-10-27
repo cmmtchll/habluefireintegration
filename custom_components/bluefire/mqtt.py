@@ -12,6 +12,7 @@ from .telemetry import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+REMOVAL_CONFIRM_TIMEOUT = 15
 
 
 @dataclass(frozen=True)
@@ -259,25 +260,52 @@ async def async_confirm_removal(hass, topic):
     """Confirm broker receipt, not just queuing on HA's shared MQTT client."""
     from homeassistant.components import mqtt
     from homeassistant.core import callback
+    from homeassistant.exceptions import HomeAssistantError
 
+    subscribed = asyncio.get_running_loop().create_future()
     confirmed = asyncio.get_running_loop().create_future()
+    publishing = False
+
+    @callback
+    def subscription_ready():
+        if not subscribed.done():
+            subscribed.set_result(None)
 
     @callback
     def received(message):
-        if message.payload == "" and not confirmed.done():
+        if publishing and message.payload == "" and not confirmed.done():
             confirmed.set_result(None)
 
     unsubscribe = None
+    stop_monitoring = None
+    phase = "subscription readiness"
     try:
-        async with asyncio.timeout(15):
+        async with asyncio.timeout(REMOVAL_CONFIRM_TIMEOUT):
             # Empty retained payloads have no cached broker value. Seeing our
             # deletion echoed to this subscription confirms broker processing.
             unsubscribe = await mqtt.async_subscribe(
                 hass, topic, received, qos=1
             )
+            # HA batches broker subscriptions; async_subscribe only registers
+            # the local listener, so publishing immediately can lose the echo.
+            stop_monitoring = mqtt.async_on_subscribe_done(
+                hass, topic, 1, subscription_ready
+            )
+            await subscribed
+            phase = "deletion publish"
+            publishing = True
             await async_publish(hass, topic, "", True)
+            phase = "deletion echo"
             await confirmed
+    except TimeoutError as err:
+        raise HomeAssistantError(
+            f"Timed out waiting for {phase} for MQTT topic {topic}"
+        ) from err
     finally:
+        subscribed.cancel()
+        confirmed.cancel()
+        if stop_monitoring is not None:
+            stop_monitoring()
         if unsubscribe is not None:
             unsubscribe()
 
@@ -302,8 +330,8 @@ async def async_flush_removals(hass, ledger):
         try:
             await ledger.async_flush_offline(publish)
             await ledger.async_flush_removals(publish)
-        except (TimeoutError, HomeAssistantError):
+        except (TimeoutError, HomeAssistantError) as err:
             _LOGGER.warning(
                 "MQTT discovery removal was not confirmed; "
-                "cleanup remains queued for reconnect"
+                "cleanup remains queued for reconnect: %s", err,
             )

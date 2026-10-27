@@ -159,7 +159,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             runtime.health.error("mqtt_errors", f"MQTT cleanup failed: {err}")
             raise HomeAssistantError(
                 "MQTT cleanup was not confirmed; ownership is retained "
-                "for retry"
+                f"for retry: {err}"
             ) from err
         finally:
             runtime.inspecting = False

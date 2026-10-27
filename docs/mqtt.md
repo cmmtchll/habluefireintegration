@@ -180,8 +180,13 @@ entity. Cleanup is manual, never an automatic age-based purge.
 Ownership and pending cleanup are durable. If MQTT is down, cleanup and offline
 availability work are retried on reconnect while HA is running. If HA restarts
 with no BlueFire entries, cleanup resumes when BlueFire is next set up.
-Deletion requires broker-echo confirmation, not merely a successful publish
-call; unconfirmed work remains queued. Do not delete the storage prematurely.
+Deletion waits for HA's broker-subscription readiness callback before
+publishing, then requires broker-echo confirmation, not merely a successful
+publish call. Registering a local MQTT listener alone does not mean the broker
+subscription is active. Timeout errors identify the affected topic and phase
+(subscription readiness, deletion publish, or deletion echo). Unconfirmed work
+remains owned for retry; do not delete the storage prematurely. For a failed
+manual cleanup, rerun the preview and cleanup action after resolving the error.
 
 Discovery ownership and pending lifecycle status are separate from live
 readings. J1939 diagnostic ownership uses negative PGNs in the existing ledger;

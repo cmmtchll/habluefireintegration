@@ -190,6 +190,17 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
                 await action(call)
             self.assertFalse(self.runtime.inspecting)
             self.assertEqual(self.runtime.health.counters["mqtt_errors"], 1)
+            bridge.async_cleanup_unobserved.side_effect = ConnectionFailure(
+                "Timed out waiting for deletion echo for MQTT topic "
+                "vehicle/coach/j1587/191/pid/250"
+            )
+            with self.assertRaisesRegex(
+                ConnectionFailure, "deletion echo.*j1587/191/pid/250",
+            ):
+                await action(call)
+            self.assertIn(
+                "j1587/191/pid/250", self.runtime.health.last_error,
+            )
             self.receiver.async_pause.assert_not_awaited()
 
     def test_read_action_metadata_matches_registered_actions(self):
@@ -419,6 +430,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=lambda hass, topic, cb, qos: (
                     self.birth.append((topic, cb)) or Mock()
                 )
+            ),
+            async_on_subscribe_done=Mock(
+                side_effect=lambda hass, topic, qos, cb: cb() or Mock()
             ),
             is_connected=Mock(return_value=True),
             async_subscribe_connection_status=Mock(
