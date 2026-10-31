@@ -12,6 +12,7 @@
 | --- | --- |
 | No nearby devices | Adapter power/range, a connectable HA scanner/proxy, and competing BLE apps; use manual setup only if you know the real adapter MAC |
 | Setup waits for MQTT | Configure HA's MQTT integration and broker first; BlueFire retries when HA's MQTT client becomes available |
+| HA startup times out waiting on `BlueFire BLE receiver` | Update BlueFire and restart HA; the receiver must run as a config-entry background task, not startup work |
 | `receiver_enabled`, but no measurements | This is an enabled-state indicator, not success; inspect receiver/startup state and protocol last-data timestamps |
 | Connected, only heartbeats | Heartbeats prove transport reception, not bus data; check firmware format and whether unsecured J1708 startup is intentionally enabled |
 | Startup `ready`, but telemetry offline | `ready` only confirms report setup; the ECU must actually send a valid supported report |
