@@ -416,6 +416,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.callbacks = []
         self.tasks = []
         self.receiver_tasks = []
+        self.background_tasks = []
         self.intervals = []
         self.birth = []
         self.shutdown = []
@@ -577,6 +578,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             },
             async_on_unload=Mock(),
             async_create_task=self.create_task,
+            async_create_background_task=Mock(
+                side_effect=self.create_background_task,
+            ),
         )
 
     async def publish(self, hass, topic, payload, **kwargs):
@@ -586,12 +590,14 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 callback(SimpleNamespace(payload=payload))
 
     def create_task(self, hass, coroutine, name):
-        if name == "BlueFire BLE receiver":
-            self.receiver_tasks.append(name)
-            coroutine.close()
-            return Mock()
         task = asyncio.create_task(coroutine, name=name)
         self.tasks.append(task)
+        return task
+
+    def create_background_task(self, hass, coroutine, name):
+        self.receiver_tasks.append(name)
+        task = asyncio.create_task(coroutine, name=name)
+        self.background_tasks.append(task)
         return task
 
     async def test_setup_starts_live_receiver_without_waiting_for_ble(self):
@@ -613,6 +619,40 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             self.receiver_instances[0].kwargs["j1708_startup"]
         )
+
+    async def test_pending_receiver_does_not_block_startup_tasks(self):
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def receive_forever(receiver):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        receiver_class = sys.modules[
+            "custom_components.bluefire.receiver"
+        ].BlueFireReceiver
+        with patch.object(receiver_class, "async_run", receive_forever):
+            self.assertTrue(await asyncio.wait_for(
+                async_setup_entry(self.hass, self.entry), 1
+            ))
+            await asyncio.wait_for(started.wait(), 1)
+            task = self.background_tasks[0]
+            try:
+                self.entry.async_create_background_task.assert_called_once()
+                call = self.entry.async_create_background_task.call_args
+                self.assertIs(call.args[0], self.hass)
+                self.assertEqual(call.args[2], "BlueFire BLE receiver")
+                self.assertFalse(task.done())
+                await asyncio.wait_for(asyncio.gather(*self.tasks), 1)
+                self.assertNotIn(task, self.tasks)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            self.assertTrue(stopped.is_set())
 
     async def test_setup_passes_explicit_j1708_startup_to_receiver(self):
         self.entry.data.update(j1708_startup=True, j1587_extended=True)
@@ -867,6 +907,12 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_shutdown_withdraws_availability(self):
         await async_setup_entry(self.hass, self.entry)
         self.mqtt.async_publish.reset_mock()
+
+        async def publish_after_stop(*args, **kwargs):
+            self.receiver_instances[0].stop.assert_called_once()
+            await self.publish(*args, **kwargs)
+
+        self.mqtt.async_publish.side_effect = publish_after_stop
         await self.shutdown[0](object())
         self.assertEqual(self.mqtt.async_publish.await_count, 2)
         self.mqtt.async_publish.assert_any_await(
@@ -877,6 +923,14 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             self.hass, "vehicle/coach/j1587/availability", "offline",
             qos=1, retain=True,
         )
+
+    async def test_shutdown_stops_receiver_with_broker_disconnected(self):
+        await async_setup_entry(self.hass, self.entry)
+        self.mqtt.is_connected.return_value = False
+        self.mqtt.async_publish.reset_mock()
+        await self.shutdown[0](object())
+        self.receiver_instances[0].stop.assert_called_once()
+        self.mqtt.async_publish.assert_not_awaited()
 
     async def test_watchdog_calls_bridge_only_while_broker_connected(self):
         await async_setup_entry(self.hass, self.entry)

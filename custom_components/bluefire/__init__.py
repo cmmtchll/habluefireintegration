@@ -305,7 +305,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     entry.runtime_data.services = receiver.services
     entry.async_on_unload(receiver.stop)
-    entry.async_create_task(
+    entry.async_create_background_task(
         hass, receiver.async_run(), "BlueFire BLE receiver"
     )
 
@@ -323,6 +323,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await bridge.async_check_stale()
 
     async def shutdown(event):
+        receiver.stop()
         if mqtt.is_connected(hass):
             await bridge.async_disconnected()
 

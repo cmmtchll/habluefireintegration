@@ -151,6 +151,15 @@ HA-managed. Avoid blocking I/O or sleep loops in callbacks, and cancel tasks/
 subscriptions on unload. Decoding and publishing stay transport-independent.
 No cron scheduler or separate container is required for timing.
 
+The long-running BLE receiver uses
+`ConfigEntry.async_create_background_task`, which does not block HA startup
+and is automatically cancelled on entry unload or HA shutdown. Do not use
+`ConfigEntry.async_create_task` for the receiver: HA waits for ordinary tasks
+during bootstrap. Finite MQTT reconnect work remains an ordinary entry task.
+The HA stop-event handler also stops receiver retries before publishing offline
+availability, even if MQTT is disconnected. Receiver cancellation propagates
+after bounded BLE cleanup rather than starting another connection.
+
 An **app** (formerly add-on) or independent service would be a different
 architecture: appropriate for surviving HA restarts, an independent MQTT client
 and Last Will, incompatible native libraries, process isolation, or HA-independent
