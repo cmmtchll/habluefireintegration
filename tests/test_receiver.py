@@ -1274,6 +1274,10 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             history[0]["context"]["exception_type"], "TimeoutError"
         )
+        self.assertEqual(
+            history[0]["context"]["exception_chain"][0],
+            {"type": "TimeoutError", "message": reason},
+        )
         self.assertEqual(history[0]["retry_delay_s"], self.api.RECONNECT_MIN)
         self.assertEqual(self.receiver.health.counters["connection_errors"], 1)
         self.assertIn(reason, logs.output[0])
@@ -1989,6 +1993,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             result = await capture
             self.assertEqual(result["mode"], "live")
             self.assertFalse(result["connection_lost"])
+            self.assertLessEqual(result["started_at"], result["stopped_at"])
+            self.assertLessEqual(result["stopped_at"], result["completed_at"])
             self.assertEqual(result["received_notifications"], 1)
             self.assertEqual(result["notifications"][0]["handle"], 16)
             self.assertEqual(result["notifications"][0]["hex"],
@@ -2007,6 +2013,126 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
+
+    async def test_link_callback_retains_path_and_cleanup_evidence(self):
+        self.configure_startup_session(report_on_start=False)
+        self.bridge.async_process_j1587.side_effect = None
+        self.client._connected_scanner = SimpleNamespace(source="proxy")
+        self.client.backend_id = "esphome"
+        self.receiver._connection_event("connecting")
+        task = asyncio.create_task(self.receiver._async_receive_session())
+        try:
+            async with asyncio.timeout(1):
+                while not (
+                    self.receiver._startup and self.receiver._startup.ready
+                ):
+                    await asyncio.sleep(0)
+            callback = self.connect.await_args.kwargs["disconnected_callback"]
+            writes = self.client.write_gatt_char.await_count
+            capture = asyncio.create_task(self.receiver.async_capture(20))
+            await asyncio.sleep(0)
+            self.client.is_connected = False
+            callback(self.client)
+            self.client.disconnect.side_effect = (
+                lambda: callback(self.client)
+            )
+            with self.assertRaisesRegex(
+                self.bleak_error, "Bluetooth connection lost"
+            ):
+                await asyncio.wait_for(task, 2)
+            result = await asyncio.wait_for(capture, 1)
+            self.assertTrue(result["connection_lost"])
+            self.assertEqual(self.client.write_gatt_char.await_count, writes)
+            self.assertEqual(self.connect.await_count, 1)
+            snapshot = self.receiver.connection_diagnostics()
+            record = snapshot["connection_history"][0]
+            self.assertEqual(record["connection_path"]["source"], "proxy")
+            self.assertEqual(record["connection_path"]["backend"], "esphome")
+            self.assertEqual(
+                [item["during_cleanup"]
+                 for item in record["disconnect_callbacks"]],
+                [False, True],
+            )
+            self.assertFalse(
+                record["disconnect_callbacks"][0]["during_establishment"]
+            )
+            self.assertEqual(record["context"]["phase"], "receiving")
+            self.assertFalse(record["context"]["client_connected"])
+            self.assertEqual(
+                [item["operation"] for item in record["cleanup_operations"]],
+                ["stop_notify", "stop_notify", "disconnect"],
+            )
+            self.assertTrue(all(
+                item["status"] == "completed"
+                for item in record["cleanup_operations"]
+            ))
+            self.assertIsNone(snapshot["client_connected"])
+            record["connection_path"]["source"] = "changed by caller"
+            self.assertEqual(self.receiver.connection_diagnostics()[
+                "connection_path"
+            ]["source"], "proxy")
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_gatt_lock_timeout_does_not_replace_last_sent_write(self):
+        action = AsyncMock()
+        await self.receiver._async_gatt_operation(
+            "write", action, 1, command=7, length=4,
+        )
+        action.reset_mock()
+        lock = asyncio.Lock()
+        await lock.acquire()
+        try:
+            with self.assertRaises(TimeoutError):
+                await self.receiver._async_gatt_operation(
+                    "write", action, 0.01, command=155, length=12, lock=lock,
+                )
+        finally:
+            lock.release()
+        action.assert_not_awaited()
+        snapshot = self.receiver.connection_diagnostics()
+        failed = snapshot["gatt_operations"][-1]
+        self.assertEqual(failed["status"], "failed")
+        self.assertIsNone(failed["started_at"])
+        self.assertEqual(failed["exception_chain"][0]["type"], "TimeoutError")
+        self.assertEqual(self.receiver._last_write["command"], 7)
+        self.assertEqual(self.receiver._last_write["status"], "completed")
+
+    async def test_cleanup_timeout_is_retained_after_original_failure(self):
+        self.configure_startup_session()
+        self.receiver.j1587_extended = None
+        self.receiver._connection_event("connecting")
+
+        async def disconnect():
+            await asyncio.Future()
+
+        self.client.disconnect.side_effect = disconnect
+        with (
+            patch.object(self.api, "BLE_CLEANUP_TIMEOUT", 0.01),
+            self.assertRaisesRegex(
+                self.home_assistant_error, "Select a J1587"
+            ),
+        ):
+            await self.receiver._async_receive_session()
+        record = self.receiver.connection_diagnostics()[
+            "connection_history"
+        ][0]
+        self.assertEqual(record["context"]["phase"], "validating_services")
+        self.assertEqual(
+            record["connection_path"]["source_status"], "unavailable"
+        )
+        self.assertIsNone(record["connection_path"]["source"])
+        cleanup = record["cleanup_operations"][-1]
+        self.assertEqual(cleanup["status"], "failed")
+        self.assertEqual(cleanup["operation"], "disconnect")
+        self.assertEqual(
+            cleanup["exception_chain"][0]["type"], "TimeoutError"
+        )
+        self.assertIsNone(self.receiver.connection_diagnostics()[
+            "client_connected"
+        ])
 
     async def test_live_capture_is_bounded_and_stops_at_session_boundary(self):
         self.receiver._connected = True
@@ -2047,9 +2173,15 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_write_aborts_startup_and_disconnects(self):
         self.configure_startup_session()
-        self.client.write_gatt_char.side_effect = self.bleak_error(
-            "write refused"
-        )
+        self.receiver._connection_event("connecting")
+
+        async def failed_write(*_args, **_kwargs):
+            try:
+                raise OSError("GATT Protocol Error: Unlikely Error")
+            except OSError as err:
+                raise self.bleak_error("write refused") from err
+
+        self.client.write_gatt_char.side_effect = failed_write
         with self.assertRaisesRegex(self.bleak_error, "write refused"):
             await asyncio.wait_for(
                 self.receiver._async_receive_session(), 2
@@ -2063,6 +2195,21 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             self.receiver.startup_diagnostics()["stage"], "failed"
         )
         self.bridge.async_process_j1587.assert_not_awaited()
+        context = self.receiver.connection_diagnostics()[
+            "connection_history"
+        ][0]["context"]
+        write = context["last_write"]
+        self.assertEqual(write["status"], "failed")
+        self.assertEqual(write["command"], 0)
+        self.assertEqual(write["characteristic"], self.api.EZ_CLIENT_WRITE)
+        self.assertEqual(write["exception_chain"], [
+            {"type": "BleakError", "message": "write refused"},
+            {"type": "OSError",
+             "message": "GATT Protocol Error: Unlikely Error"},
+        ])
+        self.assertEqual(context["exception_chain"], write["exception_chain"])
+        self.assertNotIn("payload", write)
+        self.assertNotIn("hex", write)
 
     async def test_pause_cancels_active_startup_and_resumes_a_fresh_session(
         self,

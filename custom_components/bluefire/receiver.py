@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 import logging
@@ -61,6 +61,35 @@ NOTIFICATION_BYTES = 512
 RECEIVE_ERROR_LIMIT = 10
 RECEIVE_ERROR_WINDOW = 10
 RECEIVE_SILENCE_TIMEOUT = 30
+GATT_HISTORY = 10
+
+
+def _exception_chain(error: BaseException | None) -> list[dict]:
+    result = []
+    while error is not None and len(result) < 3:
+        result.append({
+            "type": type(error).__name__,
+            "message": str(error)[:512],
+        })
+        error = error.__cause__ or (
+            error.__context__ if not error.__suppress_context__ else None
+        )
+    return result
+
+
+def _connection_path(client) -> dict:
+    # HA exposes no public connected-scanner accessor. Keep this optional,
+    # and never substitute the latest advertisement's source.
+    scanner = getattr(client, "_connected_scanner", None)
+    source = getattr(scanner, "source", None)
+    backend = getattr(client, "backend_id", None)
+    return {
+        "source": source if isinstance(source, str) else None,
+        "source_status": (
+            "reported" if isinstance(source, str) else "unavailable"
+        ),
+        "backend": str(backend) if backend is not None else None,
+    }
 
 
 class BlueFireReceiver:
@@ -120,6 +149,10 @@ class BlueFireReceiver:
             maxlen=RECENT_NOTIFICATIONS
         )
         self._last_write: dict | None = None
+        self._gatt_operations: deque[dict] = deque(maxlen=GATT_HISTORY)
+        self._phase = "idle"
+        self._client = None
+        self._connection_path: dict | None = None
         self.services: list[dict] = []
 
     async def async_read(self, pid: int, *, mid: int = 0) -> dict:
@@ -196,6 +229,13 @@ class BlueFireReceiver:
         """Expose bounded event and per-attempt disconnect histories."""
         return {
             "connected": self._connected,
+            "client_connected": (
+                self._client.is_connected if self._client is not None
+                else None
+            ),
+            "phase": self._phase,
+            "connection_path": deepcopy(self._connection_path),
+            "gatt_operations": deepcopy(list(self._gatt_operations)),
             "retry_delay_s": self._reconnect_delay,
             "last_notification": self._last_notification,
             "receive_stream": self._receive_stream_diagnostics(),
@@ -223,6 +263,9 @@ class BlueFireReceiver:
             )
             self._recent_notifications.clear()
             self._last_write = None
+            self._gatt_operations.clear()
+            self._connection_path = None
+            self._phase = "connecting"
             self._startup = None
             self._last_valid_packet = None
             self._framing_error_times.clear()
@@ -236,6 +279,9 @@ class BlueFireReceiver:
                 "reason": None,
                 "retry_delay_s": None,
                 "context": None,
+                "connection_path": None,
+                "disconnect_callbacks": [],
+                "cleanup_operations": [],
             }
             self._connection_history.append(self._connection_record)
         elif self._connection_record is not None:
@@ -267,6 +313,14 @@ class BlueFireReceiver:
                 "exception_message": (
                     str(error) if error is not None else reason
                 ),
+                "exception_chain": _exception_chain(error),
+                "phase": self._phase,
+                "client_connected": (
+                    self._client.is_connected if self._client is not None
+                    else None
+                ),
+                "connection_path": deepcopy(self._connection_path),
+                "gatt_operations": deepcopy(list(self._gatt_operations)),
                 "startup": self.startup_diagnostics(),
                 "last_notification": self._last_notification,
                 "last_data": (
@@ -364,6 +418,7 @@ class BlueFireReceiver:
         received = 0
         received_bytes = 0
         started = monotonic()
+        started_at = datetime.now(timezone.utc).isoformat()
         ended = self._session_ended
 
         def capture(characteristic, data):
@@ -379,6 +434,7 @@ class BlueFireReceiver:
                 })
 
         self._capture_callback = capture
+        self._connection_event("capture_started")
         try:
             try:
                 async with asyncio.timeout(duration):
@@ -387,6 +443,8 @@ class BlueFireReceiver:
                 pass
         finally:
             self._capture_callback = None
+            stopped_at = datetime.now(timezone.utc).isoformat()
+            self._connection_event("capture_stopped")
         analysis = analyze_notifications(notifications)
         selected = analysis["selected_framing"]
         if self.health is not None:
@@ -397,6 +455,9 @@ class BlueFireReceiver:
             })
         return {
             "status": "completed", "mode": "live",
+            "started_at": started_at,
+            "stopped_at": stopped_at,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
             "requested_duration_s": duration,
             "elapsed_s": round(monotonic() - started, 3),
             "connection_lost": ended.is_set(),
@@ -471,11 +532,13 @@ class BlueFireReceiver:
             paused_session = False
             end_reason = "Receiver stopped"
             end_error_type = None
+            end_exception_chain = []
             try:
                 await session_task
                 delay = RECONNECT_MIN
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as err:
                 end_error_type = "CancelledError"
+                end_exception_chain = _exception_chain(err)
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
                     end_reason = "Receiver task cancelled"
@@ -495,16 +558,19 @@ class BlueFireReceiver:
             ) as err:
                 end_reason = str(err)
                 end_error_type = type(err).__name__
+                end_exception_chain = _exception_chain(err)
                 self._health_error("connection_errors", str(err))
                 _LOGGER.warning("BlueFire BLE receiver unavailable: %s", err)
             except ProtocolError as err:
                 end_reason = str(err)
                 end_error_type = type(err).__name__
+                end_exception_chain = _exception_chain(err)
                 self._health_error("framing_errors", str(err))
                 _LOGGER.warning("BlueFire receive stream rejected: %s", err)
             except Exception as err:
                 end_reason = "Unexpected receiver session failure"
                 end_error_type = type(err).__name__
+                end_exception_chain = _exception_chain(err)
                 _LOGGER.exception("BlueFire receiver session failed")
             finally:
                 self._connection_event(
@@ -515,6 +581,8 @@ class BlueFireReceiver:
                     context["counters"] = self._connection_counters()
                     if end_error_type is not None:
                         context["exception_type"] = end_error_type
+                    if end_exception_chain:
+                        context["exception_chain"] = end_exception_chain
                 self._session_task = None
                 self._session_closed.set()
                 self._decoder.reset()
@@ -531,6 +599,7 @@ class BlueFireReceiver:
                 if self._session_healthy:
                     delay = RECONNECT_MIN
                 self._reconnect_delay = delay
+                self._phase = "retry_wait"
                 if self._connection_record is not None:
                     self._connection_record["retry_delay_s"] = delay
                 await asyncio.sleep(delay)
@@ -564,7 +633,63 @@ class BlueFireReceiver:
         self._pause_event.clear()
         self._resume_event.set()
 
+    async def _async_gatt_operation(
+        self, operation: str, action: Callable[[], Awaitable[None]],
+        timeout: float, *, characteristic=None,
+        command: int | None = None, length: int | None = None,
+        lock: asyncio.Lock | None = None,
+    ) -> None:
+        record = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "operation": operation,
+            "characteristic": getattr(characteristic, "uuid", None),
+            "command": command,
+            "length": length,
+            "status": "waiting_for_lock" if lock is not None else "pending",
+            "started_at": None,
+            "elapsed_s": None,
+            "exception_chain": [],
+        }
+        self._gatt_operations.append(record)
+        started = monotonic()
+
+        async def perform() -> None:
+            record["status"] = "pending"
+            record["started_at"] = datetime.now(timezone.utc).isoformat()
+            if operation == "write":
+                self._last_write = record
+            await action()
+
+        try:
+            async with asyncio.timeout(timeout):
+                if lock is not None:
+                    async with lock:
+                        await perform()
+                else:
+                    await perform()
+        except (
+            BleakError, OSError, TimeoutError, asyncio.CancelledError
+        ) as err:
+            record["status"] = (
+                "cancelled" if isinstance(err, asyncio.CancelledError)
+                else "failed"
+            )
+            record["exception_chain"] = _exception_chain(err)
+            raise
+        else:
+            record["status"] = "completed"
+        finally:
+            record["elapsed_s"] = round(monotonic() - started, 3)
+            record["completed_at"] = datetime.now(timezone.utc).isoformat()
+            if self._phase == "cleanup" and (
+                self._connection_record is not None
+            ):
+                self._connection_record["cleanup_operations"].append(
+                    deepcopy(record)
+                )
+
     async def _async_receive_session(self) -> None:
+        self._phase = "locating_device"
         device = bluetooth.async_ble_device_from_address(
             self.hass, self.address, connectable=True
         )
@@ -574,12 +699,36 @@ class BlueFireReceiver:
                 "Bluetooth scanner"
             )
 
+        record = self._connection_record
+        cleanup_started = False
+
+        def disconnected(client) -> None:
+            callback = {
+                "time": datetime.now(timezone.utc).isoformat(),
+                "during_cleanup": cleanup_started,
+                "during_establishment": (
+                    self._client is None and not cleanup_started
+                ),
+                "client_connected": client.is_connected,
+            }
+            if record is not None:
+                callbacks = record["disconnect_callbacks"]
+                callbacks.append(callback)
+                del callbacks[:-CONNECTION_HISTORY]
+            if record is self._connection_record:
+                self._connection_event(
+                    "ble_disconnected",
+                    "BLE cleanup" if cleanup_started else "BLE link lost",
+                )
+
+        self._phase = "connecting"
         try:
             async with asyncio.timeout(CONNECTION_TIMEOUT):
                 client = await establish_connection(
                     BleakClientWithServiceCache,
                     device,
                     "BlueFire receiver",
+                    disconnected_callback=disconnected,
                     ble_device_callback=lambda: (
                         bluetooth.async_ble_device_from_address(
                             self.hass, self.address, connectable=True
@@ -591,10 +740,15 @@ class BlueFireReceiver:
                 "BlueFire Bluetooth connection timed out "
                 f"(limit: {CONNECTION_TIMEOUT} seconds)"
             ) from err
+        self._client = client
         started = []
         startup_task: asyncio.Task | None = None
         poll_task: asyncio.Task | None = None
         try:
+            self._phase = "validating_services"
+            self._connection_path = _connection_path(client)
+            if record is not None:
+                record["connection_path"] = deepcopy(self._connection_path)
             if self._paused:
                 raise _ReceiverPaused
             services = {
@@ -654,16 +808,15 @@ class BlueFireReceiver:
                 write_lock = asyncio.Lock()
 
                 async def write(packet: bytes) -> None:
-                    async with asyncio.timeout(BLE_OPERATION_TIMEOUT):
-                        async with write_lock:
-                            self._last_write = {
-                                "time": datetime.now(timezone.utc).isoformat(),
-                                "command": packet[2],
-                                "length": len(packet),
-                            }
-                            await client.write_gatt_char(
-                                write_characteristic, packet, response=True
-                            )
+                    await self._async_gatt_operation(
+                        "write",
+                        lambda: client.write_gatt_char(
+                            write_characteristic, packet, response=True
+                        ),
+                        BLE_OPERATION_TIMEOUT,
+                        characteristic=write_characteristic,
+                        command=packet[2], length=len(packet), lock=write_lock,
+                    )
 
                 self._startup = J1708Startup(
                     write, getattr(device, "name", None),
@@ -677,12 +830,17 @@ class BlueFireReceiver:
             self._pause_event.clear()
             self._last_valid_packet = None
             self._receive_started = monotonic()
+            self._phase = "subscribing"
             for uuid in notify_uuids:
-                async with asyncio.timeout(BLE_OPERATION_TIMEOUT):
-                    await client.start_notify(
-                        characteristics[uuid], self._notification_received
-                    )
-                    started.append(characteristics[uuid])
+                characteristic = characteristics[uuid]
+                await self._async_gatt_operation(
+                    "start_notify",
+                    lambda: client.start_notify(
+                        characteristic, self._notification_received
+                    ),
+                    BLE_OPERATION_TIMEOUT, characteristic=characteristic,
+                )
+                started.append(characteristic)
             _LOGGER.info(
                 "BlueFire receiver subscribed to %d EZ characteristics",
                 len(notify_uuids),
@@ -693,7 +851,9 @@ class BlueFireReceiver:
 
             async def maintain_session(startup: J1708Startup) -> None:
                 nonlocal poll_task
+                self._phase = "startup"
                 await startup.run()
+                self._phase = "receiving"
                 self._session_healthy = True
                 self._connection_event("startup_ready")
                 poll_task = asyncio.create_task(
@@ -710,6 +870,8 @@ class BlueFireReceiver:
                     maintain_session(self._startup),
                     name="BlueFire J1708 session control",
                 )
+            else:
+                self._phase = "receiving"
             while client.is_connected and not self._closed:
                 if startup_task is not None and startup_task.done():
                     startup_task.result()
@@ -810,6 +972,8 @@ class BlueFireReceiver:
             self._remember_disconnect(
                 "paused" if paused else "disconnected", reason
             )
+            cleanup_started = True
+            self._phase = "cleanup"
             self._connected = False
             self._session_ended.set()
             if startup_task is not None:
@@ -828,20 +992,27 @@ class BlueFireReceiver:
             self._control_decoder.reset()
             for characteristic in reversed(started):
                 try:
-                    async with asyncio.timeout(BLE_CLEANUP_TIMEOUT):
-                        await client.stop_notify(characteristic)
+                    await self._async_gatt_operation(
+                        "stop_notify",
+                        lambda: client.stop_notify(characteristic),
+                        BLE_CLEANUP_TIMEOUT, characteristic=characteristic,
+                    )
                 except (BleakError, OSError, TimeoutError):
                     _LOGGER.debug(
                         "Unable to stop BlueFire BLE notification",
                         exc_info=True,
                     )
             try:
-                async with asyncio.timeout(BLE_CLEANUP_TIMEOUT):
-                    await client.disconnect()
+                await self._async_gatt_operation(
+                    "disconnect", client.disconnect, BLE_CLEANUP_TIMEOUT,
+                )
             except (BleakError, OSError, TimeoutError):
                 _LOGGER.debug(
                     "BlueFire BLE disconnect failed", exc_info=True
                 )
+            finally:
+                self._client = None
+                self._phase = "closed" if self._closed else "idle"
 
     def _notification_received(self, _characteristic, data: bytearray) -> None:
         """Queue callbacks from both EZ characteristics in arrival order."""

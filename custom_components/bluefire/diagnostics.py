@@ -85,5 +85,10 @@ async def async_get_config_entry_diagnostics(hass, entry):
         runtime.receiver.connection_diagnostics()
         if runtime.receiver is not None else None
     )
+    result["startup"] = (
+        runtime.receiver.startup_diagnostics()
+        if runtime.receiver is not None else None
+    )
     result["health"] = runtime.health.as_dict()
+    result["completed_at"] = datetime.now(timezone.utc).isoformat()
     return result
