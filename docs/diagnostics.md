@@ -57,6 +57,42 @@ Notifications include offset time, characteristic UUID/handle, length, and hex
 payload. The capture is bounded to **5,000 notifications**, with
 `dropped_notifications` reporting overflow.
 
+### Persistent incident history
+
+Version 0.9.7 automatically retains an entry-local journal of the latest **10
+incidents**, capped at **512 KiB**, in Home Assistant's `.storage` directory.
+`incident_history` in diagnostics includes that journal even when BLE is offline.
+It survives entry reloads and HA restarts and is deleted on entry removal.
+Atomic writes are coalesced on a one-second delay outside BLE callbacks;
+orderly unload and shutdown flush pending changes. An abrupt power loss can
+lose pending evidence, normally about one second. Storage failures are surfaced
+through Home Assistant storage logging or propagated exceptions.
+
+Framing errors, queue overflow, stalled/failed writes and connection failures
+freeze up to **32 preceding notifications** and **8 following notifications**.
+Each notification records sequence, UTC time, byte range within the session,
+length/previous length, gap, pending bytes, command numbers, framing-error
+offsets, discarded-byte totals and confirmed resynchronization positions.
+Startup command summaries contain no response payloads.
+
+Incidents retain the initial context, the latest coalesced failure context, and
+final cleanup results when a failed session ends. They include disconnect
+callback timestamps, advertisement RSSI/source, PID/MID/request mode and interval
+for subscription writes, lock wait/I/O timing, queue delay, MQTT processing
+state/timing, connection path and cached GATT properties. Reported MTU is
+explicitly unverified because some backends return a default;
+actual connection parameters and HCI disconnect
+reason remain unknown. Collection makes no additional BLE requests.
+
+Persistence is **metadata-only by default**. In **Reconfigure**, opt into
+**Store raw telemetry in diagnostic incidents** to retain up to four complete,
+checksum-valid telemetry bodies per recorded notification. These can contain
+VINs and other vehicle identifiers. Startup, authentication, control payloads,
+corrupt bytes and unclassified fragments are never persisted as raw snippets.
+Disabling the option removes previously stored snippets on reload.
+This setting controls persistence only: explicitly requested diagnostic downloads
+and standalone captures remain unredacted.
+
 Analysis compares stream and padded-notification framing per characteristic.
 It includes packet counts, errors, decode rate, command/PGN/J1587/OBD tallies,
 known-PGN labels, firmware formats that parse, samples, timing, and lengths.
@@ -130,6 +166,13 @@ The live decoder discards corrupt bytes and requires **two adjacent complete
 packets with valid length headers and payload checksums** before resuming a
 damaged stream. It preserves intact packets across notification boundaries and
 buffers at most **528 bytes**.
+
+Notification size is not a packet boundary: 128-byte values can split a length
+header, body, or checksum. Both live decoding paths preserve these fragments and
+use the same bounded recovery. Read responses and probe acknowledgements are
+collected at notification arrival, independently of queued MQTT publication.
+Missing bytes cannot be reconstructed; only intact, validated reports survive
+recovery. Raw capture serialization preserves the complete notification value.
 
 Ten framing errors within ten seconds **without recovered packets** trigger
 reconnect. Recovering checksum-valid packets resets that error budget; all

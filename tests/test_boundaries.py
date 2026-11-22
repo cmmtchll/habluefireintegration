@@ -461,6 +461,60 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_persistent_incidents_are_exported_flushed_and_removed(self):
+        from custom_components.bluefire.diagnostics import (
+            async_get_config_entry_diagnostics,
+        )
+
+        self.entry.unique_id = self.entry.data["address"]
+        await async_setup_entry(self.hass, self.entry)
+        journal = self.entry.runtime_data.incidents
+        journal.record("framing_error", {"attempt": 1})
+        result = await async_get_config_entry_diagnostics(
+            self.hass, self.entry,
+        )
+        self.assertEqual(
+            result["incident_history"]["incidents"][0]["triggers"],
+            ["framing_error"],
+        )
+        self.incident_store.async_save.assert_not_awaited()
+        await async_unload_entry(self.hass, self.entry)
+        self.assertEqual(
+            self.incident_store.async_save.await_args.args[0]["incidents"][0][
+                "context"
+            ]["attempt"], 1,
+        )
+        await async_remove_entry(self.hass, self.entry)
+        self.incident_store.async_remove.assert_awaited_once()
+
+    async def test_disabling_raw_storage_purges_restored_snippets(self):
+        self.incident_store.async_load.return_value = {
+            "incidents": [{
+                "context": {}, "triggers": ["framing_error"],
+                "before": [{"raw_reports": [{"body_hex": "9a80600164"}]}],
+                "after": [],
+            }],
+        }
+        self.entry.data["store_raw_diagnostics"] = False
+        await async_setup_entry(self.hass, self.entry)
+        stored = self.incident_store.async_save.await_args.args[0]
+        self.assertNotIn("raw_reports", stored["incidents"][0]["before"][0])
+        self.assertFalse(self.entry.runtime_data.incidents.raw_enabled)
+
+    async def test_incident_storage_load_failure_is_explicit(self):
+        self.incident_store.async_load.side_effect = OSError(
+            "disk unavailable",
+        )
+        with self.assertRaisesRegex(BoundaryError, "Persistent BlueFire"):
+            await async_setup_entry(self.hass, self.entry)
+        self.assertEqual(self.receiver_instances, [])
+
+    async def test_shutdown_flushes_pending_incidents(self):
+        await async_setup_entry(self.hass, self.entry)
+        self.entry.runtime_data.incidents.record("gatt_stall", {})
+        await self.shutdown[0](None)
+        self.incident_store.async_save.assert_awaited_once()
+
     def setUp(self):
         self.callbacks = []
         self.tasks = []
@@ -472,6 +526,11 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.store = SimpleNamespace(
             async_load=AsyncMock(return_value=None),
             async_save=AsyncMock(),
+        )
+        self.incident_store = SimpleNamespace(
+            async_load=AsyncMock(return_value=None),
+            async_save=AsyncMock(), async_delay_save=Mock(),
+            async_remove=AsyncMock(),
         )
         self.mqtt = SimpleNamespace(
             async_wait_for_mqtt_client=AsyncMock(return_value=True),
@@ -579,7 +638,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             ),
             "homeassistant.helpers.storage": module(
                 "homeassistant.helpers.storage",
-                Store=Mock(return_value=self.store),
+                Store=Mock(side_effect=lambda hass, version, key, **kwargs: (
+                    self.incident_store
+                    if ".incidents." in key else self.store
+                )),
             ),
             "homeassistant.helpers.event": module(
                 "homeassistant.helpers.event",

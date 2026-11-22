@@ -165,7 +165,8 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
             "vehicle_id": "invalid_vehicle_id",
         })
         self.assertEqual(
-            result["data_schema"]({}), {**bad, "j1708_startup": False}
+            result["data_schema"]({}),
+            {**bad, "j1708_startup": False, "store_raw_diagnostics": False},
         )
         self.flow.async_create_entry.assert_not_called()
         self.flow.async_set_unique_id.assert_not_awaited()
@@ -272,7 +273,32 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
             "name": self.data["name"], "address": self.data["address"],
             "j1587_extended": "Extended (3.19+)",
             "j1708_startup": False,
+            "store_raw_diagnostics": False,
         })
+
+    async def test_raw_incident_storage_is_opt_in_and_reconfigurable(self):
+        schema = (await self.flow.async_step_manual())["data_schema"]
+        self.assertFalse(schema({})["store_raw_diagnostics"])
+        for enabled in (True, False):
+            result = await self.flow.async_step_manual({
+                **self.data, "store_raw_diagnostics": enabled,
+            })
+            self.assertIs(result["data"]["store_raw_diagnostics"], enabled)
+        result = await self.flow.async_step_manual({
+            **self.data, "store_raw_diagnostics": "yes",
+        })
+        self.assertEqual(result["errors"], {
+            "store_raw_diagnostics": "invalid_raw_diagnostics",
+        })
+        entry = self.reconfigure_entry()
+        entry.data["store_raw_diagnostics"] = True
+        schema = (await self.flow.async_step_reconfigure())["data_schema"]
+        self.assertTrue(schema({})["store_raw_diagnostics"])
+        result = await self.flow.async_step_reconfigure({
+            "name": entry.data["name"], "address": entry.data["address"],
+            "store_raw_diagnostics": False,
+        })
+        self.assertFalse(result["data_updates"]["store_raw_diagnostics"])
 
     async def test_j1708_startup_is_explicit_and_requires_format(self):
         schema = (await self.flow.async_step_manual())["data_schema"]

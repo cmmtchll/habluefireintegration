@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from custom_components.bluefire.health import Health
+from custom_components.bluefire.incidents import IncidentJournal
 from custom_components.bluefire.j1587 import ENTITIES
 from custom_components.bluefire.telemetry import MqttBridge
 
@@ -20,6 +21,217 @@ def module(name, **attributes):
 
 
 class ReceiverTests(unittest.IsolatedAsyncioTestCase):
+    def attach_incidents(self, *, raw=False):
+        store = SimpleNamespace(
+            async_load=AsyncMock(return_value=None), async_save=AsyncMock(),
+            async_delay_save=Mock(), async_remove=AsyncMock(),
+        )
+        self.receiver.incidents = IncidentJournal(store, raw_enabled=raw)
+        return store
+
+    async def test_incident_preserves_128_byte_predecessor_and_recovery(
+        self,
+    ):
+        store = self.attach_incidents()
+        rpm = self.packet(bytes.fromhex("9a 80 be 02 11 00"))
+        first = rpm * 12 + rpm[:8]
+        second = rpm[8:] + rpm[:6]
+        second += self.packet(bytes.fromhex("9a 80 60 01 64")) * 2
+        self.receiver._notification_received(None, first)
+        self.receiver._notification_received(None, second)
+        journal = self.receiver.incidents
+        record, = journal.diagnostics()["incidents"]
+        before, failure = record["before"]
+        self.assertEqual(before["length"], 128)
+        self.assertEqual(failure["previous_length"], 128)
+        self.assertEqual(failure["pending_before"], 8)
+        self.assertEqual(failure["error_offsets"], [130])
+        self.assertEqual(failure["recoveries"][0]["resumed_at"], 136)
+        self.assertEqual(failure["discarded_bytes"], 6)
+        self.assertNotIn("raw_reports", before)
+        for _ in range(8):
+            self.receiver._notification_received(None, self.packet(b"\xff"))
+        self.assertEqual(
+            len(journal.diagnostics()["incidents"][0]["after"]), 8,
+        )
+        store.async_save.assert_not_awaited()
+        await journal.async_flush()
+        self.assertEqual(len(store.async_save.await_args.args[0]["incidents"]),
+                         1)
+
+    async def test_raw_incidents_exclude_startup_and_authentication_payloads(
+        self,
+    ):
+        self.attach_incidents(raw=True)
+        self.receiver.j1708_startup = True
+        self.receiver._startup = SimpleNamespace(
+            ready=False, diagnostics=Mock(return_value={"stage": "startup"}),
+        )
+        auth = b"\x82example-authentication"
+        telemetry = bytes.fromhex("9a 80 60 01 64")
+        self.receiver._notification_received(
+            None, self.packet(auth) + self.packet(telemetry),
+        )
+        self.receiver._notification_received(
+            None, b"\x7f\x00\x00" + self.packet(b"\xff") * 2,
+        )
+        self.receiver._startup.ready = True
+        self.receiver._notification_received(
+            None, self.packet(auth) + self.packet(telemetry),
+        )
+        record, = self.receiver.incidents.diagnostics()["incidents"]
+        self.assertNotIn("raw_reports", record["before"][0])
+        self.assertEqual(record["after"][0]["raw_reports"], [{
+            "command": 154, "body_hex": telemetry.hex(),
+        }])
+        self.assertNotIn(auth.hex(), json.dumps(record))
+        self.assertNotIn("recent_notifications", record["context"])
+
+    async def test_stalled_write_freezes_pending_then_failed_request_metadata(
+        self,
+    ):
+        store = self.attach_incidents()
+
+        async def hang():
+            await asyncio.Future()
+
+        request = {"pid": 94, "mid": 0, "mode": "monitoring"}
+        with patch.object(self.api, "GATT_STALL_SECONDS", 0.001):
+            with self.assertRaises(TimeoutError):
+                await self.receiver._async_gatt_operation(
+                    "write", hang, 0.02, command=155, length=12,
+                    request=request,
+                )
+        record, = self.receiver.incidents.diagnostics()["incidents"]
+        self.assertEqual(record["triggers"], ["gatt_stall", "gatt_failure"])
+        pending = record["context"]["gatt_operations"][0]
+        failed = record["latest_context"]["gatt_operations"][0]
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(pending["request"]["pid"], 94)
+        self.assertEqual(failed["status"], "failed")
+        self.assertIsNotNone(failed["io_elapsed_s"])
+        store.async_save.assert_not_awaited()
+
+    async def test_cancellation_is_not_swallowed_by_stall_observer_cleanup(
+        self,
+    ):
+        self.attach_incidents()
+
+        async def cancel_on_completion():
+            asyncio.current_task().cancel()
+
+        task = asyncio.create_task(self.receiver._async_gatt_operation(
+            "write", cancel_on_completion, 1, command=155,
+        ))
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_intentional_pause_stop_and_cleanup_do_not_record_stalls(
+        self,
+    ):
+        self.attach_incidents()
+        for state in ("paused", "closed", "cleanup"):
+            self.receiver._paused = state == "paused"
+            self.receiver._closed = state == "closed"
+            self.receiver._phase = state
+            with patch.object(self.api, "GATT_STALL_SECONDS", 0):
+                await self.receiver._async_gatt_operation(
+                    "write", lambda: asyncio.sleep(0.01), 1, command=155,
+                )
+        self.assertEqual(
+            self.receiver.incidents.diagnostics()["incidents"], [],
+        )
+
+    async def test_persistent_failure_retains_cleanup_and_disconnect_callback(
+        self,
+    ):
+        self.attach_incidents()
+        self.configure_startup_session(overrides={9: b"\x00"})
+
+        async def connect(*_args, **kwargs):
+            callback = kwargs["disconnected_callback"]
+
+            async def disconnect():
+                self.client.is_connected = False
+                callback(self.client)
+
+            self.client.disconnect.side_effect = disconnect
+            return self.client
+
+        self.connect.side_effect = connect
+        self.bridge.async_disconnected.side_effect = self.receiver.stop
+        await asyncio.wait_for(self.receiver.async_run(), 2)
+        record, = self.receiver.incidents.diagnostics()["incidents"]
+        self.assertIn("connection_failure", record["triggers"])
+        final = record["final_context"]
+        self.assertIn("compatibility rejected", final["failure"]["reason"])
+        self.assertIsNotNone(final["connection_times"]["ended_at"])
+        self.assertTrue(final["disconnect_callbacks"][0]["during_cleanup"])
+        self.assertEqual(
+            [operation["operation"] for operation in
+             final["cleanup_operations"]],
+            ["stop_notify", "stop_notify", "disconnect"],
+        )
+
+    async def test_notification_timing_fifo_keeps_fetched_item_with_full_queue(
+        self,
+    ):
+        chunk = self.packet(b"\xff")
+        for _ in range(128):
+            self.receiver._notification_received(None, chunk)
+        self.assertEqual(await self.receiver._queue.get(), chunk)
+        self.receiver._notification_received(None, chunk)
+        self.assertEqual(self.receiver._queue.qsize(), 128)
+        self.assertEqual(self.receiver._notification_times.popleft()[0], 1)
+        self.assertEqual(self.receiver._notification_times[0][0], 2)
+        self.assertEqual(self.receiver._notification_times[-1][0], 129)
+        self.assertFalse(self.receiver._overflow.is_set())
+
+    async def test_incident_distinguishes_mqtt_backlog_and_cached_transport(
+        self,
+    ):
+        self.attach_incidents()
+        self.configure_startup_session()
+        self.client.mtu_size = 185
+        publishing = asyncio.Event()
+        release = asyncio.Event()
+
+        async def publish(_report):
+            publishing.set()
+            await release.wait()
+
+        self.bridge.async_process_j1587.side_effect = publish
+        task = asyncio.create_task(self.receiver._async_receive_session())
+        try:
+            await asyncio.wait_for(publishing.wait(), 1)
+            self.receiver._notification_received(
+                None, b"\x7f\x00\x00" + self.packet(b"\xff") * 2,
+            )
+            record, = self.receiver.incidents.diagnostics()["incidents"]
+            context = record["context"]
+            self.assertEqual(context["processing"]["status"], "publishing")
+            self.assertEqual(
+                context["processing"]["publish_status"], "pending",
+            )
+            self.assertGreaterEqual(
+                context["processing"]["queue_wait_s"], 0,
+            )
+            self.assertEqual(context["transport"]["reported_mtu"], 185)
+            self.assertFalse(context["transport"]["mtu_verified"])
+            self.assertIsNone(context["transport"]["hci_disconnect_reason"])
+            requests = [
+                operation["request"]
+                for operation in context["gatt_operations"]
+                if operation["request"] is not None
+            ]
+            self.assertTrue(any(r["interval_ms"] == 1000 for r in requests))
+            self.assertTrue(any(r["mode"] == "on_request" for r in requests))
+        finally:
+            self.receiver.stop()
+            release.set()
+            with self.assertRaises(self.bleak_error):
+                await asyncio.wait_for(task, 1)
+
     async def run_poll_cycles(self, cycles, read, *, before_cycle=None):
         self.configure_read()
         clock = [0]
@@ -317,6 +529,14 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         timer.start()
         self.addCleanup(timer.stop)
 
+    async def receive_read_body(self, body):
+        self.receiver._notification_received(None, self.packet(body))
+        chunk = self.receiver._queue.get_nowait()
+        bodies = self.receiver._decoder.feed(chunk)
+        self.receiver._record_stream_errors(recovered=bool(bodies))
+        for received in bodies:
+            await self.receiver._async_process_body(received)
+
     async def test_targeted_manual_read_filters_and_restores_wildcard(self):
         self.configure_read()
         self.receiver.bridge = MqttBridge(
@@ -332,8 +552,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(self.receiver.async_read(pid, mid=128))
             await self.read_started.wait()
             if pid != 243:
-                await self.receiver._async_process_body(b"\x9a\x82" + body)
-            await self.receiver._async_process_body(b"\x9a\x80" + body)
+                await self.receive_read_body(b"\x9a\x82" + body)
+            await self.receive_read_body(b"\x9a\x80" + body)
             result = await task
             report, = result["reports"]
             self.assertEqual(report["mid"], 128)
@@ -365,7 +585,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 await self.receiver.async_read(96, mid=mid)
         task = asyncio.create_task(self.receiver.async_read(96, mid=128))
         await self.read_started.wait()
-        await self.receiver._async_process_body(
+        await self.receive_read_body(
             bytes.fromhex("9a 82 60 01 64"),
         )
         with self.assertRaisesRegex(self.home_assistant_error, "MID 128"):
@@ -388,7 +608,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             "9a 80 60 01 78", "9a 83 60 01 ff",
             "9a 80 be 02 34 12",
         ):
-            await self.receiver._async_process_body(bytes.fromhex(body))
+            await self.receive_read_body(bytes.fromhex(body))
         result = await task
         self.assertEqual(result["pid"], 96)
         self.assertEqual(
@@ -403,14 +623,131 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.receiver._startup.async_read.assert_awaited_with(96, restore=True)
         self.assertIsNone(self.receiver._read_waiter)
 
+    async def test_128_byte_read_response_is_not_delayed_by_mqtt(self):
+        self.configure_read()
+        publishing = asyncio.Event()
+        release = asyncio.Event()
+
+        async def publish(_report):
+            publishing.set()
+            await release.wait()
+
+        self.bridge.async_process_j1587.side_effect = publish
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        notification = self.packet(bytes.fromhex("9a 80 be 02 11 00")) * 11
+        notification += self.packet(bytes.fromhex("9a 80 60 01 64"))
+        notification += self.packet(bytes.fromhex("9a 80 60 01 66"))
+        self.assertEqual(len(notification), 128)
+        self.receiver._notification_received(None, notification)
+
+        async def consume():
+            chunk = self.receiver._queue.get_nowait()
+            for body in self.receiver._decoder.feed(chunk):
+                await self.receiver._async_process_body(body)
+
+        consumer = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(publishing.wait(), 1)
+            result = await asyncio.wait_for(read, 1)
+            self.assertEqual(result["reports"][0]["signals"][0]["value"], 51)
+            self.assertFalse(consumer.done())
+            self.assertEqual(self.bridge.async_process_j1587.await_count, 1)
+            self.receiver._startup.async_read.assert_awaited_with(
+                96, restore=True,
+            )
+        finally:
+            release.set()
+            await asyncio.wait_for(consumer, 1)
+
+    async def test_report_queued_before_read_is_not_a_fresh_response(self):
+        self.configure_read()
+        body = bytes.fromhex("9a 80 60 01 64")
+        self.receiver._notification_received(None, self.packet(body))
+        chunk = self.receiver._queue.get_nowait()
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        for queued_body in self.receiver._decoder.feed(chunk):
+            await self.receiver._async_process_body(queued_body)
+        with self.assertRaisesRegex(self.home_assistant_error, "No J1708 PID"):
+            await read
+        self.bridge.async_process_j1587.assert_awaited_once()
+
+    async def test_read_recovers_truncated_report_after_128_byte_notification(
+        self,
+    ):
+        self.configure_read()
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        rpm = self.packet(bytes.fromhex("9a 80 be 02 11 00"))
+        damaged = self.packet(bytes.fromhex("9a 80 be 02 33 00"))
+        first = rpm * 12 + rpm[:8]
+        second = rpm[8:] + damaged[:6]
+        second += self.packet(bytes.fromhex("9a 80 60 01 64"))
+        second += self.packet(bytes.fromhex("9a 80 60 01 66"))
+        self.assertEqual(len(first), 128)
+        for notification in (first, second):
+            self.receiver._notification_received(None, notification)
+        result = await read
+        self.assertEqual(result["reports"][0]["signals"][0]["value"], 51)
+        self.bridge.async_process_j1587.assert_not_awaited()
+        self.assertTrue(self.receiver._receive_is_recent())
+        while not self.receiver._queue.empty():
+            chunk = self.receiver._queue.get_nowait()
+            bodies = self.receiver._decoder.feed(chunk)
+            self.receiver._record_stream_errors(recovered=bool(bodies))
+            for body in bodies:
+                await self.receiver._async_process_body(body)
+        self.assertEqual(self.bridge.async_process_j1587.await_count, 15)
+        self.assertFalse(any(
+            call.args[0].data == b"\x33\x00"
+            for call in self.bridge.async_process_j1587.await_args_list
+        ))
+        self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
+        self.assertFalse(self.receiver._reconnect_event.is_set())
+
+    async def test_queue_overflow_cannot_supply_a_successful_read_response(
+        self,
+    ):
+        self.configure_read()
+        self.receiver._queue = asyncio.Queue(maxsize=1)
+        self.receiver._queue.put_nowait(b"pending")
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        with self.assertLogs(self.module_name, level="WARNING"):
+            self.receiver._notification_received(
+                None, self.packet(bytes.fromhex("9a 80 60 01 64")),
+            )
+        with self.assertRaisesRegex(self.home_assistant_error, "No J1708 PID"):
+            await read
+        self.assertTrue(self.receiver._overflow.is_set())
+        self.bridge.async_process_j1587.assert_not_awaited()
+
+    async def test_invalid_matching_read_report_is_logged_once_and_rejected(
+        self,
+    ):
+        self.configure_read()
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        with self.assertLogs(self.module_name, level="WARNING") as logs:
+            with self.assertRaises(self.api.ProtocolError):
+                await self.receive_read_body(
+                    bytes.fromhex("9a 80 60 02 64 00"),
+                )
+        with self.assertRaisesRegex(self.home_assistant_error, "No J1708 PID"):
+            await read
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(self.receiver.health.counters["parse_errors"], 1)
+        self.bridge.async_process_j1587.assert_not_awaited()
+
     async def test_diagnostic_read_distinguishes_faults_and_empty_report(self):
         self.configure_read()
         task = asyncio.create_task(self.receiver.async_read(194))
         await self.read_started.wait()
-        await self.receiver._async_process_body(
+        await self.receive_read_body(
             bytes.fromhex("9a 80 c2 02 64 23")
         )
-        await self.receiver._async_process_body(
+        await self.receive_read_body(
             bytes.fromhex("9a 82 c2 00")
         )
         result = await task
@@ -442,7 +779,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 self.read_started.clear()
                 task = asyncio.create_task(self.receiver.async_read(pid))
                 await self.read_started.wait()
-                await self.receiver._async_process_body(
+                await self.receive_read_body(
                     bytes((154, 128, pid, 4)) + data
                 )
                 result = await task

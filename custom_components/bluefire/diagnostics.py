@@ -99,5 +99,9 @@ async def async_get_config_entry_diagnostics(hass, entry):
         if runtime.receiver is not None else None
     )
     result["health"] = runtime.health.as_dict()
+    incidents = getattr(runtime, "incidents", None)
+    result["incident_history"] = (
+        incidents.diagnostics() if incidents is not None else None
+    )
     result["completed_at"] = datetime.now(timezone.utc).isoformat()
     return result

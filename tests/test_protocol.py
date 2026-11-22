@@ -195,6 +195,80 @@ class ReceiveTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_recovery_offsets_and_discard_totals_track_the_original_stream(
+        self,
+    ):
+        decoder = RecoveringReceiveDecoder()
+        stream = HEARTBEAT + b"\x7f\x00\x00" + RPM_PACKET + HEARTBEAT
+        decoded = ()
+        events = []
+        offsets = []
+        for start in range(0, len(stream), 7):
+            decoded += decoder.feed(stream[start:start + 7])
+            offsets.extend(decoder.framing_error_offsets)
+            events.extend(decoder.recovery_events)
+        self.assertEqual(decoded, (b"\xff", RPM_BODY, b"\xff"))
+        self.assertEqual(offsets, [5])
+        self.assertEqual(events, [{
+            "resumed_at": 8, "confirmed_through": len(stream),
+            "discarded_bytes": 3,
+        }])
+        self.assertEqual(decoder.discarded_bytes, 3)
+        self.assertEqual(decoder.received_bytes, len(stream))
+        self.assertEqual(decoder.buffer_start_offset, len(stream))
+        decoder.reset()
+        self.assertEqual(decoder.received_bytes, 0)
+        self.assertEqual(decoder.discarded_bytes, 0)
+        self.assertEqual(decoder.recovery_events, ())
+
+    def test_128_byte_chunks_preserve_all_packet_alignments(self):
+        nested = b"\x2a" + HEARTBEAT * 51
+        for alignment in range(128):
+            bodies = (
+                b"\x2a" * (alignment + 1), RPM_BODY,
+                b"\x07\x01", nested, b"\xff",
+            )
+            stream = b"".join(packet(body) for body in bodies)
+            for decoder_type in (ReceiveDecoder, RecoveringReceiveDecoder):
+                with self.subTest(
+                    alignment=alignment, decoder=decoder_type.__name__,
+                ):
+                    decoder = decoder_type()
+                    decoded = []
+                    for offset in range(0, len(stream), 128):
+                        decoded.extend(decoder.feed(
+                            stream[offset:offset + 128],
+                        ))
+                    self.assertEqual(decoded, list(bodies))
+                    self.assertEqual(decoder.pending_bytes, 0)
+                    decoder.finish()
+                    if isinstance(decoder, RecoveringReceiveDecoder):
+                        self.assertEqual(decoder.resynchronizations, 0)
+
+    def test_missing_report_tails_after_128_bytes_preserve_neighbors(self):
+        report = packet(bytes.fromhex("9a 80 be 02 11 00"))
+        intact = packet(bytes.fromhex("9a 80 be 02 22 00"))
+        for remaining in range(6):
+            prefix = b"\x2a" * (128 - len(report) + remaining - 4)
+            first = packet(prefix) + report[:len(report) - remaining]
+            self.assertEqual(len(first), 128)
+            for missing in range(1, 5):
+                with self.subTest(remaining=remaining, missing=missing):
+                    second = report[len(report) - remaining:]
+                    second += report[:-missing] + intact + HEARTBEAT
+                    decoder = RecoveringReceiveDecoder()
+                    bodies = decoder.feed(first) + decoder.feed(second)
+                    self.assertEqual(
+                        bodies, (prefix, report[3:-1], intact[3:-1], b"\xff"),
+                    )
+                    self.assertEqual(
+                        decoder.framing_errors,
+                        ("Invalid receive payload checksum",),
+                    )
+                    self.assertEqual(decoder.resynchronizations, 1)
+                    self.assertFalse(decoder.resynchronizing)
+                    self.assertEqual(decoder.pending_bytes, 0)
+
     def test_valid_streams_and_nested_headers_are_unchanged(self):
         nested = b"\x42" + HEARTBEAT * 2 + b"\x00"
         stream = packet(nested) + RPM_PACKET + HEARTBEAT

@@ -17,6 +17,7 @@ from .const import (
     CONF_ENGINE_PROFILE,
     CONF_J1587_EXTENDED,
     CONF_J1708_STARTUP,
+    CONF_RAW_DIAGNOSTICS,
     DOMAIN,
     J1708_READ_ACTIONS,
     MQTT_PUBLISH_TIMEOUT,
@@ -40,6 +41,7 @@ class BlueFireRuntime:
     inspecting: bool = False
     receiver: Any = None
     health: Health = field(default_factory=Health)
+    incidents: Any = None
     bluetooth_enabled: bool = True
 
 
@@ -274,9 +276,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         mqtt_settings,
     )
     from .receiver import BlueFireReceiver
+    from .incidents import IncidentJournal, incident_store
     from .telemetry import MqttBridge
 
     health = Health()
+    incidents = IncidentJournal(
+        incident_store(hass, entry.entry_id),
+        raw_enabled=entry.data.get(CONF_RAW_DIAGNOSTICS, False),
+    )
+    try:
+        await incidents.async_load()
+    except (OSError, ValueError) as err:
+        raise ConfigEntryNotReady(
+            f"Persistent BlueFire diagnostics could not be loaded: {err}"
+        ) from err
 
     async def publish(topic: str, payload: str, retain: bool) -> None:
         try:
@@ -336,9 +349,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         health=health,
         j1587_extended=entry.data.get(CONF_J1587_EXTENDED),
         j1708_startup=entry.data.get(CONF_J1708_STARTUP, False),
+        incidents=incidents,
     )
     entry.runtime_data = BlueFireRuntime(
-        bridge, receiver=receiver, health=health,
+        bridge, receiver=receiver, health=health, incidents=incidents,
         bluetooth_enabled=entry.options.get(CONF_BLUETOOTH_ENABLED, True),
     )
     if not entry.runtime_data.bluetooth_enabled:
@@ -364,6 +378,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def shutdown(event):
         receiver.stop()
+        await incidents.async_flush()
         if mqtt.is_connected(hass):
             await bridge.async_disconnected()
 
@@ -443,6 +458,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .mqtt import async_get_ledger
 
+    if entry.runtime_data.incidents is not None:
+        await entry.runtime_data.incidents.async_flush()
     ledger = await async_get_ledger(hass)
     await ledger.async_queue_offline(entry.entry_id)
     try:
@@ -461,6 +478,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Queue retained discovery removal without relying on runtime_data."""
     from .mqtt import async_flush_removals, async_get_ledger
+    from .incidents import incident_store
+
+    runtime = getattr(entry, "runtime_data", None)
+    incidents = getattr(runtime, "incidents", None)
+    if incidents is not None:
+        await incidents.async_remove()
+    else:
+        await incident_store(hass, entry.entry_id).async_remove()
 
     ledger = await async_get_ledger(hass)
     await ledger.async_queue_removal(entry.entry_id)

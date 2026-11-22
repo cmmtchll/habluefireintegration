@@ -129,6 +129,11 @@ class RecoveringReceiveDecoder(ReceiveDecoder):
         self.resynchronizing = False
         self.resynchronizations = 0
         self.framing_errors: tuple[str, ...] = ()
+        self.received_bytes = 0
+        self.buffer_start_offset = 0
+        self.discarded_bytes = 0
+        self.framing_error_offsets: tuple[int, ...] = ()
+        self.recovery_events: tuple[dict, ...] = ()
 
     def _packet_end(self, offset: int) -> int | None:
         try:
@@ -161,11 +166,20 @@ class RecoveringReceiveDecoder(ReceiveDecoder):
                 bytes(self._buffer[offset + 3:first - 1]),
                 bytes(self._buffer[first + 3:second - 1]),
             )
+            self.discarded_bytes += offset
+            self.recovery_events += ({
+                "resumed_at": self.buffer_start_offset + offset,
+                "confirmed_through": self.buffer_start_offset + second,
+                "discarded_bytes": self.discarded_bytes,
+            },)
             del self._buffer[:second]
+            self.buffer_start_offset += second
             self.resynchronizing = False
             self.resynchronizations += 1
             return bodies
         del self._buffer[:keep]
+        self.buffer_start_offset += keep
+        self.discarded_bytes += keep
         return ()
 
     def feed(self, chunk: bytes) -> tuple[bytes, ...]:
@@ -174,6 +188,9 @@ class RecoveringReceiveDecoder(ReceiveDecoder):
             raise ProtocolError("Expected immutable receive bytes")
         bodies = []
         errors = []
+        error_offsets = []
+        self.recovery_events = ()
+        self.received_bytes += len(chunk)
         offset = 0
         while offset < len(chunk):
             end = min(
@@ -199,10 +216,13 @@ class RecoveringReceiveDecoder(ReceiveDecoder):
                         raise ProtocolError("Invalid receive payload checksum")
                     bodies.append(body)
                     del self._buffer[:length + 4]
+                    self.buffer_start_offset += length + 4
                 except ProtocolError as err:
                     errors.append(str(err))
+                    error_offsets.append(self.buffer_start_offset)
                     self.resynchronizing = True
         self.framing_errors = tuple(errors)
+        self.framing_error_offsets = tuple(error_offsets)
         return tuple(bodies)
 
 
