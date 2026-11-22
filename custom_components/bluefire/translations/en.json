@@ -25,9 +25,11 @@
           "vehicle_id": "Vehicle MQTT identifier",
           "j1587_extended": "J1587 adapter firmware format",
           "j1708_startup": "Enable J1708 startup (unsecured EZ adapters)",
-          "engine_profile": "Confirmed engine equipment"
+          "engine_profile": "Confirmed engine equipment",
+          "store_raw_diagnostics": "Store raw telemetry in diagnostic incidents"
         },
         "data_description": {
+          "store_raw_diagnostics": "Off by default. Stores bounded, checksum-valid telemetry snippets with incident metadata on this Home Assistant instance. May include VINs or other vehicle identifiers. Startup, control and authentication payloads are never stored. Turning this off removes previously stored snippets.",
           "engine_profile": "Select Detroit Series 60 / DDEC IV when identified by official equipment labels or documentation. Enables engine MID 128 names and Detroit diagnostic references; does not infer other controllers, installed options or calibration. Leave blank for standard J1587.",
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "vehicle_id": "1–64 lowercase letters, digits, underscores or hyphens; start with a letter or digit.",
@@ -43,9 +45,11 @@
           "address": "Bluetooth MAC address",
           "j1587_extended": "J1587 adapter firmware format",
           "j1708_startup": "Enable J1708 startup (unsecured EZ adapters)",
-          "engine_profile": "Confirmed engine equipment"
+          "engine_profile": "Confirmed engine equipment",
+          "store_raw_diagnostics": "Store raw telemetry in diagnostic incidents"
         },
         "data_description": {
+          "store_raw_diagnostics": "Off by default. Stores bounded, checksum-valid telemetry snippets with incident metadata on this Home Assistant instance. May include VINs or other vehicle identifiers. Startup, control and authentication payloads are never stored. Turning this off removes previously stored snippets.",
           "engine_profile": "Select the engine identified by official equipment labels. Existing MQTT identities are preserved; Detroit references apply only to engine MID 128. Choose standard J1587 to remove the engine-specific interpretation.",
           "address": "Use the adapter's Bluetooth MAC, not the host or proxy MAC. Colon-separated, hyphen-separated or 12 hexadecimal digits are accepted.",
           "j1587_extended": "Select the adapter firmware format. Required for J1708 startup; firmware 3.23.0 uses Extended (3.19+).",
@@ -61,6 +65,7 @@
       "invalid_j1587_format": "Select a supported J1587 firmware format.",
       "invalid_j1708_startup": "Enable or disable J1708 startup.",
       "invalid_engine_profile": "Select a supported engine profile or standard J1587.",
+      "invalid_raw_diagnostics": "Enable or disable raw diagnostic telemetry storage.",
       "required_j1587_format": "Select the adapter firmware format before enabling J1708 startup.",
       "vehicle_id_in_use": "Another adapter already uses this vehicle MQTT identifier."
     },

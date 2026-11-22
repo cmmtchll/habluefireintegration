@@ -195,6 +195,32 @@ class ReceiveTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_recovery_offsets_and_discard_totals_track_the_original_stream(
+        self,
+    ):
+        decoder = RecoveringReceiveDecoder()
+        stream = HEARTBEAT + b"\x7f\x00\x00" + RPM_PACKET + HEARTBEAT
+        decoded = ()
+        events = []
+        offsets = []
+        for start in range(0, len(stream), 7):
+            decoded += decoder.feed(stream[start:start + 7])
+            offsets.extend(decoder.framing_error_offsets)
+            events.extend(decoder.recovery_events)
+        self.assertEqual(decoded, (b"\xff", RPM_BODY, b"\xff"))
+        self.assertEqual(offsets, [5])
+        self.assertEqual(events, [{
+            "resumed_at": 8, "confirmed_through": len(stream),
+            "discarded_bytes": 3,
+        }])
+        self.assertEqual(decoder.discarded_bytes, 3)
+        self.assertEqual(decoder.received_bytes, len(stream))
+        self.assertEqual(decoder.buffer_start_offset, len(stream))
+        decoder.reset()
+        self.assertEqual(decoder.received_bytes, 0)
+        self.assertEqual(decoder.discarded_bytes, 0)
+        self.assertEqual(decoder.recovery_events, ())
+
     def test_128_byte_chunks_preserve_all_packet_alignments(self):
         nested = b"\x2a" + HEARTBEAT * 51
         for alignment in range(128):

@@ -4,6 +4,7 @@ DOMAIN = "bluefire"
 CONF_VEHICLE_ID = "vehicle_id"
 CONF_J1587_EXTENDED = "j1587_extended"
 CONF_J1708_STARTUP = "j1708_startup"
+CONF_RAW_DIAGNOSTICS = "store_raw_diagnostics"
 CONF_ENGINE_PROFILE = "engine_profile"
 CONF_BLUETOOTH_ENABLED = "bluetooth_enabled"
 ENGINE_PROFILES = {

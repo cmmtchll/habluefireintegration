@@ -10,6 +10,7 @@ from .const import (
     CONF_ENGINE_PROFILE,
     CONF_J1587_EXTENDED,
     CONF_J1708_STARTUP,
+    CONF_RAW_DIAGNOSTICS,
     CONF_VEHICLE_ID,
     DEFAULT_VEHICLE_ID,
     DOMAIN,
@@ -159,6 +160,12 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors[CONF_ENGINE_PROFILE] = "invalid_engine_profile"
             else:
                 data[CONF_ENGINE_PROFILE] = value
+        if CONF_RAW_DIAGNOSTICS in user_input:
+            value = user_input[CONF_RAW_DIAGNOSTICS]
+            if type(value) is bool:
+                data[CONF_RAW_DIAGNOSTICS] = value
+            else:
+                errors[CONF_RAW_DIAGNOSTICS] = "invalid_raw_diagnostics"
         return data, errors
 
     def _show_settings(self, step_id, defaults, errors):
@@ -197,6 +204,10 @@ class BlueFireConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_ENGINE_PROFILE, default=defaults[CONF_ENGINE_PROFILE],
             )
         schema[profile] = vol.In(ENGINE_PROFILES)
+        schema[vol.Optional(
+            CONF_RAW_DIAGNOSTICS,
+            default=defaults.get(CONF_RAW_DIAGNOSTICS, False),
+        )] = bool
         return self.async_show_form(
             step_id=step_id,
             data_schema=vol.Schema(schema),
