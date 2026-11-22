@@ -41,7 +41,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class _ReceiverPaused(Exception):
-    """Signal a diagnostic capture to take exclusive BLE ownership."""
+    """Signal that the receiver must yield its BLE connection."""
 
 
 EZ_SERVICE = "65333333-a115-11e2-9e9a-0800200ca100"
@@ -124,6 +124,7 @@ class BlueFireReceiver:
         self._paused = False
         self._closed = False
         self._session_task: asyncio.Task | None = None
+        self._retry_task: asyncio.Task | None = None
         self._read_waiter: asyncio.Future[None] | None = None
         self._read_pid: int | None = None
         self._read_mid = 0
@@ -547,12 +548,12 @@ class BlueFireReceiver:
                     raise
                 paused_session = self._paused and not self._closed
                 end_reason = (
-                    "Diagnostic inspection requested" if paused_session
+                    "Receiver pause requested" if paused_session
                     else "Receiver stopped"
                 )
             except _ReceiverPaused:
                 paused_session = True
-                end_reason = "Diagnostic inspection requested"
+                end_reason = "Receiver pause requested"
             except (
                 BleakError, HomeAssistantError, OSError, TimeoutError
             ) as err:
@@ -602,8 +603,18 @@ class BlueFireReceiver:
                 self._phase = "retry_wait"
                 if self._connection_record is not None:
                     self._connection_record["retry_delay_s"] = delay
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, RECONNECT_MAX)
+                self._retry_task = asyncio.create_task(asyncio.sleep(delay))
+                try:
+                    await self._retry_task
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
+                    delay = RECONNECT_MIN
+                else:
+                    delay = min(delay * 2, RECONNECT_MAX)
+                finally:
+                    self._retry_task = None
 
     def stop(self) -> None:
         """Stop retries and interrupt an active BLE session."""
@@ -611,14 +622,18 @@ class BlueFireReceiver:
         self._resume_event.set()
         if self._session_task is not None:
             self._session_task.cancel()
+        if self._retry_task is not None:
+            self._retry_task.cancel()
 
     async def async_pause(self) -> None:
-        """Yield the BLE connection to a user-requested diagnostic capture."""
+        """Release BLE and suspend retries until explicitly resumed."""
         self._paused = True
         self._resume_event.clear()
         self._pause_event.set()
         if self._session_task is not None:
             self._session_task.cancel()
+        if self._retry_task is not None:
+            self._retry_task.cancel()
         try:
             async with asyncio.timeout(SESSION_CLOSE_TIMEOUT):
                 await self._session_closed.wait()
@@ -628,7 +643,7 @@ class BlueFireReceiver:
             ) from err
 
     def async_resume(self) -> None:
-        """Restart live reception after a diagnostic capture completes."""
+        """Restart live reception after a pause."""
         self._paused = False
         self._pause_event.clear()
         self._resume_event.set()
@@ -962,7 +977,7 @@ class BlueFireReceiver:
             error = sys.exception()
             paused = self._paused and not self._closed
             if paused:
-                reason = "Diagnostic inspection requested"
+                reason = "Receiver pause requested"
             elif self._closed:
                 reason = "Receiver stopped"
             elif error is not None:

@@ -44,6 +44,7 @@ class ConnectivitySensor(BinarySensorEntity):
     _attr_should_poll = True
 
     def __init__(self, entry, key, name, value):
+        self._health = entry.runtime_data.health
         self._value = value
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_name = name
@@ -52,3 +53,8 @@ class ConnectivitySensor(BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         return self._value()
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            self._health.add_listener(self.async_write_ha_state)
+        )

@@ -5,12 +5,14 @@ CONF_VEHICLE_ID = "vehicle_id"
 CONF_J1587_EXTENDED = "j1587_extended"
 CONF_J1708_STARTUP = "j1708_startup"
 CONF_ENGINE_PROFILE = "engine_profile"
+CONF_BLUETOOTH_ENABLED = "bluetooth_enabled"
 ENGINE_PROFILES = {
     "generic": "Standard J1587 (no selected engine)",
     "detroit_series_60_ddec_iv": "Detroit Diesel Series 60 / DDEC IV",
 }
 DEFAULT_VEHICLE_ID = "liberty_h3_45"
 STATUS_RECEIVER_ENABLED = "receiver_enabled"
+STATUS_RECEIVER_DISABLED = "receiver_disabled"
 TELEMETRY_TIMEOUT = 60
 J1708_POLL_INTERVAL = 60
 J1708_POLL_MAX_BACKOFF = 900

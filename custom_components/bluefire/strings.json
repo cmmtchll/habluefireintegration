@@ -70,7 +70,65 @@
       "reconfigure_successful": "Adapter settings updated."
     }
   },
+  "entity": {
+    "switch": {
+      "bluetooth_enabled": {
+        "name": "Bluetooth enabled"
+      }
+    },
+    "button": {
+      "reconnect_bluetooth": {
+        "name": "Reconnect Bluetooth"
+      },
+      "inspect_adapter": {
+        "name": "Inspect adapter"
+      },
+      "capture_notifications": {
+        "name": "Capture notifications"
+      },
+      "cleanup_preview": {
+        "name": "Preview MQTT cleanup"
+      },
+      "cleanup_mqtt": {
+        "name": "Clean up old MQTT entities"
+      },
+      "read_fuel_level": {
+        "name": "Read fuel level"
+      },
+      "read_diagnostic_codes": {
+        "name": "Read diagnostic codes"
+      },
+      "read_odometer": {
+        "name": "Read odometer"
+      },
+      "read_engine_hours": {
+        "name": "Read engine hours"
+      },
+      "read_total_fuel_used": {
+        "name": "Read total fuel used"
+      },
+      "read_software_identification": {
+        "name": "Read software identification"
+      },
+      "read_vehicle_identification": {
+        "name": "Read vehicle identification"
+      },
+      "read_component_identification": {
+        "name": "Read component identification"
+      }
+    }
+  },
   "services": {
+    "reconnect_bluetooth": {
+      "name": "Reconnect Bluetooth",
+      "description": "Release this adapter's BLE connection and start a fresh connection attempt, interrupting reconnect backoff. Bluetooth must be enabled. Does not reset the adapter, host radio or other devices.",
+      "fields": {
+        "entry_id": {
+          "name": "Config entry",
+          "description": "The loaded BlueFire adapter to reconnect."
+        }
+      }
+    },
     "cleanup_mqtt": {
       "name": "Clean up old MQTT entities",
       "description": "Preview owned MQTT entities not observed since this BlueFire reload. Turn off preview to withdraw their retained discovery and last-known states after broker confirmation. Let the vehicle report first; unseen does not mean invalid. Received entities and protocol diagnostics are preserved.",

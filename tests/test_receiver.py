@@ -924,6 +924,59 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             await self.receiver._async_receive_session()
         self.client.disconnect.assert_awaited_once()
 
+    async def test_disabled_receiver_waits_until_resumed(self):
+        await self.receiver.async_pause()
+        session_started = asyncio.Event()
+
+        async def session():
+            session_started.set()
+            await asyncio.Event().wait()
+
+        self.receiver._async_receive_session = AsyncMock(side_effect=session)
+        task = asyncio.create_task(self.receiver.async_run())
+        try:
+            await asyncio.sleep(0)
+            self.receiver._async_receive_session.assert_not_awaited()
+            self.receiver.async_resume()
+            await asyncio.wait_for(session_started.wait(), 1)
+            await self.receiver.async_pause()
+            self.assertFalse(self.receiver.connected)
+        finally:
+            self.receiver.stop()
+            await asyncio.wait_for(task, 1)
+
+    async def test_pause_and_resume_interrupt_retry_backoff(self):
+        sleeping = asyncio.Event()
+        session_started = asyncio.Event()
+
+        async def session():
+            if self.receiver._async_receive_session.await_count == 1:
+                raise self.bleak_error("unavailable")
+            session_started.set()
+            await asyncio.Event().wait()
+
+        async def sleep(delay):
+            sleeping.set()
+            await asyncio.Event().wait()
+
+        self.receiver._async_receive_session = AsyncMock(side_effect=session)
+        with patch.object(self.api.asyncio, "sleep", side_effect=sleep):
+            with self.assertLogs(
+                "custom_components.bluefire.receiver", level="WARNING",
+            ):
+                task = asyncio.create_task(self.receiver.async_run())
+                try:
+                    await asyncio.wait_for(sleeping.wait(), 1)
+                    await self.receiver.async_pause()
+                    self.receiver.async_resume()
+                    await asyncio.wait_for(session_started.wait(), 1)
+                    self.assertEqual(
+                        self.receiver._async_receive_session.await_count, 2,
+                    )
+                finally:
+                    self.receiver.stop()
+                    await asyncio.wait_for(task, 1)
+
     async def test_receiver_retries_failures_with_backoff(self):
         async def session():
             if self.receiver._async_receive_session.await_count == 1:
@@ -1958,7 +2011,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual(history[-1]["end_event"], "paused")
                 self.assertEqual(
-                    history[-1]["reason"], "Diagnostic inspection requested"
+                    history[-1]["reason"], "Receiver pause requested"
                 )
                 context = history[-1]["context"]
                 self.assertEqual(context["startup"]["stage"], "ready")

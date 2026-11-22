@@ -157,7 +157,13 @@ Ordinary unload/reload retains discovery but marks telemetry offline.
 
 ### Remove old entities without removing the adapter
 
-Use **Developer tools -> Actions -> BlueFire: Clean up old MQTT entities**
+On the native BlueFire device, press **Preview MQTT cleanup** and inspect the
+button's `result` attribute. Press **Clean up old MQTT entities** to perform
+cleanup; its `result` attribute reports the outcome. Neither requires Bluetooth
+to be enabled. The cleanup button deletes entities immediately, so preview
+first.
+
+Alternatively, use **Developer tools -> Actions -> BlueFire: Clean up old MQTT entities**
 (`bluefire.cleanup_mqtt`) with the adapter's config entry and **Preview only**
 enabled (the default). The response lists only owned measurement, status,
 fault, and identification definitions **not received since the current
