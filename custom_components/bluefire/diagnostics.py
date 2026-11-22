@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from .const import (
     CAPTURE_SECONDS,
     DOMAIN,
+    STATUS_RECEIVER_DISABLED,
     STATUS_RECEIVER_ENABLED,
 )
 
@@ -30,7 +31,11 @@ async def async_get_config_entry_diagnostics(hass, entry):
     result = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "integration_version": str(integration.version),
-        "protocol_status": STATUS_RECEIVER_ENABLED,
+        "protocol_status": (
+            STATUS_RECEIVER_ENABLED if runtime.bluetooth_enabled
+            else STATUS_RECEIVER_DISABLED
+        ),
+        "bluetooth_enabled": runtime.bluetooth_enabled,
         "entry": {
             "entry_id": entry.entry_id,
             "title": entry.title,
@@ -61,6 +66,10 @@ async def async_get_config_entry_diagnostics(hass, entry):
     }
     if not address:
         result["capture"] = {"status": "skipped", "reason": "No address"}
+    elif not runtime.bluetooth_enabled:
+        result["capture"] = {
+            "status": "skipped", "reason": "Bluetooth is disabled",
+        }
     elif runtime.inspecting:
         result["capture"] = {
             "status": "skipped",

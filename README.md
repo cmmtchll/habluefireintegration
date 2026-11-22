@@ -58,12 +58,37 @@ integration and broker, and **Bluetooth with a connectable scanner or proxy**.
 **[Full installation and configuration guide →](docs/getting-started.md)**
 
 `receiver_enabled` means the receiver is enabled, not that telemetry is flowing.
+`receiver_disabled` means the device's Bluetooth switch is off.
 The native BlueFire device has **Bluetooth connectivity**, **J1708 telemetry
 connectivity**, and **J1939 telemetry connectivity** diagnostic binary sensors.
 These distinguish an active BLE link from fresh vehicle data without opening
 the separate MQTT device.
 Measurement entities appear only after supported reports arrive; MQTT telemetry
 availability stays offline until valid data is received.
+
+### Device controls
+
+Open the native **BlueFire device** to use **Bluetooth enabled** and the action
+buttons. Turning the switch off disconnects only this adapter, stops its
+automatic reconnects and J1708 polling, and marks telemetry offline. The setting
+survives reloads and restarts; it does not disable Home Assistant's radio or
+passive advertisement tracking. Turning it on resumes connection attempts.
+**Reconnect Bluetooth** releases the current connection and starts a fresh
+attempt, including during retry backoff; it does not reset adapter firmware.
+Bluetooth actions and diagnostic captures are blocked while the switch is off.
+
+Buttons expose the eight named vehicle reads, **Inspect adapter**, **Capture
+notifications** (20 seconds), **Preview MQTT cleanup**, and **Clean up old MQTT
+entities**. Read buttons request all responding controllers and still require
+opt-in, ready J1708 startup. Captures update the diagnostic capture summary;
+inspection updates the GATT inventory available in downloaded diagnostics.
+Configurable PID/MID reads remain available as the `bluefire.read_parameter`
+action.
+
+**Cleanup deletes retained MQTT entities.** Let the vehicle report first, press
+the preview button, and inspect its `result` attribute before pressing cleanup.
+Both cleanup buttons expose their latest response in `result`. Unobserved does
+not mean invalid; see the [cleanup safeguards](docs/mqtt.md#remove-old-entities-without-removing-the-adapter).
 
 ## Documentation
 
