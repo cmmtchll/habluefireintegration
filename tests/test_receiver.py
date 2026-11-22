@@ -317,6 +317,14 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         timer.start()
         self.addCleanup(timer.stop)
 
+    async def receive_read_body(self, body):
+        self.receiver._notification_received(None, self.packet(body))
+        chunk = self.receiver._queue.get_nowait()
+        bodies = self.receiver._decoder.feed(chunk)
+        self.receiver._record_stream_errors(recovered=bool(bodies))
+        for received in bodies:
+            await self.receiver._async_process_body(received)
+
     async def test_targeted_manual_read_filters_and_restores_wildcard(self):
         self.configure_read()
         self.receiver.bridge = MqttBridge(
@@ -332,8 +340,8 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(self.receiver.async_read(pid, mid=128))
             await self.read_started.wait()
             if pid != 243:
-                await self.receiver._async_process_body(b"\x9a\x82" + body)
-            await self.receiver._async_process_body(b"\x9a\x80" + body)
+                await self.receive_read_body(b"\x9a\x82" + body)
+            await self.receive_read_body(b"\x9a\x80" + body)
             result = await task
             report, = result["reports"]
             self.assertEqual(report["mid"], 128)
@@ -365,7 +373,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 await self.receiver.async_read(96, mid=mid)
         task = asyncio.create_task(self.receiver.async_read(96, mid=128))
         await self.read_started.wait()
-        await self.receiver._async_process_body(
+        await self.receive_read_body(
             bytes.fromhex("9a 82 60 01 64"),
         )
         with self.assertRaisesRegex(self.home_assistant_error, "MID 128"):
@@ -388,7 +396,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
             "9a 80 60 01 78", "9a 83 60 01 ff",
             "9a 80 be 02 34 12",
         ):
-            await self.receiver._async_process_body(bytes.fromhex(body))
+            await self.receive_read_body(bytes.fromhex(body))
         result = await task
         self.assertEqual(result["pid"], 96)
         self.assertEqual(
@@ -403,14 +411,131 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.receiver._startup.async_read.assert_awaited_with(96, restore=True)
         self.assertIsNone(self.receiver._read_waiter)
 
+    async def test_128_byte_read_response_is_not_delayed_by_mqtt(self):
+        self.configure_read()
+        publishing = asyncio.Event()
+        release = asyncio.Event()
+
+        async def publish(_report):
+            publishing.set()
+            await release.wait()
+
+        self.bridge.async_process_j1587.side_effect = publish
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        notification = self.packet(bytes.fromhex("9a 80 be 02 11 00")) * 11
+        notification += self.packet(bytes.fromhex("9a 80 60 01 64"))
+        notification += self.packet(bytes.fromhex("9a 80 60 01 66"))
+        self.assertEqual(len(notification), 128)
+        self.receiver._notification_received(None, notification)
+
+        async def consume():
+            chunk = self.receiver._queue.get_nowait()
+            for body in self.receiver._decoder.feed(chunk):
+                await self.receiver._async_process_body(body)
+
+        consumer = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(publishing.wait(), 1)
+            result = await asyncio.wait_for(read, 1)
+            self.assertEqual(result["reports"][0]["signals"][0]["value"], 51)
+            self.assertFalse(consumer.done())
+            self.assertEqual(self.bridge.async_process_j1587.await_count, 1)
+            self.receiver._startup.async_read.assert_awaited_with(
+                96, restore=True,
+            )
+        finally:
+            release.set()
+            await asyncio.wait_for(consumer, 1)
+
+    async def test_report_queued_before_read_is_not_a_fresh_response(self):
+        self.configure_read()
+        body = bytes.fromhex("9a 80 60 01 64")
+        self.receiver._notification_received(None, self.packet(body))
+        chunk = self.receiver._queue.get_nowait()
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        for queued_body in self.receiver._decoder.feed(chunk):
+            await self.receiver._async_process_body(queued_body)
+        with self.assertRaisesRegex(self.home_assistant_error, "No J1708 PID"):
+            await read
+        self.bridge.async_process_j1587.assert_awaited_once()
+
+    async def test_read_recovers_truncated_report_after_128_byte_notification(
+        self,
+    ):
+        self.configure_read()
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        rpm = self.packet(bytes.fromhex("9a 80 be 02 11 00"))
+        damaged = self.packet(bytes.fromhex("9a 80 be 02 33 00"))
+        first = rpm * 12 + rpm[:8]
+        second = rpm[8:] + damaged[:6]
+        second += self.packet(bytes.fromhex("9a 80 60 01 64"))
+        second += self.packet(bytes.fromhex("9a 80 60 01 66"))
+        self.assertEqual(len(first), 128)
+        for notification in (first, second):
+            self.receiver._notification_received(None, notification)
+        result = await read
+        self.assertEqual(result["reports"][0]["signals"][0]["value"], 51)
+        self.bridge.async_process_j1587.assert_not_awaited()
+        self.assertTrue(self.receiver._receive_is_recent())
+        while not self.receiver._queue.empty():
+            chunk = self.receiver._queue.get_nowait()
+            bodies = self.receiver._decoder.feed(chunk)
+            self.receiver._record_stream_errors(recovered=bool(bodies))
+            for body in bodies:
+                await self.receiver._async_process_body(body)
+        self.assertEqual(self.bridge.async_process_j1587.await_count, 15)
+        self.assertFalse(any(
+            call.args[0].data == b"\x33\x00"
+            for call in self.bridge.async_process_j1587.await_args_list
+        ))
+        self.assertEqual(self.receiver.health.counters["framing_errors"], 1)
+        self.assertFalse(self.receiver._reconnect_event.is_set())
+
+    async def test_queue_overflow_cannot_supply_a_successful_read_response(
+        self,
+    ):
+        self.configure_read()
+        self.receiver._queue = asyncio.Queue(maxsize=1)
+        self.receiver._queue.put_nowait(b"pending")
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        with self.assertLogs(self.module_name, level="WARNING"):
+            self.receiver._notification_received(
+                None, self.packet(bytes.fromhex("9a 80 60 01 64")),
+            )
+        with self.assertRaisesRegex(self.home_assistant_error, "No J1708 PID"):
+            await read
+        self.assertTrue(self.receiver._overflow.is_set())
+        self.bridge.async_process_j1587.assert_not_awaited()
+
+    async def test_invalid_matching_read_report_is_logged_once_and_rejected(
+        self,
+    ):
+        self.configure_read()
+        read = asyncio.create_task(self.receiver.async_read(96))
+        await self.read_started.wait()
+        with self.assertLogs(self.module_name, level="WARNING") as logs:
+            with self.assertRaises(self.api.ProtocolError):
+                await self.receive_read_body(
+                    bytes.fromhex("9a 80 60 02 64 00"),
+                )
+        with self.assertRaisesRegex(self.home_assistant_error, "No J1708 PID"):
+            await read
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(self.receiver.health.counters["parse_errors"], 1)
+        self.bridge.async_process_j1587.assert_not_awaited()
+
     async def test_diagnostic_read_distinguishes_faults_and_empty_report(self):
         self.configure_read()
         task = asyncio.create_task(self.receiver.async_read(194))
         await self.read_started.wait()
-        await self.receiver._async_process_body(
+        await self.receive_read_body(
             bytes.fromhex("9a 80 c2 02 64 23")
         )
-        await self.receiver._async_process_body(
+        await self.receive_read_body(
             bytes.fromhex("9a 82 c2 00")
         )
         result = await task
@@ -442,7 +567,7 @@ class ReceiverTests(unittest.IsolatedAsyncioTestCase):
                 self.read_started.clear()
                 task = asyncio.create_task(self.receiver.async_read(pid))
                 await self.read_started.wait()
-                await self.receiver._async_process_body(
+                await self.receive_read_body(
                     bytes((154, 128, pid, 4)) + data
                 )
                 result = await task

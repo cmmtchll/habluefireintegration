@@ -131,6 +131,13 @@ packets with valid length headers and payload checksums** before resuming a
 damaged stream. It preserves intact packets across notification boundaries and
 buffers at most **528 bytes**.
 
+Notification size is not a packet boundary: 128-byte values can split a length
+header, body, or checksum. Both live decoding paths preserve these fragments and
+use the same bounded recovery. Read responses and probe acknowledgements are
+collected at notification arrival, independently of queued MQTT publication.
+Missing bytes cannot be reconstructed; only intact, validated reports survive
+recovery. Raw capture serialization preserves the complete notification value.
+
 Ten framing errors within ten seconds **without recovered packets** trigger
 reconnect. Recovering checksum-valid packets resets that error budget; all
 framing errors remain counted and logged. This avoids restarting a working

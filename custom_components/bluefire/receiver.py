@@ -30,6 +30,7 @@ from .protocol import (
     AdapterMessage,
     J1587Report,
     ObdReport,
+    PID_DATA,
     PgnReport,
     ProtocolError,
     RecoveringReceiveDecoder,
@@ -1045,9 +1046,41 @@ class BlueFireReceiver:
             self._last_valid_packet = monotonic()
         if self._startup is not None and self._startup.ready:
             for body in bodies:
+                self._collect_read_report(body)
                 if body[0] == 7:
                     # Resolve probes even while MQTT publication awaits IO.
                     self._startup.receive(AdapterMessage(7, body[1:]))
+
+    def _decode_j1587_report(self, message: J1587Report) -> dict:
+        return decode_report(
+            message, profile=getattr(
+                self.bridge, "diagnostic_profile", None,
+            ) if message.mid == 128 else None,
+        )
+
+    def _collect_read_report(self, body: bytes) -> None:
+        if (
+            body[0] != PID_DATA or self._read_waiter is None
+            or self._read_waiter.done() or self._overflow.is_set()
+        ):
+            return
+        try:
+            message = parse_message(
+                body, j1587_extended=self.j1587_extended,
+            )
+            if (
+                not isinstance(message, J1587Report)
+                or message.pid != self._read_pid
+                or self._read_mid not in (0, message.mid)
+            ):
+                return
+            decoded = self._decode_j1587_report(message)
+        except ValueError:
+            # The queued consumer logs/counts invalid reports once.
+            return
+        self._read_reports[message.mid] = {
+            "data": message.data.hex(), **decoded,
+        }
 
     async def _async_process_body(self, body: bytes) -> None:
         try:
@@ -1055,11 +1088,7 @@ class BlueFireReceiver:
                 body, j1587_extended=self.j1587_extended
             )
             if isinstance(message, J1587Report):
-                decoded = decode_report(
-                    message, profile=getattr(
-                        self.bridge, "diagnostic_profile", None,
-                    ) if message.mid == 128 else None,
-                )
+                self._decode_j1587_report(message)
         except ValueError as err:
             self._health_error("parse_errors", str(err))
             _LOGGER.warning("BlueFire report rejected: %s", err)
@@ -1093,15 +1122,6 @@ class BlueFireReceiver:
                 self.health.count("j1587_reports")
                 self.health.data_seen()
             await self.bridge.async_process_j1587(message)
-            if (
-                self._read_waiter is not None
-                and not self._read_waiter.done()
-                and message.pid == self._read_pid
-                and (self._read_mid == 0 or message.mid == self._read_mid)
-            ):
-                self._read_reports[message.mid] = {
-                    "data": message.data.hex(), **decoded,
-                }
         elif isinstance(message, ObdReport):
             self._session_healthy = True
             if self.health is not None:
