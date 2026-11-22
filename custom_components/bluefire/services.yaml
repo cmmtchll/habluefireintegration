@@ -1,3 +1,10 @@
+reconnect_bluetooth:
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: bluefire
 cleanup_mqtt:
   fields:
     entry_id:

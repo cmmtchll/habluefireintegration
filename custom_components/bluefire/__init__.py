@@ -13,6 +13,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from .const import (
+    CONF_BLUETOOTH_ENABLED,
     CONF_ENGINE_PROFILE,
     CONF_J1587_EXTENDED,
     CONF_J1708_STARTUP,
@@ -39,6 +40,7 @@ class BlueFireRuntime:
     inspecting: bool = False
     receiver: Any = None
     health: Health = field(default_factory=Health)
+    bluetooth_enabled: bool = True
 
 
 def CONFIG_SCHEMA(config: dict) -> dict:
@@ -65,7 +67,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         CAPTURE_SECONDS, MAX_CAPTURE_SECONDS, MIN_CAPTURE_SECONDS,
     )
 
-    def loaded_runtime(call):
+    def loaded_runtime(call, *, requires_bluetooth=True):
         entry = hass.config_entries.async_get_entry(call.data["entry_id"])
         if (
             entry is None
@@ -78,6 +80,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         if entry.runtime_data.inspecting:
             raise ServiceValidationError(
                 "Another BlueFire action is already running"
+            )
+        if requires_bluetooth and not entry.runtime_data.bluetooth_enabled:
+            raise ServiceValidationError(
+                "Enable Bluetooth on the BlueFire device first"
             )
         return entry, entry.runtime_data
 
@@ -119,6 +125,31 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 runtime.receiver.async_resume()
             runtime.inspecting = False
 
+    async def reconnect_bluetooth(call):
+        _, runtime = loaded_runtime(call)
+        if runtime.receiver is None:
+            raise ServiceValidationError("BlueFire receiver is not running")
+        runtime.inspecting = True
+        paused = False
+        try:
+            try:
+                await runtime.receiver.async_pause()
+            except HomeAssistantError as err:
+                runtime.health.error("connection_errors", str(err))
+                raise
+            paused = True
+            try:
+                await runtime.bridge.async_disconnected()
+            except HomeAssistantError as err:
+                runtime.health.error("mqtt_errors", str(err))
+                raise
+            return {"status": "reconnecting"}
+        finally:
+            if paused:
+                runtime.receiver.async_resume()
+            runtime.inspecting = False
+            runtime.health.notify()
+
     async def read_vehicle(call):
         _, runtime = loaded_runtime(call)
         if runtime.receiver is None:
@@ -145,7 +176,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
         from .mqtt import async_confirm_removal
 
-        _, runtime = loaded_runtime(call)
+        _, runtime = loaded_runtime(call, requires_bluetooth=False)
         dry_run = call.data.get("dry_run", True)
         if not dry_run and not mqtt.is_connected(hass):
             raise ServiceValidationError("MQTT must be connected for cleanup")
@@ -163,6 +194,12 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             ) from err
         finally:
             runtime.inspecting = False
+
+    hass.services.async_register(
+        DOMAIN, "reconnect_bluetooth", reconnect_bluetooth,
+        schema=vol.Schema({vol.Required("entry_id"): cv.string}),
+        supports_response=SupportsResponse.ONLY,
+    )
 
     hass.services.async_register(
         DOMAIN, "cleanup_mqtt", cleanup_mqtt,
@@ -301,8 +338,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         j1708_startup=entry.data.get(CONF_J1708_STARTUP, False),
     )
     entry.runtime_data = BlueFireRuntime(
-        bridge, receiver=receiver, health=health
+        bridge, receiver=receiver, health=health,
+        bluetooth_enabled=entry.options.get(CONF_BLUETOOTH_ENABLED, True),
     )
+    if not entry.runtime_data.bluetooth_enabled:
+        await receiver.async_pause()
     entry.runtime_data.services = receiver.services
     entry.async_on_unload(receiver.stop)
     entry.async_create_background_task(
@@ -379,7 +419,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if mqtt.is_connected(hass):
         await mqtt_ready()
     await hass.config_entries.async_forward_entry_setups(
-        entry, [Platform.SENSOR, Platform.BINARY_SENSOR]
+        entry, [
+            Platform.SENSOR, Platform.BINARY_SENSOR,
+            Platform.SWITCH, Platform.BUTTON,
+        ]
     )
     return True
 
@@ -390,7 +433,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.const import Platform
 
     if not await hass.config_entries.async_unload_platforms(
-        entry, [Platform.SENSOR, Platform.BINARY_SENSOR]
+        entry, [
+            Platform.SENSOR, Platform.BINARY_SENSOR,
+            Platform.SWITCH, Platform.BUTTON,
+        ]
     ):
         return False
     from homeassistant.exceptions import HomeAssistantError

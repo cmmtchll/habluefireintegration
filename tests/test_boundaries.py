@@ -53,7 +53,8 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
 
         self.service_registration = Mock(side_effect=register_service)
         self.runtime = SimpleNamespace(
-            inspecting=False, services=[], health=Health()
+            inspecting=False, services=[], health=Health(),
+            bluetooth_enabled=True,
         )
         self.receiver = SimpleNamespace(
             async_pause=AsyncMock(), async_resume=Mock(),
@@ -61,6 +62,9 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
             startup_diagnostics=Mock(return_value={"stage": "disabled"}),
         )
         self.runtime.receiver = self.receiver
+        self.runtime.bridge = SimpleNamespace(
+            async_disconnected=AsyncMock(),
+        )
         self.entry = SimpleNamespace(
             domain="bluefire",
             state="loaded",
@@ -314,6 +318,51 @@ class ServiceSetupTests(unittest.IsolatedAsyncioTestCase):
         self.receiver.async_resume.assert_called_once()
         self.assertFalse(self.runtime.inspecting)
 
+    async def test_disabled_bluetooth_blocks_all_ble_actions(self):
+        from custom_components.bluefire.const import J1708_READ_ACTIONS
+
+        self.runtime.bluetooth_enabled = False
+        for service in (
+            *J1708_READ_ACTIONS, "read_parameter", "inspect_adapter",
+            "capture_notifications", "reconnect_bluetooth",
+        ):
+            with self.subTest(service=service):
+                with self.assertRaisesRegex(BoundaryError, "Enable Bluetooth"):
+                    await self.services[service](SimpleNamespace(
+                        service=service, data={"entry_id": "entry"},
+                    ))
+        self.inspected.assert_not_awaited()
+        self.captured.assert_not_awaited()
+        self.receiver.async_read.assert_not_awaited()
+        self.receiver.async_pause.assert_not_awaited()
+
+    async def test_reconnect_releases_link_and_resumes_after_mqtt_failure(
+        self,
+    ):
+        action = self.services["reconnect_bluetooth"]
+        call = SimpleNamespace(data={"entry_id": "entry"})
+        self.assertEqual(await action(call), {"status": "reconnecting"})
+        self.receiver.async_pause.assert_awaited_once()
+        self.runtime.bridge.async_disconnected.assert_awaited_once()
+        self.receiver.async_resume.assert_called_once()
+        self.assertFalse(self.runtime.inspecting)
+        self.runtime.bridge.async_disconnected.side_effect = (
+            ConnectionFailure("MQTT offline")
+        )
+        with self.assertRaisesRegex(ConnectionFailure, "MQTT offline"):
+            await action(call)
+        self.assertEqual(self.receiver.async_resume.call_count, 2)
+        self.assertFalse(self.runtime.inspecting)
+        self.assertEqual(self.runtime.health.counters["mqtt_errors"], 1)
+        self.receiver.async_pause.side_effect = ConnectionFailure("busy")
+        with self.assertRaisesRegex(ConnectionFailure, "busy"):
+            await action(call)
+        self.assertEqual(self.receiver.async_resume.call_count, 2)
+        self.assertFalse(self.runtime.inspecting)
+        self.runtime.receiver = None
+        with self.assertRaisesRegex(BoundaryError, "not running"):
+            await action(call)
+
     async def test_inspection_refreshes_receiver_gatt_inventory(self):
         self.runtime.services = [{"uuid": "cached-service"}]
         result = await self.inspect(
@@ -509,6 +558,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 "homeassistant.const",
                 Platform=SimpleNamespace(
                     SENSOR="sensor", BINARY_SENSOR="binary_sensor",
+                    SWITCH="switch", BUTTON="button",
                 ),
                 EVENT_HOMEASSISTANT_STOP="homeassistant_stop",
             ),
@@ -572,6 +622,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.entry = SimpleNamespace(
             entry_id="test-entry",
             title="Coach adapter",
+            options={},
             data={
                 "vehicle_id": "coach",
                 "address": "AA:BB:CC:DD:EE:01",
@@ -606,6 +657,10 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.receiver_tasks, ["BlueFire BLE receiver"])
         entries = self.hass.config_entries
         entries.async_forward_entry_setups.assert_awaited_once()
+        self.assertEqual(
+            entries.async_forward_entry_setups.call_args.args[1],
+            ["sensor", "binary_sensor", "switch", "button"],
+        )
         self.assertEqual(self.mqtt.async_publish.await_count, 6)
         self.mqtt.async_publish.assert_any_await(
             self.hass, "vehicle/coach/j1939/availability", "offline",
@@ -653,6 +708,27 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(asyncio.CancelledError):
                     await task
             self.assertTrue(stopped.is_set())
+
+    async def test_setup_restores_disabled_bluetooth_and_skips_capture(self):
+        self.entry.options = {"bluetooth_enabled": False}
+        self.entry.unique_id = "AA:BB:CC:DD:EE:01"
+        await async_setup_entry(self.hass, self.entry)
+        runtime = self.entry.runtime_data
+        self.assertFalse(runtime.bluetooth_enabled)
+        runtime.receiver.async_pause.assert_awaited_once()
+        runtime.receiver.async_resume.assert_not_called()
+        self.assertEqual(self.receiver_tasks, ["BlueFire BLE receiver"])
+        api = importlib.import_module("custom_components.bluefire.diagnostics")
+        result = await api.async_get_config_entry_diagnostics(
+            self.hass, self.entry,
+        )
+        self.assertFalse(result["bluetooth_enabled"])
+        self.assertEqual(result["protocol_status"], "receiver_disabled")
+        self.assertEqual(result["capture"], {
+            "status": "skipped", "reason": "Bluetooth is disabled",
+        })
+        runtime.receiver.async_capture.assert_not_awaited()
+        runtime.receiver.async_resume.assert_not_called()
 
     async def test_setup_passes_explicit_j1708_startup_to_receiver(self):
         self.entry.data.update(j1708_startup=True, j1587_extended=True)

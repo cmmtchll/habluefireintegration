@@ -162,7 +162,9 @@ resynchronization.
 
 ## Inspect the adapter's GATT inventory
 
-Stop other apps using the adapter. In **Developer tools → Actions**, run
+Stop other apps using the adapter and enable its **Bluetooth enabled** switch.
+Press **Inspect adapter** on the native BlueFire device, or in **Developer tools
+→ Actions**, run
 `bluefire.inspect_adapter` and select the BlueFire config entry.
 
 This exclusively owns BLE: it pauses/releases the live session, connects,
@@ -174,7 +176,9 @@ a matching name alone does not establish compatibility.
 
 ## Take a standalone notification capture
 
-Run `bluefire.capture_notifications` with a **5–60 second** `duration`.
+Press **Capture notifications** on the native BlueFire device for a 20-second
+capture, or run `bluefire.capture_notifications` with a **5–60 second**
+`duration`. Bluetooth must be enabled.
 Unlike a diagnostics download, this action pauses the receiver and opens a
 separate passive connection, subscribing to every notify/indicate characteristic.
 The response adds subscription failures, MTU, connection time, GATT inventory,

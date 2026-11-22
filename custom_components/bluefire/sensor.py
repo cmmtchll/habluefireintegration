@@ -16,7 +16,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 
-from .const import DOMAIN, STATUS_RECEIVER_ENABLED
+from .const import DOMAIN, STATUS_RECEIVER_DISABLED, STATUS_RECEIVER_ENABLED
 from .health import Health
 from .telemetry import J1587MqttBridge
 
@@ -84,13 +84,25 @@ class ProtocolStatusSensor(SensorEntity):
     _attr_name = "Protocol status"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_options = [STATUS_RECEIVER_ENABLED]
-    _attr_native_value = STATUS_RECEIVER_ENABLED
+    _attr_options = [STATUS_RECEIVER_ENABLED, STATUS_RECEIVER_DISABLED]
     _attr_should_poll = False
 
     def __init__(self, entry):
+        self._runtime = entry.runtime_data
         self._attr_unique_id = f"{entry.entry_id}_protocol_status"
         self._attr_device_info = _device_info(entry)
+
+    @property
+    def native_value(self):
+        return (
+            STATUS_RECEIVER_ENABLED if self._runtime.bluetooth_enabled
+            else STATUS_RECEIVER_DISABLED
+        )
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            self._runtime.health.add_listener(self.async_write_ha_state)
+        )
 
 
 def _device_info(entry):

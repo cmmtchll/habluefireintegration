@@ -1,5 +1,6 @@
 """Verify diagnostic entities and stable identity across MAC corrections."""
 
+import asyncio
 from datetime import datetime, timezone
 import importlib
 import sys
@@ -47,6 +48,19 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 }),
             ),
+            "homeassistant.components.switch": module(
+                "homeassistant.components.switch",
+                SwitchEntity=type("SwitchEntity", (), {}),
+            ),
+            "homeassistant.components.button": module(
+                "homeassistant.components.button",
+                ButtonEntity=type("ButtonEntity", (), {}),
+            ),
+            "homeassistant.exceptions": module(
+                "homeassistant.exceptions",
+                HomeAssistantError=RuntimeError,
+                ServiceValidationError=ValueError,
+            ),
             "homeassistant.helpers": module(
                 "homeassistant.helpers",
                 entity_registry=SimpleNamespace(
@@ -65,7 +79,9 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
             "homeassistant.helpers.entity": module(
                 "homeassistant.helpers.entity",
                 DeviceInfo=dict,
-                EntityCategory=SimpleNamespace(DIAGNOSTIC="diagnostic"),
+                EntityCategory=SimpleNamespace(
+                    DIAGNOSTIC="diagnostic", CONFIG="config",
+                ),
             ),
         })
         self.modules.start()
@@ -78,6 +94,11 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         sys.modules.pop(binary_module, None)
         self.addCleanup(sys.modules.pop, binary_module, None)
         self.binary_api = importlib.import_module(binary_module)
+        for name in ("switch", "button"):
+            module_name = f"custom_components.bluefire.{name}"
+            sys.modules.pop(module_name, None)
+            self.addCleanup(sys.modules.pop, module_name, None)
+            setattr(self, f"{name}_api", importlib.import_module(module_name))
         from custom_components.bluefire.health import Health
 
         self.health = Health(
@@ -90,9 +111,14 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
             entry_id="stable-entry-id",
             unique_id="AA:BB:CC:DD:EE:01",
             title="Coach adapter",
+            options={"unrelated_option": True},
             runtime_data=SimpleNamespace(
                 health=self.health, bridge=self.bridge,
-                receiver=SimpleNamespace(connected=False),
+                receiver=SimpleNamespace(
+                    connected=False, async_pause=AsyncMock(),
+                    async_resume=Mock(),
+                ),
+                bluetooth_enabled=True, inspecting=False,
             ),
             async_on_unload=self.unloaders.append,
         )
@@ -104,6 +130,183 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
             entity._attr_unique_id.removeprefix("stable-entry-id_"): entity
             for entity in added.call_args.args[0]
         }
+
+    async def controls(self):
+        self.hass = SimpleNamespace(
+            config_entries=SimpleNamespace(
+                async_update_entry=Mock(
+                    side_effect=lambda entry, options: setattr(
+                        entry, "options", options,
+                    ),
+                ),
+            ),
+            services=SimpleNamespace(
+                async_call=AsyncMock(return_value={"count": 2}),
+            ),
+        )
+        switches, buttons = Mock(), Mock()
+        await self.switch_api.async_setup_entry(
+            self.hass, self.entry, switches,
+        )
+        await self.button_api.async_setup_entry(
+            self.hass, self.entry, buttons,
+        )
+        switch, = switches.call_args.args[0]
+        actions = {
+            entity._attr_translation_key: entity
+            for entity in buttons.call_args.args[0]
+        }
+        for entity in (switch, *actions.values()):
+            entity.hass = self.hass
+            entity.removers = []
+            entity.async_on_remove = entity.removers.append
+            entity.async_write_ha_state = Mock()
+            await entity.async_added_to_hass()
+        return switch, actions
+
+    async def test_device_controls_share_stable_identity_and_translations(
+        self,
+    ):
+        import json
+        from pathlib import Path
+
+        switch, buttons = await self.controls()
+        folder = Path(__file__).resolve().parents[1] / (
+            "custom_components"
+        ) / "bluefire"
+        strings = json.loads((folder / "strings.json").read_text("utf-8"))
+        english = json.loads(
+            (folder / "translations" / "en.json").read_text("utf-8")
+        )
+        self.assertEqual(strings["entity"], english["entity"])
+        self.assertEqual(switch._attr_entity_category, "config")
+        self.assertIn(switch._attr_translation_key,
+                      strings["entity"]["switch"])
+        self.assertEqual(set(buttons), {
+            "read_fuel_level", "read_diagnostic_codes", "read_odometer",
+            "read_engine_hours", "read_total_fuel_used",
+            "read_software_identification", "read_vehicle_identification",
+            "read_component_identification", "inspect_adapter",
+            "capture_notifications", "reconnect_bluetooth",
+            "cleanup_preview", "cleanup_mqtt",
+        })
+        for key, button in buttons.items():
+            self.assertIn(key, strings["entity"]["button"])
+            self.assertEqual(button._attr_entity_category, "diagnostic")
+        self.entry.unique_id = "AA:BB:CC:DD:EE:02"
+        for entity in (switch, *buttons.values()):
+            self.assertEqual(
+                entity._attr_device_info["identifiers"],
+                {("bluefire", self.entry.entry_id)},
+            )
+            self.assertTrue(entity._attr_unique_id.startswith(
+                f"{self.entry.entry_id}_"
+            ))
+            entity.async_write_ha_state.reset_mock()
+        self.health.notify()
+        for entity in (switch, *buttons.values()):
+            entity.async_write_ha_state.assert_called_once()
+            entity.removers[0]()
+            entity.async_write_ha_state.reset_mock()
+        self.health.notify()
+        for entity in (switch, *buttons.values()):
+            entity.async_write_ha_state.assert_not_called()
+
+    async def test_switch_disconnects_persists_and_resumes_without_reload(
+        self,
+    ):
+        switch, buttons = await self.controls()
+        sensors = await self.sensors()
+        status = sensors["protocol_status"]
+        status.removers, status.writes = [], []
+        await status.async_added_to_hass()
+        await self.bridge.async_process_frame(
+            Frame((6 << 26) | (61444 << 8), bytes(8))
+        )
+        self.assertTrue(self.bridge.telemetry_connected)
+        await switch.async_turn_off()
+        self.assertFalse(switch.is_on)
+        self.assertFalse(self.bridge.telemetry_connected)
+        self.assertEqual(status.native_value, "receiver_disabled")
+        self.assertEqual(status.writes[-1], "receiver_disabled")
+        self.assertEqual(self.entry.options, {
+            "unrelated_option": True, "bluetooth_enabled": False,
+        })
+        receiver = self.entry.runtime_data.receiver
+        receiver.async_pause.assert_awaited_once()
+        receiver.async_resume.assert_not_called()
+        for key, button in buttons.items():
+            self.assertEqual(button.available, key.startswith("cleanup"))
+        await switch.async_turn_off()
+        receiver.async_pause.assert_awaited_once()
+        await switch.async_turn_on()
+        self.assertTrue(switch.is_on)
+        self.assertEqual(status.native_value, "receiver_enabled")
+        self.assertTrue(self.entry.options["bluetooth_enabled"])
+        receiver.async_resume.assert_called_once()
+        self.assertTrue(all(button.available for button in buttons.values()))
+        self.assertFalse(self.entry.runtime_data.inspecting)
+        status.removers[0]()
+
+    async def test_switch_rejects_busy_and_recovers_failed_pause(self):
+        switch, _ = await self.controls()
+        runtime = self.entry.runtime_data
+        runtime.inspecting = True
+        with self.assertRaisesRegex(ValueError, "already running"):
+            await switch.async_turn_off()
+        runtime.inspecting = False
+        runtime.receiver.async_pause.side_effect = RuntimeError("close failed")
+        with self.assertRaisesRegex(RuntimeError, "close failed"):
+            await switch.async_turn_off()
+        self.assertTrue(switch.is_on)
+        self.assertNotIn("bluetooth_enabled", self.entry.options)
+        runtime.receiver.async_resume.assert_called_once()
+        self.assertFalse(runtime.inspecting)
+        self.assertEqual(self.health.counters["connection_errors"], 1)
+        runtime.receiver.async_pause.side_effect = asyncio.CancelledError
+        with self.assertRaises(asyncio.CancelledError):
+            await switch.async_turn_off()
+        self.assertTrue(switch.is_on)
+        self.assertFalse(runtime.inspecting)
+        self.assertNotIn("bluetooth_enabled", self.entry.options)
+        self.assertEqual(runtime.receiver.async_resume.call_count, 2)
+        runtime.receiver.async_pause.side_effect = None
+        self.publish.side_effect = RuntimeError("MQTT offline")
+        with self.assertRaisesRegex(RuntimeError, "MQTT offline"):
+            await switch.async_turn_off()
+        self.assertFalse(switch.is_on)
+        self.assertFalse(self.entry.options["bluetooth_enabled"])
+        self.assertFalse(runtime.inspecting)
+        self.assertEqual(self.health.counters["mqtt_errors"], 1)
+
+    async def test_buttons_delegate_device_actions_and_surface_cleanup_result(
+        self,
+    ):
+        _, buttons = await self.controls()
+        for key, button in buttons.items():
+            await button.async_press()
+            data = {"entry_id": self.entry.entry_id}
+            service = key
+            if key.startswith("cleanup"):
+                data["dry_run"] = key == "cleanup_preview"
+                service = "cleanup_mqtt"
+                self.assertEqual(
+                    button.extra_state_attributes, {"result": {"count": 2}},
+                )
+            else:
+                self.assertIsNone(button.extra_state_attributes)
+            self.hass.services.async_call.assert_awaited_with(
+                "bluefire", service, data,
+                blocking=True, return_response=True,
+            )
+        self.hass.services.async_call.side_effect = RuntimeError("busy")
+        for key in ("cleanup_preview", "read_fuel_level"):
+            with self.assertRaisesRegex(RuntimeError, "busy"):
+                await buttons[key].async_press()
+        self.assertEqual(
+            buttons["cleanup_preview"].extra_state_attributes,
+            {"result": None},
+        )
 
     async def test_health_sensors_are_diagnostic_and_stable(self):
         sensors = await self.sensors()
@@ -168,6 +371,17 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ble.is_on)
         self.assertFalse(j1708.is_on)
         self.assertFalse(j1939.is_on)
+        for sensor in (ble, j1708, j1939):
+            removers = []
+            sensor.async_on_remove = removers.append
+            sensor.async_write_ha_state = Mock()
+            await sensor.async_added_to_hass()
+            self.health.notify()
+            sensor.async_write_ha_state.assert_called_once()
+            removers[0]()
+            sensor.async_write_ha_state.reset_mock()
+            self.health.notify()
+            sensor.async_write_ha_state.assert_not_called()
 
     async def test_health_sensor_values_and_attributes(self):
         sensors = await self.sensors()
@@ -249,7 +463,7 @@ class SensorTests(unittest.IsolatedAsyncioTestCase):
         self.entry.unique_id = "AA:BB:CC:DD:EE:02"
         other = self.api.ProtocolStatusSensor(self.entry)
         self.assertEqual(other._attr_unique_id, sensor._attr_unique_id)
-        self.assertEqual(other._attr_native_value, "receiver_enabled")
+        self.assertEqual(other.native_value, "receiver_enabled")
 
     async def test_legacy_mac_identity_is_migrated_in_place(self):
         self.entities = [
