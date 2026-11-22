@@ -40,7 +40,7 @@ extra BLE commands. Startup, polling, probes, and normal publishing continue.
 | MQTT / bridge | Connection/discovery settings, durable ownership record, online state, frame age, known signals, and topics for both protocols |
 | Bluetooth | Scanner/connectable counts, visibility, last advertisement, name, RSSI, TX power, source scanner/proxy, service UUIDs, manufacturer/service data |
 | `health_before_capture` / `health` | Receive/error counters, RSSI history, recent errors, and capture summary |
-| `startup_before_capture` | Stage, firmware, expected command, initial J1708 availability, subscriptions, session error, and keepalive counters |
+| `startup_before_capture` / `startup` | Startup state before/after capture: stage, firmware, expected command, initial J1708 availability, subscriptions, session error, and keepalive counters |
 | `receiver_before_capture` / `receiver` | Live state, retry delay, notification time, recent events, and connection history |
 | Capture and analysis | Notification bytes, framing/parse errors, report tallies, sample decoded records, rates, gaps, and length histogram |
 
@@ -48,6 +48,10 @@ No subscribed session means the raw capture is `skipped`; it does not open a
 new connection. If another inspection/capture owns BLE, the file still includes
 other state and explains the skip. A capture ends early on session disconnect
 (`connection_lost`) rather than combining fragments from different connections.
+`generated_at` and `completed_at` bound the whole download. Live captures also
+include `started_at`, `stopped_at`, and `completed_at`, separating observation
+from analysis. The receiver records `capture_started` / `capture_stopped` events
+so a later download can correlate a subsequent disconnect with collection.
 
 Notifications include offset time, characteristic UUID/handle, length, and hex
 payload. The capture is bounded to **5,000 notifications**, with
@@ -73,6 +77,20 @@ deadline; timeouts are explicit and use normal reconnect backoff.
 the current one. Each record contains attempt/start/connected/ready/end times,
 disconnect reason, and scheduled retry delay.
 
+The current snapshot also exposes the session `phase`, the BLE client's
+`client_connected` flag, and the last ten `gatt_operations`. Each operation
+records its characteristic, command/length when writing, queued/start/completion
+times, status, elapsed time (including lock waits), and up to three exception
+causes with messages capped at 512 characters. Write payloads are never retained.
+An operation with no `started_at` never reached BLE I/O.
+
+Each attempt retains `disconnect_callbacks` with exact UTC times and flags
+distinguishing establishment, live link loss, and intentional cleanup.
+Callbacks do not themselves explain the controller's disconnect reason.
+The pre-cleanup context retains the original exception chain and operation
+history; `cleanup_operations` separately records cancellation and unsubscribe/
+disconnect failures instead of replacing the original failure.
+
 At disconnect it freezes startup/keepalive state, last write command/time
 **without the write payload**, per-attempt traffic counters, last data and
 notification times, Bluetooth advertisement/RSSI/source, queue depth/overflow,
@@ -83,6 +101,27 @@ It also retains the last **10 receive notifications**, capped at **512 bytes
 each** with truncation flags. Startup/authentication notifications are excluded;
 telemetry can still contain vehicle data. History survives automatic reconnects,
 but resets on entry unload/reload or HA restart and is not written to disk.
+
+### Multiple Bluetooth receivers
+
+HA supports a local adapter and an ESPHome proxy together and chooses an
+available connection path automatically. Two scanners seeing the same device
+does not itself establish two active BlueFire sessions. An unstable path or
+unavailable proxy connection slots can still affect connection attempts.
+
+Each successful attempt caches `connection_path.source` and `backend` from the
+connected client, so later history can distinguish local/proxy sessions.
+The source is a scanner identifier, not necessarily a friendly device name.
+HA currently provides the connected scanner through an internal client field;
+if that field is unavailable, `source_status` is explicitly `unavailable`.
+The integration never guesses from advertisements or pins connection routing.
+The latest advertisement source/RSSI may differ from the active connection.
+
+For isolation, test the Pi adapter alone, then the proxy alone, keeping other
+apps disconnected from BlueFire. Compare the connection-path history and
+GATT errors, not only the latest advertised signal strength.
+See [HA Bluetooth routing](https://www.home-assistant.io/connectivity/bluetooth/)
+and [ESPHome proxy connection limits](https://esphome.io/components/bluetooth_proxy/).
 
 ### Stream recovery and liveness
 

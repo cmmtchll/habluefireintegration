@@ -1200,11 +1200,17 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             "status": "completed", "mode": "live",
             "received_notifications": 4,
         }
+        receiver.startup_diagnostics.side_effect = [
+            {"stage": "subscribing"}, {"stage": "ready"},
+        ]
         result = await api.async_get_config_entry_diagnostics(
             self.hass, self.entry
         )
         self.assertEqual(result["capture"]["mode"], "live")
-        self.assertEqual(result["startup_before_capture"]["stage"], "disabled")
+        self.assertEqual(result["startup_before_capture"]["stage"],
+                         "subscribing")
+        self.assertEqual(result["startup"]["stage"], "ready")
+        self.assertLessEqual(result["generated_at"], result["completed_at"])
         self.assertEqual(result["receiver_before_capture"]["events"], [])
         self.assertEqual(result["receiver"]["events"], [])
         receiver.async_capture.assert_awaited_once_with(api.CAPTURE_SECONDS)
